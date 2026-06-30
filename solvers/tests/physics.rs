@@ -42,8 +42,16 @@ fn direct_sum_force_matches_newton() {
     let mut acc = vec![DVec3::ZERO; 2];
     solver.accelerations(&s, &mut acc);
     // |a| = G m / r^2 = 1/4; body0 pulled toward +x, body1 toward -x.
-    assert!((acc[0] - DVec3::new(0.25, 0.0, 0.0)).length() < 1e-9, "acc0 = {:?}", acc[0]);
-    assert!((acc[1] - DVec3::new(-0.25, 0.0, 0.0)).length() < 1e-9, "acc1 = {:?}", acc[1]);
+    assert!(
+        (acc[0] - DVec3::new(0.25, 0.0, 0.0)).length() < 1e-9,
+        "acc0 = {:?}",
+        acc[0]
+    );
+    assert!(
+        (acc[1] - DVec3::new(-0.25, 0.0, 0.0)).length() < 1e-9,
+        "acc1 = {:?}",
+        acc[1]
+    );
 }
 
 /// Equal-mass circular binary about the origin: each mass at radius d/2 with
@@ -80,9 +88,15 @@ fn circular_binary_conserves_energy_and_closes_orbit() {
     // Orbit closes after exactly one period.
     let c0 = (s.pos[0] - s0.pos[0]).length();
     let c1 = (s.pos[1] - s0.pos[1]).length();
-    assert!(c0 < 0.05 * d && c1 < 0.05 * d, "orbit did not close: {c0}, {c1}");
+    assert!(
+        c0 < 0.05 * d && c1 < 0.05 * d,
+        "orbit did not close: {c0}, {c1}"
+    );
     // Center of mass stays put.
-    assert!(diagnostics::center_of_mass(&s).length() < 1e-6, "COM drifted");
+    assert!(
+        diagnostics::center_of_mass(&s).length() < 1e-6,
+        "COM drifted"
+    );
 }
 
 #[test]

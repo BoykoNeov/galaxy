@@ -23,19 +23,28 @@ fn kinetic_energy_matches_hand_calc() {
 fn total_momentum_matches_hand_calc() {
     // 2*(0,1,0) + 3*(0,-1,0) = (0,-1,0)
     let p = diagnostics::total_momentum(&two_body());
-    assert!((p - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-12, "p = {p:?}");
+    assert!(
+        (p - DVec3::new(0.0, -1.0, 0.0)).length() < 1e-12,
+        "p = {p:?}"
+    );
 }
 
 #[test]
 fn angular_momentum_matches_hand_calc() {
     // body0 (at origin) contributes 0; body1: 3*((1,0,0) x (0,-1,0)) = (0,0,-3)
     let l = diagnostics::total_angular_momentum(&two_body());
-    assert!((l - DVec3::new(0.0, 0.0, -3.0)).length() < 1e-12, "l = {l:?}");
+    assert!(
+        (l - DVec3::new(0.0, 0.0, -3.0)).length() < 1e-12,
+        "l = {l:?}"
+    );
 }
 
 #[test]
 fn center_of_mass_matches_hand_calc() {
     // (2*0 + 3*1) / 5 = 0.6 in x
     let com = diagnostics::center_of_mass(&two_body());
-    assert!((com - DVec3::new(0.6, 0.0, 0.0)).length() < 1e-12, "com = {com:?}");
+    assert!(
+        (com - DVec3::new(0.6, 0.0, 0.0)).length() < 1e-12,
+        "com = {com:?}"
+    );
 }

@@ -36,6 +36,10 @@ struct Node {
     half: f64,
     mass: f64,
     com: DVec3,
+    /// Distance from the geometric center to the center of mass. The COM can sit
+    /// near a cell edge ("detached"), so the nearest mass may be `delta` closer to
+    /// a target than the COM is; the opening criterion subtracts it (Barnes 1994).
+    delta: f64,
     children: [u32; 8],
     bodies: Vec<u32>,
     leaf: bool,
@@ -48,6 +52,7 @@ impl Node {
             half,
             mass: 0.0,
             com: DVec3::ZERO,
+            delta: 0.0,
             children: [SENTINEL; 8],
             bodies: Vec::new(),
             leaf: true,
@@ -160,11 +165,13 @@ impl Octree {
             }
         }
         self.nodes[node].mass = m;
-        self.nodes[node].com = if m > 0.0 {
+        let com = if m > 0.0 {
             c / m
         } else {
             self.nodes[node].center
         };
+        self.nodes[node].com = com;
+        self.nodes[node].delta = (com - self.nodes[node].center).length();
     }
 
     fn accel_node(&self, node: usize, target: usize, q: &Query) -> DVec3 {
@@ -192,7 +199,14 @@ impl Octree {
         let dx = nd.com - xp;
         let d2 = dx.length_squared();
         let s = 2.0 * nd.half;
-        if !inside && s * s < q.theta2 * d2 {
+        // Barnes (1994) criterion: accept the multipole when the cell subtends a
+        // small angle from the *nearest mass it could hold*, not just from the COM.
+        // The nearest mass may be `delta` closer than the COM, so require
+        //   s / (d − delta) ≤ θ   ⟺   s ≤ θ·(d − delta),
+        // which reduces to the classic s/d ≤ θ for a centered COM (delta = 0) and
+        // forces opening when a detached COM would otherwise hide a near particle.
+        let d = d2.sqrt();
+        if !inside && q.theta * (d - nd.delta) >= s {
             let r2 = d2 + q.eps2;
             return dx * (nd.mass / (r2 * r2.sqrt()));
         }
@@ -210,7 +224,7 @@ impl Octree {
 struct Query<'a> {
     pos: &'a [DVec3],
     mass: &'a [f64],
-    theta2: f64,
+    theta: f64,
     eps2: f64,
 }
 
@@ -226,7 +240,7 @@ impl ForceSolver for BarnesHut {
         let q = Query {
             pos: &state.pos,
             mass: &state.mass,
-            theta2: self.theta * self.theta,
+            theta: self.theta,
             eps2: self.softening * self.softening,
         };
         for i in 0..n {

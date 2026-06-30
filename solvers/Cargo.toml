@@ -1,0 +1,11 @@
+[package]
+name = "galaxy-solvers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+galaxy-core = { path = "../core" }
+glam = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

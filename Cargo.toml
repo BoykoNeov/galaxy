@@ -1,0 +1,12 @@
+# Galaxy Collider — cargo workspace. See DESIGN.md for the full plan.
+[workspace]
+resolver = "2"
+members = ["core", "solvers"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+
+[workspace.dependencies]
+glam = "0.30"
+proptest = "1"

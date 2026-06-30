@@ -103,6 +103,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-validate"
+version = "0.0.0"
+dependencies = [
+ "galaxy-core",
+ "galaxy-ic",
+ "galaxy-io",
+ "galaxy-sim",
+ "galaxy-solvers",
+ "glam",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

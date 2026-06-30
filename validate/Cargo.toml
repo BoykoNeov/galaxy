@@ -1,0 +1,14 @@
+[package]
+name = "galaxy-validate"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# The library is just the .npy export bridge (glam for DVec3). The collision
+# export EXAMPLE wires the full pipeline, so it pulls in the rest of the stack.
+glam = { workspace = true }
+galaxy-core = { path = "../core" }
+galaxy-ic = { path = "../ic" }
+galaxy-solvers = { path = "../solvers" }
+galaxy-sim = { path = "../sim" }
+galaxy-io = { path = "../io" }

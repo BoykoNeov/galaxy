@@ -16,6 +16,18 @@ impl LeapfrogKdk {
             primed: false,
         }
     }
+
+    /// Clear cached state so the next `step` re-primes from scratch. Call this
+    /// before reusing one integrator on a different run / initial condition.
+    pub fn reset(&mut self) {
+        todo!()
+    }
+
+    /// Eagerly compute and cache accelerations at the current state, so the next
+    /// `step` opens with a fresh (not stale) half-kick.
+    pub fn prime(&mut self, _state: &State, _solver: &mut dyn ForceSolver) {
+        todo!()
+    }
 }
 
 impl Integrator for LeapfrogKdk {

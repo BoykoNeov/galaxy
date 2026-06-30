@@ -119,8 +119,10 @@ late-time positions — N-body is chaotic).
 - **M0** ✅ — core + DirectSum + leapfrog KDK + 2-body Kepler test + energy diagnostic (Stages 0–1)
 - **M1** ✅ — BarnesHut + single equilibrium galaxy IC + "galaxy stays in equilibrium" test (Stages 2–3).
   Plummer sphere holds equilibrium over ~12 t_dyn under both DirectSum and the
-  BarnesHut workhorse (Barnes 1994 opening criterion). rayon parallelism deferred
-  (DESIGN prose, not an M1 bullet) → fold into M2/perf.
+  BarnesHut workhorse (Barnes 1994 opening criterion). BH validated at scale by an
+  ignored smoke-test: N=30k forces match the oracle to 1.7e-3 RMS and BH runs 2.6×
+  faster than direct sum. rayon parallelism deferred (DESIGN prose, not an M1
+  bullet) → fold into M2/perf.
 - **M2** — two-galaxy collision IC → snapshots; conservation + small-N REBOUND cross-check (Stage 3)
 - **M3** — renderprep + wgpu render + grade → first tidal-tail movie
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)

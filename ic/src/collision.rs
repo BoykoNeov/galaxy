@@ -19,7 +19,7 @@
 //! setup therefore fixes the *initial* COM phase-space coordinates exactly; the
 //! subsequent many-body evolution is the simulation's job, not a closed form.
 
-use galaxy_core::{DVec3, State};
+use galaxy_core::{DVec3, ParticleId, Progenitor, State};
 
 use crate::Plummer;
 
@@ -58,20 +58,71 @@ impl Collision {
         pericenter: f64,
         separation: f64,
     ) -> Self {
-        let _ = (galaxy1, galaxy2, eccentricity, pericenter, separation);
-        todo!()
+        assert_eq!(
+            galaxy1.g, galaxy2.g,
+            "both galaxies must share the same gravitational constant G"
+        );
+        assert!(eccentricity > 0.0, "eccentricity must be positive");
+        assert!(pericenter > 0.0, "pericenter must be positive");
+        assert!(
+            separation >= pericenter,
+            "initial separation ({separation}) must be >= pericenter ({pericenter})"
+        );
+        // A bound orbit (e < 1) cannot start beyond apocenter r_peri(1+e)/(1−e):
+        // there is no point on the conic at a larger separation.
+        if eccentricity < 1.0 {
+            let apocenter = pericenter * (1.0 + eccentricity) / (1.0 - eccentricity);
+            assert!(
+                separation <= apocenter * (1.0 + 1e-12),
+                "initial separation ({separation}) exceeds apocenter ({apocenter}) for a bound orbit (e={eccentricity})"
+            );
+        }
+        Self {
+            galaxy1,
+            galaxy2,
+            eccentricity,
+            pericenter,
+            separation,
+        }
     }
 
     /// The shared gravitational constant `G`.
     pub fn g(&self) -> f64 {
-        todo!()
+        self.galaxy1.g
     }
 
     /// Relative position and velocity of the two COMs, `(r_rel, v_rel)` with
     /// `r_rel = r2 − r1` and `v_rel = v2 − v1`, on the incoming branch of the
     /// Kepler orbit. Pericenter lies along +x; the orbit is in the x–y plane.
     pub fn relative_state(&self) -> (DVec3, DVec3) {
-        todo!()
+        let e = self.eccentricity;
+        let r0 = self.separation;
+        let mu = self.g() * (self.galaxy1.total_mass + self.galaxy2.total_mass);
+
+        // Conic about the focus: r(ν) = p / (1 + e·cos ν), with semi-latus rectum
+        // p = r_peri·(1 + e) and specific angular momentum h = √(μ·p).
+        let p = self.pericenter * (1.0 + e);
+        let h = (mu * p).sqrt();
+
+        // True anomaly at the starting separation, on the *incoming* branch (ν<0
+        // ⇒ the bodies are approaching). Clamp guards float drift at the apsides.
+        let cos_nu = ((p / r0 - 1.0) / e).clamp(-1.0, 1.0);
+        let nu = -cos_nu.acos();
+        let (sin_nu, cos_nu) = (nu.sin(), nu.cos());
+
+        // Polar velocity components for a Kepler orbit:
+        //   v_r = (μ/h)·e·sin ν,   v_θ = (μ/h)·(1 + e·cos ν) = h/r.
+        let mu_over_h = mu / h;
+        let v_r = mu_over_h * e * sin_nu;
+        let v_t = mu_over_h * (1.0 + e * cos_nu);
+
+        // Pericenter along +x, orbit in the x–y plane: radial r̂ = (cos ν, sin ν, 0),
+        // transverse t̂ = (−sin ν, cos ν, 0).
+        let r_hat = DVec3::new(cos_nu, sin_nu, 0.0);
+        let t_hat = DVec3::new(-sin_nu, cos_nu, 0.0);
+        let r_rel = r_hat * r0;
+        let v_rel = r_hat * v_r + t_hat * v_t;
+        (r_rel, v_rel)
     }
 
     /// The two COMs' `(position, velocity)` in the global zero-COM /
@@ -79,7 +130,15 @@ impl Collision {
     /// `m1·r1 + m2·r2 = 0` and `m1·v1 + m2·v2 = 0`, and `r2 − r1 = r_rel`,
     /// `v2 − v1 = v_rel`.
     pub fn com_states(&self) -> ((DVec3, DVec3), (DVec3, DVec3)) {
-        todo!()
+        let (r_rel, v_rel) = self.relative_state();
+        let m1 = self.galaxy1.total_mass;
+        let m2 = self.galaxy2.total_mass;
+        let mtot = m1 + m2;
+        // Split r_rel = r2 − r1 about the barycenter: r1 = −(m2/M)·r_rel,
+        // r2 = +(m1/M)·r_rel ⇒ m1·r1 + m2·r2 = 0 (and likewise for velocities).
+        let f1 = -m2 / mtot;
+        let f2 = m1 / mtot;
+        ((r_rel * f1, v_rel * f1), (r_rel * f2, v_rel * f2))
     }
 
     /// Sample the full collision: `n1` particles for galaxy 1 (tagged
@@ -89,7 +148,74 @@ impl Collision {
     /// contiguous unique ids `0..n1+n2`, and sits in the zero-COM/zero-momentum
     /// frame.
     pub fn sample(&self, n1: usize, n2: usize, seed: u64) -> State {
-        let _ = (n1, n2, seed);
-        todo!()
+        let ((r1, v1), (r2, v2)) = self.com_states();
+
+        // The two galaxies draw from well-separated PRNG streams (one SplitMix64
+        // step apart) so an equal-model collision still yields distinct draws.
+        let s1 = self.galaxy1.sample(n1, seed);
+        let s2 = self.galaxy2.sample(n2, mix_seed(seed));
+
+        let n = n1 + n2;
+        let mut pos = Vec::with_capacity(n);
+        let mut vel = Vec::with_capacity(n);
+        let mut mass = Vec::with_capacity(n);
+        let mut progenitor = Vec::with_capacity(n);
+
+        // Each galaxy is sampled in its own zero-COM/zero-momentum frame, then
+        // rigidly translated to its COM position and boosted by its COM velocity.
+        for i in 0..n1 {
+            pos.push(s1.pos[i] + r1);
+            vel.push(s1.vel[i] + v1);
+            mass.push(s1.mass[i]);
+            progenitor.push(Progenitor(0));
+        }
+        for i in 0..n2 {
+            pos.push(s2.pos[i] + r2);
+            vel.push(s2.vel[i] + v2);
+            mass.push(s2.mass[i]);
+            progenitor.push(Progenitor(1));
+        }
+
+        // The COM split makes the barycenter vanish analytically; a final
+        // mass-weighted recenter removes the O(machine-ε) finite-N residual so the
+        // realization is delivered in the zero-COM/zero-momentum frame to roundoff.
+        let mtot: f64 = mass.iter().sum();
+        let mean_pos = pos
+            .iter()
+            .zip(&mass)
+            .fold(DVec3::ZERO, |acc, (p, m)| acc + *p * *m)
+            / mtot;
+        let mean_vel = vel
+            .iter()
+            .zip(&mass)
+            .fold(DVec3::ZERO, |acc, (v, m)| acc + *v * *m)
+            / mtot;
+        for p in &mut pos {
+            *p -= mean_pos;
+        }
+        for v in &mut vel {
+            *v -= mean_vel;
+        }
+
+        let id = (0..n as u64).map(ParticleId).collect();
+        State {
+            pos,
+            vel,
+            mass,
+            id,
+            progenitor,
+            time: 0.0,
+            a: 1.0,
+        }
     }
+}
+
+/// One SplitMix64 step, used to derive the second galaxy's seed from the first so
+/// the two galaxies draw from well-separated, independent PRNG streams. Mirrors
+/// the generator in `plummer.rs`.
+fn mix_seed(seed: u64) -> u64 {
+    let z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }

@@ -69,9 +69,10 @@ fn relative_orbit_recovers_requested_conic() {
     let mu = g * (galaxy1.total_mass + galaxy2.total_mass);
 
     // Bound (e<1), parabolic (e=1), and hyperbolic (e>1), each started well
-    // outside pericenter on the incoming branch.
+    // outside pericenter on the incoming branch. For the bound case the start
+    // must lie inside the apocenter r_peri(1+e)/(1−e) = 3.0, so r0 = 2.5.
     for &(e, rp, r0) in &[
-        (0.5_f64, 1.0_f64, 4.0_f64),
+        (0.5_f64, 1.0_f64, 2.5_f64),
         (1.0, 1.0, 6.0),
         (1.5, 0.7, 5.0),
     ] {
@@ -122,7 +123,8 @@ fn eccentricity_vector_points_to_pericenter() {
     let g1 = Plummer::new(g, 1.3, 1.0);
     let g2 = Plummer::new(g, 0.7, 1.0);
     let mu = g * (g1.total_mass + g2.total_mass);
-    let c = Collision::new(g1, g2, 0.6, 1.2, 5.0);
+    // Bound orbit: r0 = 4.0 lies inside the apocenter r_peri(1+e)/(1−e) = 4.8.
+    let c = Collision::new(g1, g2, 0.6, 1.2, 4.0);
     let (r_rel, v_rel) = c.relative_state();
     let (_, _, e_vec) = elements(r_rel, v_rel, mu);
     let dir = e_vec.normalize();
@@ -158,7 +160,7 @@ fn com_states_split_into_zero_momentum_frame() {
 
 const N1: usize = 4000;
 const N2: usize = 2000;
-const SEED: u64 = 0xC011_DE;
+const SEED: u64 = 0x00C0_11DE;
 
 fn sample_default() -> (Collision, State) {
     let g = 1.0;

@@ -14,3 +14,6 @@
 .idea/
 *.swp
 .DS_Store
+
+# proptest minimized-failure seeds (regenerated per run)
+**/*.proptest-regressions

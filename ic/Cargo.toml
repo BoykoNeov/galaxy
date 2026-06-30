@@ -1,0 +1,13 @@
+[package]
+name = "galaxy-ic"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+galaxy-core = { path = "../core" }
+
+[dev-dependencies]
+# Solvers are needed ONLY to evolve the IC in the equilibrium test; the library
+# itself stays pure (it just produces a `State`).
+galaxy-solvers = { path = "../solvers" }
+proptest = { workspace = true }

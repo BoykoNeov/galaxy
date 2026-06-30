@@ -65,6 +65,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-ic"
+version = "0.0.0"
+dependencies = [
+ "galaxy-core",
+ "galaxy-solvers",
+ "proptest",
+]
+
+[[package]]
 name = "galaxy-solvers"
 version = "0.0.0"
 dependencies = [

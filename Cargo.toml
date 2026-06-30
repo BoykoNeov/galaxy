@@ -1,7 +1,7 @@
 # Galaxy Collider — cargo workspace. See DESIGN.md for the full plan.
 [workspace]
 resolver = "2"
-members = ["core", "solvers"]
+members = ["core", "solvers", "ic"]
 
 [workspace.package]
 version = "0.0.0"

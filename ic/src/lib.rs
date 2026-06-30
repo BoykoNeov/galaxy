@@ -6,6 +6,8 @@
 //! galaxy and the building block for two-galaxy collision setups. See
 //! `DESIGN.md` (M1) for context.
 
+pub mod collision;
 pub mod plummer;
 
+pub use collision::Collision;
 pub use plummer::Plummer;

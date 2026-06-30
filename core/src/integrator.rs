@@ -20,13 +20,17 @@ impl LeapfrogKdk {
     /// Clear cached state so the next `step` re-primes from scratch. Call this
     /// before reusing one integrator on a different run / initial condition.
     pub fn reset(&mut self) {
-        todo!()
+        self.acc.clear();
+        self.primed = false;
     }
 
     /// Eagerly compute and cache accelerations at the current state, so the next
     /// `step` opens with a fresh (not stale) half-kick.
-    pub fn prime(&mut self, _state: &State, _solver: &mut dyn ForceSolver) {
-        todo!()
+    pub fn prime(&mut self, state: &State, solver: &mut dyn ForceSolver) {
+        self.acc.clear();
+        self.acc.resize(state.len(), DVec3::ZERO);
+        solver.accelerations(state, &mut self.acc);
+        self.primed = true;
     }
 }
 

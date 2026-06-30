@@ -1,0 +1,9 @@
+[package]
+name = "galaxy-io"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+galaxy-core = { path = "../core" }
+thiserror = { workspace = true }
+glam = { workspace = true }

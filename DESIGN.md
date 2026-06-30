@@ -65,13 +65,13 @@ renderer.
 galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
 ├─ solvers/      DirectSum (oracle), BarnesHut (workhorse)   [later: ParticleMesh, TreePM]
-├─ ic/           Plummer sphere (DONE: analytic-DF equilibrium) [next: Hernquist/NFW halo, exp disk, bulge; two-galaxy collision setup] [later: cosmological ICs]
-├─ io/           snapshot read/write: Rust-native + HDF5 behind a `validation` feature
-├─ sim/          headless engine: solver+integrator+IC+stepping loop+checkpoint → snapshots (bin)
+├─ ic/           Plummer sphere + two-galaxy Kepler-encounter collision (DONE) [next: Hernquist/NFW halo, exp disk, bulge] [later: cosmological ICs]
+├─ io/           snapshot read/write: Rust-native versioned binary (DONE) [HDF5 behind a `validation` feature: later]
+├─ sim/          headless engine: solver+integrator+IC+stepping loop → snapshots (DONE) [checkpoint/restart: later]
 ├─ renderprep/   snapshots → frame-data; spatial-tree kNN for local density/dispersion
 ├─ render/       wgpu: frame-data → linear HDR EXR (bin)
 ├─ grade/        EXR → tonemap(ACES) → 16-bit PNG (small; may merge into render)
-├─ validate/     energy/momentum conservation, analytic Kepler, REBOUND cross-check harness
+├─ validate/     conservation + orbital-setup (always-on tests in sim/ic) + .npy export & REBOUND IAS15 cross-check harness (DONE, manual)
 └─ xtask/        orchestrator: scenario.toml → sim → renderprep → render → grade → ffmpeg
 ```
 
@@ -123,7 +123,19 @@ late-time positions — N-body is chaotic).
   ignored smoke-test: N=30k forces match the oracle to 1.7e-3 RMS and BH runs 2.6×
   faster than direct sum. rayon parallelism deferred (DESIGN prose, not an M1
   bullet) → fold into M2/perf.
-- **M2** — two-galaxy collision IC → snapshots; conservation + small-N REBOUND cross-check (Stage 3)
+- **M2** ✅ — two-galaxy collision IC → snapshots; conservation + small-N REBOUND cross-check (Stage 3).
+  Two Plummer galaxies placed on a relative Kepler encounter (parabolic = Toomre
+  tidal-tail case); the orbital setup is verified against an independent
+  osculating-elements formula, and each galaxy keeps its Plummer profile about its
+  own COM. Snapshots use a hand-rolled versioned little-endian format (`galaxy-io`,
+  Contract 1; f64 pos/vel bit-exact, f32 mass storage). The `galaxy-sim` engine
+  steps a collision and emits snapshots; its always-on test confirms bounded energy
+  oscillation with linear/angular momentum conserved to roundoff under DirectSum.
+  The REBOUND IAS15 cross-check is a **provided, manually-run harness** (`.npy`
+  export + `validate/rebound/cross_check.py`), not gated in `cargo test` (REBOUND is
+  an external dep; HDF5 is a Windows link landmine — bridged via NumPy). Its physics
+  formulas are cross-validated against the engine to roundoff; it has not been run
+  against REBOUND in this environment. rayon parallelism still deferred → M3/perf.
 - **M3** — renderprep + wgpu render + grade → first tidal-tail movie
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 

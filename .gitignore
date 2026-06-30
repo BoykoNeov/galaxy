@@ -9,6 +9,10 @@
 *.mp4
 *.h5
 
+# Python (REBOUND validation harness)
+__pycache__/
+*.pyc
+
 # Editor / OS
 .vscode/
 .idea/

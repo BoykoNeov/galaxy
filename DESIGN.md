@@ -65,7 +65,7 @@ renderer.
 galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
 ├─ solvers/      DirectSum (oracle), BarnesHut (workhorse)   [later: ParticleMesh, TreePM]
-├─ ic/           Hernquist/NFW halo, exp disk, bulge; two-galaxy collision setup [later: cosmological ICs]
+├─ ic/           Plummer sphere (DONE: analytic-DF equilibrium) [next: Hernquist/NFW halo, exp disk, bulge; two-galaxy collision setup] [later: cosmological ICs]
 ├─ io/           snapshot read/write: Rust-native + HDF5 behind a `validation` feature
 ├─ sim/          headless engine: solver+integrator+IC+stepping loop+checkpoint → snapshots (bin)
 ├─ renderprep/   snapshots → frame-data; spatial-tree kNN for local density/dispersion

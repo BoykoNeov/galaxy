@@ -83,6 +83,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-sim"
+version = "0.0.0"
+dependencies = [
+ "galaxy-core",
+ "galaxy-ic",
+ "galaxy-io",
+ "galaxy-solvers",
+ "thiserror",
+]
+
+[[package]]
 name = "galaxy-solvers"
 version = "0.0.0"
 dependencies = [

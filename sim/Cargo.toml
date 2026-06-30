@@ -1,0 +1,15 @@
+[package]
+name = "galaxy-sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+galaxy-core = { path = "../core" }
+galaxy-io = { path = "../io" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Building a real collision IC and an exact solver to exercise the engine; the
+# engine itself depends only on core (traits) and io (snapshot writing).
+galaxy-ic = { path = "../ic" }
+galaxy-solvers = { path = "../solvers" }

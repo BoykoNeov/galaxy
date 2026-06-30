@@ -76,8 +76,9 @@ pub struct DirectorySink {
 impl DirectorySink {
     /// Create (or reuse) the output directory.
     pub fn new(dir: impl AsRef<Path>) -> Result<Self, SimError> {
-        let _ = dir.as_ref();
-        todo!()
+        let dir = dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&dir).map_err(|e| SimError::Snapshot(e.into()))?;
+        Ok(Self { dir, written: 0 })
     }
 
     /// Number of files written so far.
@@ -88,8 +89,10 @@ impl DirectorySink {
 
 impl SnapshotSink for DirectorySink {
     fn emit(&mut self, header: &Header, state: &State) -> Result<(), SimError> {
-        let _ = (header, state);
-        todo!()
+        let path = self.dir.join(format!("snapshot_{:08}.snap", header.step));
+        galaxy_io::write_file(path, header, state)?;
+        self.written += 1;
+        Ok(())
     }
 }
 
@@ -103,6 +106,59 @@ pub fn run(
     config: &SimConfig,
     sink: &mut dyn SnapshotSink,
 ) -> Result<RunSummary, SimError> {
-    let _ = (state, solver, integ, bg, config, sink);
-    todo!()
+    if config.snapshot_every == 0 {
+        return Err(SimError::Config("snapshot_every must be >= 1".to_string()));
+    }
+    if !config.dt.is_finite() || config.dt <= 0.0 {
+        return Err(SimError::Config(format!(
+            "dt must be a positive finite number, got {}",
+            config.dt
+        )));
+    }
+
+    let mut emitted = 0u64;
+
+    // Step 0: the initial conditions.
+    emit_snapshot(state, 0, config, sink)?;
+    emitted += 1;
+    let mut last_emitted_step = 0u64;
+
+    for step in 1..=config.n_steps {
+        integ.step(state, solver, bg, config.dt);
+        if step % config.snapshot_every == 0 {
+            emit_snapshot(state, step, config, sink)?;
+            emitted += 1;
+            last_emitted_step = step;
+        }
+    }
+
+    // Always capture the final step, unless it already landed on the cadence.
+    if last_emitted_step != config.n_steps {
+        emit_snapshot(state, config.n_steps, config, sink)?;
+        emitted += 1;
+    }
+
+    Ok(RunSummary {
+        steps: config.n_steps,
+        final_time: state.time,
+        snapshots_emitted: emitted,
+    })
+}
+
+/// Stamp a header for the current state and hand it to the sink.
+fn emit_snapshot(
+    state: &State,
+    step: u64,
+    config: &SimConfig,
+    sink: &mut dyn SnapshotSink,
+) -> Result<(), SimError> {
+    let header = Header::for_state(
+        state,
+        step,
+        config.softening,
+        config.rng_seed,
+        config.config_hash,
+        config.units.as_str(),
+    );
+    sink.emit(&header, state)
 }

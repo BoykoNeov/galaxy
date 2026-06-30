@@ -43,7 +43,7 @@ fn small_collision() -> (Collision, State) {
     let g2 = Plummer::new(G, 0.7, 0.8);
     // Parabolic grazing encounter starting at r0=6 with pericenter 1.5.
     let c = Collision::new(g1, g2, 1.0, 1.5, 6.0);
-    let s = c.sample(240, 160, 0xBADC_0DE);
+    let s = c.sample(240, 160, 0x0BAD_C0DE);
     (c, s)
 }
 
@@ -53,7 +53,7 @@ fn config(n_steps: u64, snapshot_every: u64) -> SimConfig {
         n_steps,
         snapshot_every,
         softening: EPS,
-        rng_seed: 0xBADC_0DE,
+        rng_seed: 0x0BAD_C0DE,
         config_hash: 0x1234,
         units: "nbody-G1".to_string(),
     }

@@ -62,7 +62,9 @@ It does **NOT** validate late-time chaotic evolution — N-body is chaotic, so
 trajectories (and eventually even coarse statistics) diverge between any two
 integrators. That is physics, not a bug.
 
-The `.npy` physics formulas (softened energy, softened accelerations, half-mass
-radius) reused by the Python harness are cross-validated against the Rust engine
-to roundoff, so a harness failure points at REBOUND configuration or the engine,
-not the bridge.
+During development the harness's `.npy` physics formulas (softened energy,
+softened accelerations, half-mass radius) were checked against the Rust engine and
+agreed to roundoff — an ad-hoc check, not part of `cargo test`. So a harness
+failure most likely points at REBOUND configuration or the engine, not the bridge.
+If `sim.update_acceleration()` is missing in your REBOUND version, the t=0 force
+check is skipped and the remaining checks still run.

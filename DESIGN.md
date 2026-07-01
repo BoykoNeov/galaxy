@@ -536,10 +536,54 @@ late-time positions — N-body is chaotic).
       cases (differ only in the low byte → pass 1; only in bits 24–29 → pass 4); same-device
       bit-determinism; adversarial orderings (sorted / reversed / all-equal); large N (2¹⁶);
       empty/single edges. GPU-gated, fail-loud.
+  - **GPU Karras tree-build + atomic-flag aggregation (landed, M4e) — third stage of the
+    GPU-resident build:** `galaxy_gpu::GpuLbvhBuilder` ports the Karras binary-radix-tree
+    build (`karras_internal`) and the bottom-up fold (`flatten`) to two wgpu **compute**
+    passes, gated directly against the CPU references `galaxy_solvers::reference_karras`
+    (topology) and `reference_aggregate` (fold) — extracted as the single sources of truth,
+    as `reference_morton`/`reference_sort` were for M4c/M4d. It emits the raw **pointer
+    tree** — per node: parent, two children (unified index: leaves `[0,N)`, internal
+    `[N,2N-1)`), and aggregated AABB `min`/`max` + com + mass — and wires into no solver yet
+    (there is no `GpuLbvh`).
+    - **Half integer, half f32 ⇒ two gates.** The Karras **topology** is a pure-integer
+      function of the sorted codes (δ = `clz(code_a ^ code_b)`, with a `32 + clz(a^b)`
+      position tie-extension for equal codes), so the GPU `(left, right, parent)` must equal
+      the reference **bit-for-bit** — the load-bearing gate, like the M4d sort. *This does
+      not contradict the M4c f32-divergence note:* that divergence lives upstream in the
+      Morton **codes**, not in this pure-integer step; fed the bit-exact `sorted_codes`, the
+      topology is exact. The **aggregation** runs in f32 — AABB `min`/`max` folds never
+      round and are order-independent (**bit-exact** vs an f32 CPU fold over the same
+      narrowed leaves), while `com`/`mass` are f32-lossy → tolerance.
+    - **The δ search is signed `i32`.** `delta` returns **−1** for out-of-range probes; a
+      `u32` port would treat −1 as `0xFFFFFFFF` and win every range-boundary comparison (the
+      load-bearing correctness trap). The **all-equal-codes** gate — every node on the
+      position tie-break — is what surfaces it.
+    - **Parallel topology, single-invocation aggregation.** `build_tree` is one invocation
+      per internal node (race-free: each writes only its own children + its two children's
+      parent slot — no atomics). `aggregate` is a **single invocation**: the parallel Karras
+      atomic-flag walk needs a device-scope memory fence to publish a sibling's non-atomic
+      AABB writes across workgroups, which WGSL 1.0 lacks (`storageBarrier` is
+      workgroup-only) — so, exactly as the M4d sort collapsed to one invocation for
+      *unarguable* correctness, the fold runs serially (the counter is still the Karras
+      visit-**flag**: a node folds when its *second* child arrives, from its stored
+      left/right in fixed order → order-independent, no float `atomicAdd`). The parallel
+      atomic-flag build (with device fences) is the named scale refinement.
+    - **Scope: raw pointer tree, flatten deferred.** It does **not** emit the DFS
+      skip-pointer `LbvhFlat` form; deriving `center`/`half`/`delta` + the `next` skip
+      pointer (a subtree-size prefix-sum / Euler-tour) is the next stage, so the deferred
+      `GpuLbvh` traverses the same form the CPU `LbvhFlat::accel` walk uses.
+    - **Gates:** topology bit-exact vs `reference_karras` (Morton clouds, all-equal codes,
+      heavy duplicates, monotone chain, large N 2¹⁶) + structural (2N−1 nodes, parent
+      back-pointers, one parent per non-root node, `NO_PARENT` root); AABB min/max bit-exact
+      + com/mass f32-tolerance vs `reference_aggregate` (incl. a monotone-chain deep-cascade
+      case + coincident leaves), child AABB ⊆ parent, root bounds all; same-device
+      bit-determinism (topology **and** aggregation); N=0/1/2 edges. GPU-gated, fail-loud.
   - **Remaining M4+:** the **rest of the GPU port of the M4b LBVH build** (each stage gated
-    vs the CPU reference; Morton+bbox landed as M4c, sort as M4d above): **Karras
-    tree-build kernel** + atomic-flag bottom-up aggregation → a `GpuLbvh` f32 binary-BVH
-    traversal kernel; then, separately and larger, keeping particle *state* GPU-resident
+    vs the CPU reference; Morton+bbox M4c, sort M4d, Karras tree-build + aggregation M4e
+    above): the **DFS skip-pointer flatten** of the M4e pointer tree (deriving
+    `center`/`half`/`delta` + `next`) → a `GpuLbvh` f32 binary-BVH **traversal** kernel that
+    walks that form (its θ→0 physics gate is where the end-to-end f32 topology straddle is
+    finally checked); then, separately and larger, keeping particle *state* GPU-resident
     across steps, which changes the `accelerations(&State)→acc` interface) / PM / TreePM /
     gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline).
 

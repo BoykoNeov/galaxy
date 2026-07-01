@@ -139,12 +139,15 @@ late-time positions — N-body is chaotic).
   - **rayon parallelism (landed post-M2):** the Barnes-Hut force fill runs over
     independent targets with `par_iter_mut` — **bit-exact** to the serial reference
     (no per-target sum is reassociated) and guarded by an equivalence + determinism
-    test. At N=30k this takes BH from 2.6× to ~22× faster than serial DirectSum. The
+    test. At N=30k, parallel BH is ~22× faster than serial O(N²) DirectSum — the
+    2.6× algorithmic win (tree vs direct sum) times ~8.7× from the parallel fill. The
     O(N²) softened potential (the energy diagnostic, still O(N²) even under BH) is a
     rayon reduction, equal to serial within 1e-12 relative (reductions reassociate,
     so tolerance-tested, not bit-exact). DirectSum's *force* path stays serial by
     choice (small-N oracle; its Newton's-third-law pairing would need a 2×-flops
     row-form to parallelize). Both solvers share one softened-potential kernel.
+    Remaining serial section (next Amdahl ceiling, out of scope here): `Octree::build`
+    — concurrent tree insertion is the hard part and the place to look next for perf.
 - **M3** — renderprep + wgpu render + grade → first tidal-tail movie
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 

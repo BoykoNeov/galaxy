@@ -41,6 +41,13 @@ pub fn potential_energy_serial(state: &State, g: f64, softening: f64) -> f64 {
 /// and folds sub-sums, so the result reassociates the floating-point sum — equal
 /// to `potential_energy_serial` only to a tight relative tolerance, NOT bit-for-
 /// bit. Uses the global rayon pool.
+///
+/// NOTE: the fold shape depends on the thread count, so this value is not
+/// bit-reproducible across machines / `RAYON_NUM_THREADS` (differs at ~1e-13
+/// relative). That is fine — it feeds only energy *diagnostics*
+/// (`core::diagnostics`), never the stepping path, so simulation trajectories
+/// stay fully deterministic; and every consumer compares it with a relative
+/// tolerance (validate uses ≥1e-9). Do NOT diff this number bit-exactly.
 pub fn potential_energy_parallel(state: &State, g: f64, softening: f64) -> f64 {
     let eps2 = softening * softening;
     let n = state.len();

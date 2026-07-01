@@ -65,7 +65,7 @@ renderer.
 galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
 ├─ solvers/      DirectSum (oracle), BarnesHut (workhorse)   [later: ParticleMesh, TreePM]
-├─ ic/           Plummer sphere + two-galaxy Kepler-encounter collision (DONE) [next: Hernquist/NFW halo, exp disk, bulge] [later: cosmological ICs]
+├─ ic/           Plummer sphere, exp-disk-in-halo, two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [next: Hernquist/NFW halo, warm disk] [later: cosmological ICs]
 ├─ io/           snapshot read/write: Rust-native versioned binary (DONE) [HDF5 behind a `validation` feature: later]
 ├─ sim/          headless engine: solver+integrator+IC+stepping loop → snapshots (DONE) [checkpoint/restart: later]
 ├─ renderprep/   snapshots → frame-data; spatial-tree kNN for local density/dispersion
@@ -259,11 +259,37 @@ late-time positions — N-body is chaotic).
     no vertical velocity support (v_z=0) → it is a geometric profile that settles, not
     a vertical equilibrium; the disk is fully cold (Q→0) and could fragment over the
     several orbits of a *collision* — a small in-plane dispersion is the knob to add.
-  - **NOT yet done (this is the IC only):** wiring disk galaxies into `Collision`
-    (which still takes two `Plummer`s), the spin-orbit **orientation** parameter for a
-    prograde passage, and the actual two-disk **collision → tidal-tail movie**. The
-    default disk (spin +Z, orbit plane x–y) is already coplanar-prograde and face-on
-    to the +Z camera, so that next step is wiring + tuning, not new physics.
+  - **Collision wiring + orientation (landed):** `DiskCollision` is the disk analogue
+    of `Collision` — two `ExponentialDisk` galaxies on the *same* two-body Kepler
+    encounter, now factored into a shared `encounter` module so the one set of
+    osculating-elements tests guards the placement for **both** collision types (the
+    Plummer `Collision` delegates to it too; pure refactor, existing tests unchanged).
+    Each galaxy carries an `Orientation` — the spin-orbit geometry — whose public API
+    is the two Toomre angles (inclination + argument of the node), a `DQuat` under the
+    hood: `prograde` (identity, spin +Z, co-rotating), `retrograde` (spin −Z),
+    `inclined(i)` (tilt i off +Z about the line of nodes). A rotation is rigid, so it
+    never disturbs a galaxy's internal structure or its zero-COM/zero-momentum framing.
+    Four species are tagged (halo1=0, disk1=1, halo2=2, disk2=3) so the renderer colors
+    the two *disks* (the tails) apart from the two halos. Gates: the shared conic
+    recovery from the **combined** (disk+halo) masses; assembly (count, mass, four-way
+    partition, contiguous ids, zero-COM/zero-momentum, each galaxy at its COM orbital
+    state); and the orientation discriminators measured on the **disk** population's
+    angular momentum — prograde disks spin +Z, `retrograde` flips a disk's L_z,
+    `inclined(i)` tilts a disk's L by i off +Z, the other galaxy untouched (halo L is
+    non-rotating shot noise, so it is *not* asserted). Galaxy 2 is seeded two SplitMix64
+    steps clear of galaxy 1 so their internal halo/disk sub-streams never overlap.
+  - **Two-disk tidal-tail movie (landed, verified):** `galaxy-xtask` now builds a
+    coplanar-prograde parabolic encounter of two disk galaxies (17k particles) and runs
+    the full sim→renderprep→render→grade pipeline. The rendered sequence shows two
+    **thin, curved, two-tone tidal tails plus a connecting bridge** at pericenter — the
+    genuine Toomre & Toomre structure the isotropic-Plummer movie could not make. The
+    prograde disk resonance is the mechanism; a four-species palette (bright disks / dim
+    halos, brightness tied to the disk particle mass) keeps the tails dominant.
+    - **Confirmed cold-disk caveat:** late in the passage the tails diffuse and clump —
+      the predicted fully-cold (Q→0, v_z=0) behavior, **not** a wiring bug. The knob is
+      a small in-plane velocity dispersion (the deferred **warm-disk** milestone); a
+      shorter/tuned integration also sidesteps it. Do not chase this as an IC-assembly
+      bug.
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 
 ## Validation strategy

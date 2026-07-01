@@ -181,6 +181,22 @@ late-time positions — N-body is chaotic).
     an `Rgba16Float` target (DESIGN rejects 16F for core banding) or compute-shader
     accumulation. wgpu 29 API notes: `multiview`→`multiview_mask`,
     `experimental_features` on `DeviceDescriptor`, `PollType::Wait` is a struct variant.
+  - **Contract 3 + renderprep (landed):** the frame-data schema (`galaxy-renderprep`,
+    `frame.rs`) is the decoupling boundary both wgpu and Blender consume — a versioned
+    little-endian format (magic `GLXYFRAM`, v1) mirroring the snapshot layout, SoA and
+    **all-f32** (pos, RGB color, size, brightness) so there is no lossy field to call
+    out; count + AABB bounds are authoritative from the data on write. The `prepare`
+    stage is the MVP **pure map** (no spatial tree): progenitor indexes a color palette
+    (wraps modulo; empty→white), brightness = `brightness_per_mass · mass`, constant
+    splat size, f64→f32 position projection, order preserved. Local density /
+    velocity-dispersion coloring (needs a kNN tree) stays deferred — progenitor color is
+    the money shot. Round-trip + robustness + map tests are always-on.
+  - **camera plane (verified, drives the renderer):** the collision IC places the
+    Kepler orbit **in the x–y plane** (`ic/collision.rs`: pericenter along +x, `r_rel`
+    and `v_rel` have z=0), so the orbital-plane normal is **+Z** and a face-on camera
+    looking down Z shows the tidal tails face-on (not edge-on). The renderer's default
+    view axis is +Z; the view axis is a `Camera` parameter so the deferred orbit views
+    are a config change, not a code change.
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 
 ## Validation strategy

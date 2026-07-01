@@ -279,20 +279,19 @@ impl ForceSolver for BarnesHut {
         });
     }
 
-    #[allow(clippy::needless_range_loop)]
-    fn potential_energy(&self, state: &State) -> f64 {
-        // Exact softened potential (O(N^2)); a global diagnostic, not yet
-        // tree-accelerated. Matches DirectSum's potential exactly.
-        let n = state.len();
-        let eps2 = self.softening * self.softening;
-        let mut u = 0.0;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dx = state.pos[j] - state.pos[i];
-                let r = (dx.length_squared() + eps2).sqrt();
-                u -= self.g * state.mass[i] * state.mass[j] / r;
-            }
-        }
-        u
+    fn potential_energy(&self, _state: &State) -> f64 {
+        // GREEN step: parallel reduction via `potential::potential_energy_parallel`.
+        // Exact softened potential (O(N²)); a global diagnostic, not tree-
+        // accelerated, and identical to DirectSum's potential.
+        todo!("parallel softened potential-energy reduction via rayon")
+    }
+}
+
+impl BarnesHut {
+    /// Serial reference for the exact softened potential — the tolerance oracle
+    /// for the parallel reduction. Shares the kernel with DirectSum (`potential`
+    /// module), so the two solvers' potentials stay identical by construction.
+    pub fn potential_energy_serial(&self, state: &State) -> f64 {
+        crate::potential::potential_energy_serial(state, self.g, self.softening)
     }
 }

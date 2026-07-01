@@ -44,18 +44,17 @@ impl ForceSolver for DirectSum {
         }
     }
 
-    #[allow(clippy::needless_range_loop)]
-    fn potential_energy(&self, state: &State) -> f64 {
-        let n = state.len();
-        let eps2 = self.softening * self.softening;
-        let mut u = 0.0;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dx = state.pos[j] - state.pos[i];
-                let r = (dx.length_squared() + eps2).sqrt();
-                u -= self.g * state.mass[i] * state.mass[j] / r;
-            }
-        }
-        u
+    fn potential_energy(&self, _state: &State) -> f64 {
+        // GREEN step: parallel reduction via `potential::potential_energy_parallel`,
+        // equal to `potential_energy_serial` to a tight relative tolerance.
+        todo!("parallel softened potential-energy reduction via rayon")
+    }
+}
+
+impl DirectSum {
+    /// Serial reference for the exact softened potential — the tolerance oracle
+    /// for the parallel reduction (see `potential` module).
+    pub fn potential_energy_serial(&self, state: &State) -> f64 {
+        crate::potential::potential_energy_serial(state, self.g, self.softening)
     }
 }

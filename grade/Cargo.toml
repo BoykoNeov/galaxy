@@ -1,0 +1,9 @@
+[package]
+name = "galaxy-grade"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+exr = "1"
+png = "0.18"
+thiserror = { workspace = true }

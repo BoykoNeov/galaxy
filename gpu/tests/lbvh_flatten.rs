@@ -85,7 +85,12 @@ fn narrow(pos: &[DVec3]) -> Vec<DVec3> {
 
 /// The f64 reference flat form over the SAME f32-narrowed leaves the GPU flattens —
 /// staged exactly as `LbvhFlat::build` (karras → aggregate → flatten).
-fn reference(sorted_codes: &[u32], sorted_pos: &[DVec3], sorted_mass: &[f64], order: &[u32]) -> LbvhFlat {
+fn reference(
+    sorted_codes: &[u32],
+    sorted_pos: &[DVec3],
+    sorted_mass: &[f64],
+    order: &[u32],
+) -> LbvhFlat {
     let tree = reference_karras(sorted_codes);
     let pos_f = narrow(sorted_pos);
     let mass_f: Vec<f64> = sorted_mass.iter().map(|&m| m as f32 as f64).collect();
@@ -103,7 +108,10 @@ fn walk_leaves(flat: &GpuLbvhFlat) -> Vec<u32> {
     let mut node = 0u32;
     let mut steps = 0u32;
     while node < total {
-        assert!(steps <= 2 * total + 2, "walk did not terminate (bad skip pointers)");
+        assert!(
+            steps <= 2 * total + 2,
+            "walk did not terminate (bad skip pointers)"
+        );
         steps += 1;
         let ni = node as usize;
         if flat.body_count[ni] > 0 {
@@ -206,19 +214,28 @@ fn assert_flat(pos: &[DVec3], mass: &[f64], r: f64) {
             gpu.next[d]
         );
     }
-    assert_eq!(gpu.next[0] as usize, total, "root's subtree spans the whole tree");
+    assert_eq!(
+        gpu.next[0] as usize, total,
+        "root's subtree spans the whole tree"
+    );
     // leaf/internal split.
     let leaves = gpu.body_count.iter().filter(|&&c| c == 1).count();
     let internals = gpu.body_count.iter().filter(|&&c| c == 0).count();
     assert_eq!(leaves, n, "exactly N leaves");
     assert_eq!(internals, n - 1, "exactly N-1 internal nodes");
     for d in 0..total {
-        assert!(gpu.body_count[d] <= 1, "an LBVH leaf holds exactly one body");
+        assert!(
+            gpu.body_count[d] <= 1,
+            "an LBVH leaf holds exactly one body"
+        );
     }
     // a full-open walk visits each body exactly once.
     let mut visited = walk_leaves(&gpu);
     assert_eq!(visited.len(), n, "full-open walk visits N bodies");
-    assert_eq!(visited, gpu.leaf_bodies, "walk order == leaf_bodies (DFS order)");
+    assert_eq!(
+        visited, gpu.leaf_bodies,
+        "walk order == leaf_bodies (DFS order)"
+    );
     visited.sort_unstable();
     assert_eq!(
         visited,
@@ -362,7 +379,11 @@ fn gpu_flatten_two() {
     let (sc, sp, sm, order) = sorted_inputs(&pos, &mass);
     let gpu = flattener().build_flat(&sc, &sp, &sm, &order);
     assert_eq!(gpu.n, 2);
-    assert_eq!(gpu.next, vec![3, 2, 3], "root spans all; leaves point to self+1");
+    assert_eq!(
+        gpu.next,
+        vec![3, 2, 3],
+        "root spans all; leaves point to self+1"
+    );
     assert_eq!(gpu.body_count, vec![0, 1, 1]);
 }
 

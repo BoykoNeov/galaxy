@@ -148,8 +148,9 @@ late-time positions — N-body is chaotic).
     row-form to parallelize). Both solvers share one softened-potential kernel.
   - **parallel `Octree::build` (landed):** the build was the next Amdahl ceiling
     once the fill was parallel. `BuildMode::ParallelExact` (toggle on `BarnesHut`;
-    `new` defaults to `Serial`) reproduces the serial tree **bit-for-bit** — it is
-    NOT a tolerance trade. `build_cell` recurses the same `octant`/`child_center`
+    `new` defaults to it — bit-exact, so default-on changes speed only, and
+    `Serial` stays available via `with_build_mode` for single-thread debugging)
+    reproduces the serial tree **bit-for-bit**. It is NOT a tolerance trade. `build_cell` recurses the same `octant`/`child_center`
     split the serial insert uses, keeps bodies ascending per bucket, and folds the
     aggregate bottom-up in octant order, so topology and every per-node
     `(mass, com, delta)` match to the bit and the whole `accelerations` path stays

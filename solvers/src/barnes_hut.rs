@@ -39,7 +39,8 @@ pub struct BarnesHut {
     pub softening: f64,
     /// Opening angle θ. Smaller = more accurate, more work.
     pub theta: f64,
-    /// Tree construction strategy. Defaults to `Serial` via `new`.
+    /// Tree construction strategy. Defaults to `ParallelExact` via `new` — it is
+    /// bit-exact to `Serial`, so this changes speed only, never results.
     pub build_mode: BuildMode,
 }
 
@@ -49,7 +50,11 @@ impl BarnesHut {
             g,
             softening,
             theta,
-            build_mode: BuildMode::Serial,
+            // Parallel by default: bit-exact to serial, self-falls-back below
+            // PARALLEL_BUILD_MIN, and consistent with the already-parallel force
+            // fill. Opt back into Serial via `with_build_mode` for single-thread
+            // debugging (it remains the equivalence oracle).
+            build_mode: BuildMode::ParallelExact,
         }
     }
 

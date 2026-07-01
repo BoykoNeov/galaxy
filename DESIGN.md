@@ -121,8 +121,8 @@ late-time positions — N-body is chaotic).
   Plummer sphere holds equilibrium over ~12 t_dyn under both DirectSum and the
   BarnesHut workhorse (Barnes 1994 opening criterion). BH validated at scale by an
   ignored smoke-test: N=30k forces match the oracle to 1.7e-3 RMS and BH runs 2.6×
-  faster than direct sum. rayon parallelism deferred (DESIGN prose, not an M1
-  bullet) → fold into M2/perf.
+  faster than direct sum (serial). rayon parallelism deferred (DESIGN prose, not an
+  M1 bullet) → since landed (see M2/perf note).
 - **M2** ✅ — two-galaxy collision IC → snapshots; conservation + small-N REBOUND cross-check (Stage 3).
   Two Plummer galaxies placed on a relative Kepler encounter (parabolic = Toomre
   tidal-tail case); the orbital setup is verified against an independent
@@ -135,7 +135,16 @@ late-time positions — N-body is chaotic).
   export + `validate/rebound/cross_check.py`), not gated in `cargo test` (REBOUND is
   an external dep; HDF5 is a Windows link landmine — bridged via NumPy). Its physics
   formulas are cross-validated against the engine to roundoff; it has not been run
-  against REBOUND in this environment. rayon parallelism still deferred → M3/perf.
+  against REBOUND in this environment.
+  - **rayon parallelism (landed post-M2):** the Barnes-Hut force fill runs over
+    independent targets with `par_iter_mut` — **bit-exact** to the serial reference
+    (no per-target sum is reassociated) and guarded by an equivalence + determinism
+    test. At N=30k this takes BH from 2.6× to ~22× faster than serial DirectSum. The
+    O(N²) softened potential (the energy diagnostic, still O(N²) even under BH) is a
+    rayon reduction, equal to serial within 1e-12 relative (reductions reassociate,
+    so tolerance-tested, not bit-exact). DirectSum's *force* path stays serial by
+    choice (small-N oracle; its Newton's-third-law pairing would need a 2×-flops
+    row-form to parallelize). Both solvers share one softened-potential kernel.
 - **M3** — renderprep + wgpu render + grade → first tidal-tail movie
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 

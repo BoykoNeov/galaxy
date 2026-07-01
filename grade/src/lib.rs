@@ -9,7 +9,12 @@
 //!
 //! Grade = exposure → tone curve (ACES/Reinhard) → sRGB OETF → 16-bit quantize.
 
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
+
+// Targeted import (NOT the prelude glob, which shadows `std::Result`).
+use exr::prelude::read_first_rgba_layer_from_file;
 
 /// The tone-mapping operator: how unbounded linear HDR is compressed to `[0, 1]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,21 +61,49 @@ pub enum GradeError {
 /// Apply the tone curve `op` to a linear (already exposure-scaled) RGB triple,
 /// producing display-referred values in `[0, 1]`.
 pub fn tone_curve(c: [f32; 3], op: ToneMap) -> [f32; 3] {
-    let _ = (c, op);
-    todo!("ACES-approx / Reinhard per channel, clamped to [0,1]")
+    c.map(|x| match op {
+        ToneMap::AcesApprox => aces_approx(x),
+        ToneMap::Reinhard => (x / (1.0 + x)).clamp(0.0, 1.0),
+    })
+}
+
+/// Narkowicz (2015) ACES filmic approximation, clamped to `[0, 1]`.
+fn aces_approx(x: f32) -> f32 {
+    const A: f32 = 2.51;
+    const B: f32 = 0.03;
+    const C: f32 = 2.43;
+    const D: f32 = 0.59;
+    const E: f32 = 0.14;
+    ((x * (A * x + B)) / (x * (C * x + D) + E)).clamp(0.0, 1.0)
 }
 
 /// The sRGB opto-electronic transfer function (linear `[0,1]` → sRGB `[0,1]`).
 pub fn linear_to_srgb(x: f32) -> f32 {
-    let _ = x;
-    todo!("piecewise sRGB OETF")
+    let x = x.clamp(0.0, 1.0);
+    if x <= 0.003_130_8 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 /// Grade one linear-HDR pixel to a 16-bit sRGB triple: exposure → tone curve →
 /// sRGB encode → quantize to `[0, 65535]`.
 pub fn tonemap(linear: [f32; 3], cfg: &GradeConfig) -> [u16; 3] {
-    let _ = (linear, cfg);
-    todo!("exposure, tone_curve, linear_to_srgb, quantize")
+    let exposed = linear.map(|c| c * cfg.exposure);
+    let toned = tone_curve(exposed, cfg.tonemap);
+    let mut out = [0u16; 3];
+    for (o, &t) in out.iter_mut().zip(&toned) {
+        let s = linear_to_srgb(t);
+        // Round-to-nearest into [0, 65535].
+        out_quantize(o, s);
+    }
+    out
+}
+
+/// Quantize an sRGB value in `[0, 1]` to a 16-bit sample (round to nearest).
+fn out_quantize(slot: &mut u16, srgb: f32) {
+    *slot = (srgb.clamp(0.0, 1.0) * u16::MAX as f32 + 0.5) as u16;
 }
 
 /// Grade a linear-HDR OpenEXR file into a 16-bit sRGB PNG under `cfg`.
@@ -79,6 +112,47 @@ pub fn grade_file<P: AsRef<Path>, Q: AsRef<Path>>(
     png_path: Q,
     cfg: &GradeConfig,
 ) -> Result<(), GradeError> {
-    let _ = (exr_path.as_ref(), png_path.as_ref(), cfg);
-    todo!("read EXR RGB, tonemap each pixel, write 16-bit RGB PNG")
+    // Read the linear-HDR EXR into an RGB buffer (alpha dropped — grade is opaque).
+    struct Rgb {
+        w: usize,
+        h: usize,
+        px: Vec<[f32; 3]>,
+    }
+    let image = read_first_rgba_layer_from_file(
+        exr_path.as_ref(),
+        |resolution, _channels| Rgb {
+            w: resolution.width(),
+            h: resolution.height(),
+            px: vec![[0.0; 3]; resolution.width() * resolution.height()],
+        },
+        |img: &mut Rgb, pos, (r, g, b, _a): (f32, f32, f32, f32)| {
+            let i = pos.y() * img.w + pos.x();
+            img.px[i] = [r, g, b];
+        },
+    )
+    .map_err(|e| GradeError::Exr(e.to_string()))?;
+    let rgb = image.layer_data.channel_data.pixels;
+
+    // Tonemap each pixel to a 16-bit sRGB triple, packed big-endian for PNG.
+    let mut bytes = Vec::with_capacity(rgb.w * rgb.h * 6);
+    for p in &rgb.px {
+        for sample in tonemap(*p, cfg) {
+            bytes.extend_from_slice(&sample.to_be_bytes());
+        }
+    }
+
+    let writer = BufWriter::new(File::create(png_path)?);
+    let mut encoder = png::Encoder::new(writer, rgb.w as u32, rgb.h as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Sixteen);
+    let mut png_writer = encoder
+        .write_header()
+        .map_err(|e| GradeError::Png(e.to_string()))?;
+    png_writer
+        .write_image_data(&bytes)
+        .map_err(|e| GradeError::Png(e.to_string()))?;
+    png_writer
+        .finish()
+        .map_err(|e| GradeError::Png(e.to_string()))?;
+    Ok(())
 }

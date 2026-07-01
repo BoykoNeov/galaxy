@@ -118,6 +118,98 @@ fn child_center(center: DVec3, half: f64, oct: usize) -> DVec3 {
     )
 }
 
+/// Cells with more than this many bodies fan their (up to 8) child builds out
+/// across rayon; smaller cells build their children inline. Because dense regions
+/// subdivide more, the split count adapts to the actual density — a clustered
+/// collision IC produces many tasks in the core, not one giant serial subtree.
+const BUILD_FANOUT_MIN: usize = 512;
+
+/// Build the subtree for one cell (`center`, `half`) over `bodies` (which MUST be
+/// ascending by original index) and return it as a self-contained arena whose
+/// root — fully aggregated `(mass, com, delta)` — is at index 0.
+///
+/// This reproduces the serial build's tree exactly: it uses the same `octant`
+/// split, the same subdivide rule (`len > LEAF_CAP && half > min_half`), keeps
+/// bodies ascending within every bucket, and folds the aggregate bottom-up in
+/// octant order (children 0..8) — so nothing the force traversal reads is ever
+/// reassociated. Node *arena indices* differ from the serial layout, but the
+/// reachable structure and every per-node value are bit-identical.
+fn build_cell(
+    center: DVec3,
+    half: f64,
+    min_half: f64,
+    bodies: Vec<u32>,
+    pos: &[DVec3],
+    mass: &[f64],
+) -> Vec<Node> {
+    // Leaf: too few bodies to split, or the cell has shrunk to the coincidence
+    // floor (a bucket of near-identical points, resolved later by direct sum).
+    if bodies.len() <= LEAF_CAP || half <= min_half {
+        let mut node = Node::leaf(center, half);
+        let (m, c) = bodies.iter().fold((0.0, DVec3::ZERO), |(m, c), &b| {
+            (m + mass[b as usize], c + pos[b as usize] * mass[b as usize])
+        });
+        node.mass = m;
+        node.com = if m > 0.0 { c / m } else { center };
+        node.delta = (node.com - center).length();
+        node.bodies = bodies;
+        return vec![node];
+    }
+
+    // Internal: partition into octants, preserving ascending body order per bucket.
+    let mut groups: [Vec<u32>; 8] = Default::default();
+    for b in bodies.iter().copied() {
+        groups[octant(center, pos[b as usize])].push(b);
+    }
+    let child_half = 0.5 * half;
+    // Occupied octants (in ascending order) paired with their bodies.
+    let tasks: Vec<(usize, Vec<u32>)> = groups
+        .into_iter()
+        .enumerate()
+        .filter(|(_, g)| !g.is_empty())
+        .collect();
+
+    // Build each occupied child's arena. Fan out only for large cells; small ones
+    // build inline to avoid task overhead. Either way the results are reassembled
+    // in ascending octant order below, so the arena layout is deterministic.
+    let n_here: usize = tasks.iter().map(|(_, g)| g.len()).sum();
+    let build = |(oct, g): (usize, Vec<u32>)| {
+        let cc = child_center(center, half, oct);
+        (oct, build_cell(cc, child_half, min_half, g, pos, mass))
+    };
+    let built: Vec<(usize, Vec<Node>)> = if n_here > BUILD_FANOUT_MIN {
+        tasks.into_par_iter().map(build).collect()
+    } else {
+        tasks.into_iter().map(build).collect()
+    };
+
+    // Splice children into one arena and aggregate the root over them in octant
+    // order — the exact summation order the serial `aggregate` uses.
+    let mut nodes: Vec<Node> = vec![Node::leaf(center, half)];
+    nodes[0].leaf = false;
+    let mut m = 0.0;
+    let mut c = DVec3::ZERO;
+    for (oct, arena) in built {
+        let base = nodes.len() as u32;
+        let (cm, ccom) = (arena[0].mass, arena[0].com);
+        for mut node in arena {
+            for slot in node.children.iter_mut() {
+                if *slot != SENTINEL {
+                    *slot += base;
+                }
+            }
+            nodes.push(node);
+        }
+        nodes[0].children[oct] = base; // child root landed at `base`
+        m += cm;
+        c += ccom * cm;
+    }
+    nodes[0].mass = m;
+    nodes[0].com = if m > 0.0 { c / m } else { center };
+    nodes[0].delta = (nodes[0].com - center).length();
+    nodes
+}
+
 struct Octree {
     nodes: Vec<Node>,
     min_half: f64,
@@ -134,8 +226,33 @@ impl Octree {
     /// Parallel build that reproduces the serial tree bit-for-bit (topology,
     /// leaf body ordering, and aggregate summation order all preserved). See
     /// [`BuildMode::ParallelExact`].
-    fn build_parallel_exact(_pos: &[DVec3], _mass: &[f64]) -> Octree {
-        todo!("partition-then-build parallel octree (bit-exact to serial)")
+    ///
+    /// Strategy: the root bounding box is a rayon min/max reduction (associative
+    /// and exact, so bit-identical to the serial fold). The tree is then built by
+    /// [`build_cell`], which recursively partitions bodies by the *same* octant
+    /// predicates the serial insert uses and assembles each cell bottom-up —
+    /// fanning its 8 child builds out across rayon when the cell is large. Each
+    /// subtree is built into its own arena (no shared-tree mutation, so no
+    /// concurrent-insertion hazard) and spliced with a child-pointer offset remap.
+    fn build_parallel_exact(pos: &[DVec3], mass: &[f64]) -> Octree {
+        // Small trees don't amortize the partition/rayon overhead — the serial
+        // build (which this must match exactly anyway) is faster below the cutoff.
+        if pos.len() < PARALLEL_BUILD_MIN {
+            return Octree::build_serial(pos, mass);
+        }
+        // Root bounding cube — identical to `build_serial`'s, since componentwise
+        // min/max is associative + exact: the parallel reduction returns the same
+        // lo/hi bits regardless of how rayon splits the range.
+        let (lo, hi) = pos.par_iter().map(|&p| (p, p)).reduce(
+            || (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+            |(alo, ahi), (blo, bhi)| (alo.min(blo), ahi.max(bhi)),
+        );
+        let center = (lo + hi) * 0.5;
+        let half = (0.5 * (hi - lo).max_element()).max(1e-12) * (1.0 + 1e-9);
+        let min_half = half * MIN_HALF_FRAC;
+        let bodies: Vec<u32> = (0..pos.len() as u32).collect();
+        let nodes = build_cell(center, half, min_half, bodies, pos, mass);
+        Octree { nodes, min_half }
     }
 
     fn build_serial(pos: &[DVec3], mass: &[f64]) -> Octree {

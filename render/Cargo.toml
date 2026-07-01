@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+galaxy-renderprep = { path = "../renderprep" }
+glam = { workspace = true }
+thiserror = { workspace = true }
 wgpu = "29"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+exr = "1"

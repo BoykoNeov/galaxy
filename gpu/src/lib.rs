@@ -34,9 +34,11 @@
 
 pub mod gpu_direct_sum;
 pub mod gpu_tree;
+pub mod lbvh_morton;
 
 pub use gpu_direct_sum::GpuDirectSum;
 pub use gpu_tree::GpuTree;
+pub use lbvh_morton::{GpuMorton, GpuMortonBuilder};
 
 /// Errors bringing up or driving the GPU compute context. Returned rather than
 /// panicking so callers can degrade to a CPU solver on a headless / GPU-less box.

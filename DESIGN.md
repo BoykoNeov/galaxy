@@ -504,10 +504,41 @@ late-time positions — N-body is chaotic).
       per-lane ±1 reference agreement near the origin; large-coordinate divergence
       characterized; codes are valid 30-bit interleaves of in-range lanes; same-device
       bit-determinism; single/coincident/empty edge cases. GPU-gated, fail-loud.
+  - **GPU Morton sort (landed, M4d) — second stage of the GPU-resident build, the
+    load-bearing risk:** `galaxy_gpu::GpuSorter` ports the LBVH build's sort step — `codes →
+    order` by `(code, original index)` — to a wgpu **compute** LSD radix sort, gated directly
+    against the CPU reference `galaxy_solvers::reference_sort` (extracted as the single source
+    of truth for the tie-break, exactly as `reference_morton` was for M4c).
+    - **Pure integer ⇒ the gate is bit-exact, not tolerance.** Unlike every prior GPU stage
+      (f32, gated on tolerance + same-device determinism), the sort touches **no floats**:
+      `u32` codes in, a `u32` permutation out. So the GPU result must equal the f64 CPU
+      reference **bit-for-bit** — `order == reference_sort(codes)`, a *unique* total order
+      because the reference keys on the pair `(code, index)` and `index` is unique. The real
+      hazard is therefore not nondeterminism (an integer histogram commutes; a fixed-order
+      scatter is deterministic by construction) but **scatter/scan correctness**.
+    - **Single-invocation stable counting sort (correctness made unarguable).** `NUM_PASSES=4`
+      passes of an 8-bit digit, one dispatch per pass, host-side ping-pong between two
+      `(key, payload)` buffer pairs (even pass count ⇒ result back in buffer A). Each pass runs
+      in a **single invocation** (`@workgroup_size(1)`): 256-bucket histogram → exclusive scan
+      → **stable serial scatter** in ascending source order. With the payload seeded to `0..n`
+      the stable scatter breaks code ties by ascending original index — exactly reproducing
+      `reference_sort`. No atomics, no cross-invocation ordering: the single invocation buys
+      *unarguable correctness*, not determinism (which is free here).
+    - **Scope honesty.** This is a **reference-grade** sort, not the scale sort: one thread
+      doing all the work is O(passes·N) serial. The named performance refinement (deferred,
+      alongside GPU-resident state) is a **parallel stable scatter** — per-tile local ranks +
+      a scanned global offset, the standard multi-workgroup radix — which reintroduces the
+      scatter ordering this landing deliberately avoids; 63-bit codes stay a two-word (2× `u32`)
+      pass. Land the simple correct thing, name the fast one.
+    - **Gates:** `order == reference_sort` bit-exact on Morton-code clouds and uniform random
+      30-bit codes; `order` a permutation of `0..n` with a non-decreasing gathered key array;
+      tie-break stability (heavy-duplicate codes order by ascending index); two pass-localizing
+      cases (differ only in the low byte → pass 1; only in bits 24–29 → pass 4); same-device
+      bit-determinism; adversarial orderings (sorted / reversed / all-equal); large N (2¹⁶);
+      empty/single edges. GPU-gated, fail-loud.
   - **Remaining M4+:** the **rest of the GPU port of the M4b LBVH build** (each stage gated
-    vs the CPU reference; Morton+bbox landed as M4c above): **GPU sort** [the load-bearing
-    risk — deterministic `u32` radix on `(code, index)`, same-device gate] → Karras
-    tree-build kernel + atomic-flag bottom-up aggregation → a `GpuLbvh` f32 binary-BVH
+    vs the CPU reference; Morton+bbox landed as M4c, sort as M4d above): **Karras
+    tree-build kernel** + atomic-flag bottom-up aggregation → a `GpuLbvh` f32 binary-BVH
     traversal kernel; then, separately and larger, keeping particle *state* GPU-resident
     across steps, which changes the `accelerations(&State)→acc` interface) / PM / TreePM /
     gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline).

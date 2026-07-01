@@ -137,7 +137,9 @@ fn gpu_sort_breaks_ties_by_ascending_index() {
 #[test]
 fn gpu_sort_localizes_to_low_byte_pass() {
     const HIGH: u32 = 0x00ab_cd00; // fixed above bit 8
-    let codes: Vec<u32> = (0..4096u32).map(|i| HIGH | ((i.wrapping_mul(37)) & 0xff)).collect();
+    let codes: Vec<u32> = (0..4096u32)
+        .map(|i| HIGH | ((i.wrapping_mul(37)) & 0xff))
+        .collect();
     assert_matches_reference(&codes);
 }
 
@@ -147,7 +149,7 @@ fn gpu_sort_localizes_to_low_byte_pass() {
 #[test]
 fn gpu_sort_localizes_to_high_byte_pass() {
     // 6 significant bits (0..63) placed at bit 24; low 24 bits identical across all codes.
-    let codes: Vec<u32> = (0..4096u32).map(|i| ((i % 64) << 24)).collect();
+    let codes: Vec<u32> = (0..4096u32).map(|i| (i % 64) << 24).collect();
     assert_matches_reference(&codes);
 }
 

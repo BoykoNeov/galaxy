@@ -44,10 +44,8 @@ impl ForceSolver for DirectSum {
         }
     }
 
-    fn potential_energy(&self, _state: &State) -> f64 {
-        // GREEN step: parallel reduction via `potential::potential_energy_parallel`,
-        // equal to `potential_energy_serial` to a tight relative tolerance.
-        todo!("parallel softened potential-energy reduction via rayon")
+    fn potential_energy(&self, state: &State) -> f64 {
+        crate::potential::potential_energy_parallel(state, self.g, self.softening)
     }
 }
 

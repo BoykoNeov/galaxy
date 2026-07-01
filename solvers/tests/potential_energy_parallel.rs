@@ -39,7 +39,10 @@ fn cluster(seed: u64, n: usize) -> State {
 const SIZES: [usize; 4] = [1, 137, 1024, 4096];
 
 fn assert_close(par: f64, ser: f64, ctx: &str) {
-    assert!(par.is_finite(), "parallel potential not finite ({ctx}): {par}");
+    assert!(
+        par.is_finite(),
+        "parallel potential not finite ({ctx}): {par}"
+    );
     let tol = 1e-12 * ser.abs().max(1e-300);
     assert!(
         (par - ser).abs() <= tol,

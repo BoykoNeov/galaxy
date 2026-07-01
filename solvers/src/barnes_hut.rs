@@ -279,11 +279,10 @@ impl ForceSolver for BarnesHut {
         });
     }
 
-    fn potential_energy(&self, _state: &State) -> f64 {
-        // GREEN step: parallel reduction via `potential::potential_energy_parallel`.
+    fn potential_energy(&self, state: &State) -> f64 {
         // Exact softened potential (O(N²)); a global diagnostic, not tree-
         // accelerated, and identical to DirectSum's potential.
-        todo!("parallel softened potential-energy reduction via rayon")
+        crate::potential::potential_energy_parallel(state, self.g, self.softening)
     }
 }
 

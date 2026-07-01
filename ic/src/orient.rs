@@ -36,21 +36,23 @@ impl Orientation {
     /// Prograde, coplanar: the identity. The disk spin stays along +Z, co-rotating
     /// with the orbital angular momentum — the tail-making resonant passage.
     pub fn prograde() -> Self {
-        todo!()
+        Self {
+            rot: DQuat::IDENTITY,
+        }
     }
 
     /// Retrograde, coplanar: the disk spin is flipped to −Z (a π rotation about the
     /// line of nodes, +x). The disk still lies in the orbital plane but counter-
     /// rotates. Equivalent to `inclined(π)`.
     pub fn retrograde() -> Self {
-        todo!()
+        Self::inclined(std::f64::consts::PI)
     }
 
     /// Tilt the disk by `inclination` (radians) about the line of nodes (+x): the
     /// spin axis moves from +Z to angle `inclination` off +Z. `inclined(0)` is
     /// prograde; `inclined(π)` is retrograde.
     pub fn inclined(inclination: f64) -> Self {
-        todo!()
+        Self::from_angles(inclination, 0.0)
     }
 
     /// The general orientation from the two Toomre angles: `inclination` (tilt of
@@ -59,13 +61,12 @@ impl Orientation {
     /// so the spin axis +Z maps to (sin i·sin ω, −sin i·cos ω, cos i) — a tilt of
     /// exactly `inclination` off +Z, with the node line rotated by `argument`.
     pub fn from_angles(inclination: f64, argument: f64) -> Self {
-        let _ = (inclination, argument);
-        todo!()
+        let rot = DQuat::from_rotation_z(argument) * DQuat::from_rotation_x(inclination);
+        Self { rot }
     }
 
     /// Apply the orientation to a body-frame vector (position or velocity).
     pub fn apply(&self, v: DVec3) -> DVec3 {
-        let _ = v;
-        todo!()
+        self.rot * v
     }
 }

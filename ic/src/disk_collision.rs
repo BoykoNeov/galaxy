@@ -20,8 +20,9 @@
 //! The combined realization is delivered in the global zero-COM / zero-momentum
 //! frame with contiguous unique ids, galaxy 1's particles first.
 
-use galaxy_core::{Progenitor, State};
+use galaxy_core::{DVec3, ParticleId, Progenitor, State};
 
+use crate::encounter;
 use crate::{ExponentialDisk, Orientation};
 
 /// A two-body Kepler encounter between two rotating disk galaxies, each with its
@@ -57,30 +58,44 @@ impl DiskCollision {
         pericenter: f64,
         separation: f64,
     ) -> Self {
-        let _ = (galaxy1, galaxy2, eccentricity, pericenter, separation);
-        todo!()
+        assert_eq!(
+            galaxy1.g, galaxy2.g,
+            "both galaxies must share the same gravitational constant G"
+        );
+        encounter::validate_orbit(eccentricity, pericenter, separation);
+        Self {
+            galaxy1,
+            galaxy2,
+            orient1: Orientation::prograde(),
+            orient2: Orientation::prograde(),
+            eccentricity,
+            pericenter,
+            separation,
+        }
     }
 
     /// The shared gravitational constant `G`.
     pub fn g(&self) -> f64 {
-        todo!()
+        self.galaxy1.g
     }
 
     /// Relative position/velocity `(r_rel, v_rel)` of the two COMs on the incoming
     /// branch of the Kepler orbit (see [`crate::Collision::relative_state`]).
-    pub fn relative_state(&self) -> (galaxy_core::DVec3, galaxy_core::DVec3) {
-        todo!()
+    pub fn relative_state(&self) -> (DVec3, DVec3) {
+        let mu = self.g() * (self.galaxy1.total_mass() + self.galaxy2.total_mass());
+        encounter::relative_state(mu, self.eccentricity, self.pericenter, self.separation)
     }
 
     /// Per-galaxy COM `(position, velocity)` in the global zero-COM / zero-momentum
     /// frame: `((r1, v1), (r2, v2))`.
-    pub fn com_states(
-        &self,
-    ) -> (
-        (galaxy_core::DVec3, galaxy_core::DVec3),
-        (galaxy_core::DVec3, galaxy_core::DVec3),
-    ) {
-        todo!()
+    pub fn com_states(&self) -> ((DVec3, DVec3), (DVec3, DVec3)) {
+        let (r_rel, v_rel) = self.relative_state();
+        encounter::com_states(
+            self.galaxy1.total_mass(),
+            self.galaxy2.total_mass(),
+            r_rel,
+            v_rel,
+        )
     }
 
     /// Sample the full encounter: galaxy 1 gets `n_halo1` halo + `n_disk1` disk
@@ -97,8 +112,102 @@ impl DiskCollision {
         n_disk2: usize,
         seed: u64,
     ) -> State {
-        let _ = (n_halo1, n_disk1, n_halo2, n_disk2, seed);
-        let _ = Progenitor(0);
-        todo!()
+        let ((r1, v1), (r2, v2)) = self.com_states();
+
+        // Each galaxy is sampled in its own zero-COM/zero-momentum body frame from
+        // well-separated PRNG streams. `ExponentialDisk::sample` internally consumes
+        // TWO streams — `seed` (halo) and `mix_seed(seed)` (disk) — so galaxy 1 owns
+        // {seed, mix(seed)}. Galaxy 2 must start clear of both, hence two mix steps:
+        // it owns {mix²(seed), mix³(seed)}, disjoint from galaxy 1 (SplitMix64's
+        // finalizer is a bijection, so the four seeds are distinct).
+        let s1 = self.galaxy1.sample(n_halo1, n_disk1, seed);
+        let s2 = self
+            .galaxy2
+            .sample(n_halo2, n_disk2, mix_seed(mix_seed(seed)));
+
+        let n = n_halo1 + n_disk1 + n_halo2 + n_disk2;
+        let mut pos = Vec::with_capacity(n);
+        let mut vel = Vec::with_capacity(n);
+        let mut mass = Vec::with_capacity(n);
+        let mut progenitor = Vec::with_capacity(n);
+
+        // Galaxy 1: rotate the body frame by its orientation, then rigidly place at
+        // its COM orbital state. `ExponentialDisk::sample` already tags halo=0,
+        // disk=1, so galaxy 1 needs no remap.
+        place_galaxy(
+            &s1, self.orient1, r1, v1, 0, &mut pos, &mut vel, &mut mass, &mut progenitor,
+        );
+        // Galaxy 2: same, but shift its progenitor tags by +2 so its halo becomes
+        // Progenitor(2) and its disk Progenitor(3) — four distinct species overall.
+        place_galaxy(
+            &s2, self.orient2, r2, v2, 2, &mut pos, &mut vel, &mut mass, &mut progenitor,
+        );
+
+        // The per-galaxy COM split zeros the barycenter analytically, but rotation
+        // roundoff and each galaxy's finite-N residual leave an O(machine-ε) offset;
+        // a final mass-weighted recenter delivers the global zero-COM/zero-momentum
+        // frame to roundoff.
+        let mtot: f64 = mass.iter().sum();
+        let mean_pos = pos
+            .iter()
+            .zip(&mass)
+            .fold(DVec3::ZERO, |acc, (p, m)| acc + *p * *m)
+            / mtot;
+        let mean_vel = vel
+            .iter()
+            .zip(&mass)
+            .fold(DVec3::ZERO, |acc, (v, m)| acc + *v * *m)
+            / mtot;
+        for p in &mut pos {
+            *p -= mean_pos;
+        }
+        for v in &mut vel {
+            *v -= mean_vel;
+        }
+
+        let id = (0..n as u64).map(ParticleId).collect();
+        State {
+            pos,
+            vel,
+            mass,
+            id,
+            progenitor,
+            time: 0.0,
+            a: 1.0,
+        }
     }
+}
+
+/// Rotate a body-frame galaxy by `orient`, boost/translate it to its COM orbital
+/// state `(r_com, v_com)`, remap its progenitor tags by `prog_shift`, and append
+/// the result to the output buffers. A rotation is rigid, so it preserves the
+/// galaxy's internal structure and its body-frame zero-COM/zero-momentum framing;
+/// the placement is then a pure rigid-body move.
+#[allow(clippy::too_many_arguments)]
+fn place_galaxy(
+    s: &State,
+    orient: Orientation,
+    r_com: DVec3,
+    v_com: DVec3,
+    prog_shift: u16,
+    pos: &mut Vec<DVec3>,
+    vel: &mut Vec<DVec3>,
+    mass: &mut Vec<f64>,
+    progenitor: &mut Vec<Progenitor>,
+) {
+    for i in 0..s.len() {
+        pos.push(orient.apply(s.pos[i]) + r_com);
+        vel.push(orient.apply(s.vel[i]) + v_com);
+        mass.push(s.mass[i]);
+        progenitor.push(Progenitor(s.progenitor[i].0 + prog_shift));
+    }
+}
+
+/// One SplitMix64 step, deriving galaxy 2's seed from galaxy 1's so the two draw
+/// from well-separated, independent PRNG streams. Mirrors `collision.rs`.
+fn mix_seed(seed: u64) -> u64 {
+    let z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }

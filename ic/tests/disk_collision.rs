@@ -34,7 +34,7 @@ const NH1: usize = 3000;
 const ND1: usize = 3000;
 const NH2: usize = 2000;
 const ND2: usize = 2000;
-const SEED: u64 = 0x0D15C_0111;
+const SEED: u64 = 0x0D15_C011;
 
 /// Osculating (semi-major axis, eccentricity) of a relative two-body orbit with
 /// gravitational parameter `mu`. Independent textbook closed form.

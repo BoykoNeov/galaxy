@@ -13,10 +13,14 @@
 //!     in `xᵢ − xⱼ`: relative error ≈ (coordinate magnitude / separation) · ε_f32.
 //!
 //! So the **unit-box** gate (coords O(1), √128·ε ≈ 1.4e-6 baseline, ×~100 close-pair
-//! conditioning) is bounded well under 3e-4 RMS; the **large-coordinate** gate
-//! (offset 5000, cancellation factor ~5000·ε ≈ 6e-4) is deliberately looser AND is
-//! asserted to be *worse* than the unit-box case — proving the f32 cancellation the
-//! GPU path must own is real (the analogue of "BH error grows with θ").
+//! conditioning) is bounded well under 3e-4 RMS. The **large-coordinate** gate
+//! (offset D=5000) is where cancellation bites: subtracting two f32 coordinates of
+//! magnitude D loses ~D·ε absolute precision (≈ √2·D·ε ≈ 8.4e-4), and the tightest
+//! pairs' separation is floored at the softening ε_s = 0.05, so the *worst-pair*
+//! relative force error ≈ √2·D·ε / ε_s ≈ 1.7e-2 — the system RMS sits below that
+//! (< 3e-2). It is deliberately looser AND asserted to be *worse* than the unit-box
+//! case — proving the f32 cancellation the GPU path must own is real and
+//! coordinate-scale driven (the analogue of "BH error grows with θ").
 //!
 //! GPU-gated: these need a wgpu adapter. On a box without one, `GpuDirectSum::new`
 //! returns `NoAdapter` and these tests fail loudly (by design — matches the M3
@@ -28,9 +32,6 @@ use galaxy_solvers::DirectSum;
 
 const G: f64 = 1.0;
 const EPS: f64 = 0.05;
-
-/// f32 machine epsilon (2⁻²³) — the unit that scales every tolerance below.
-const EPS_F32: f64 = 1.192_092_9e-7;
 
 fn gpu(g: f64, eps: f64) -> GpuDirectSum {
     GpuDirectSum::new(g, eps).expect("wgpu adapter required for GPU solver tests")
@@ -112,7 +113,10 @@ fn gpu_matches_oracle_unit_box() {
         let worst = worst_rel_err(&got, &exact);
         // √128·ε ≈ 1.4e-6 baseline, ×~100 close-pair conditioning ⇒ ≪ 3e-4.
         assert!(rms < 3e-4, "unit-box RMS rel err {rms:e} (seed {seed})");
-        assert!(worst < 5e-2, "unit-box worst rel err {worst:e} (seed {seed})");
+        assert!(
+            worst < 5e-2,
+            "unit-box worst rel err {worst:e} (seed {seed})"
+        );
     }
 }
 
@@ -139,8 +143,11 @@ fn gpu_large_coordinate_cancellation_is_real_and_bounded() {
         let rms_far = rms_rel_err(&got_far, &exact_far);
         let rms_near = rms_rel_err(&got_near, &exact_near);
 
-        // Cancellation factor ≈ SHIFT·ε ≈ 6e-4 ⇒ bounded well under 5e-3.
-        assert!(rms_far < 5e-3, "large-coord RMS rel err {rms_far:e} (seed {seed})");
+        // Worst-pair rel err ≈ √2·SHIFT·ε_f32 / softening ≈ 1.7e-2; RMS sits under it.
+        assert!(
+            rms_far < 3e-2,
+            "large-coord RMS rel err {rms_far:e} (seed {seed})"
+        );
         // The whole point of the GPU path's precision caveat: coordinate magnitude
         // degrades f32. Far must be materially worse than near.
         assert!(
@@ -198,7 +205,11 @@ fn gpu_handles_empty_and_single() {
     let a = accel(&mut solver, &empty);
     assert!(a.is_empty());
 
-    let one = State::from_phase_space(vec![DVec3::new(1.0, 2.0, 3.0)], vec![DVec3::ZERO], vec![1.0]);
+    let one = State::from_phase_space(
+        vec![DVec3::new(1.0, 2.0, 3.0)],
+        vec![DVec3::ZERO],
+        vec![1.0],
+    );
     let a = accel(&mut solver, &one);
     assert_eq!(a, vec![DVec3::ZERO], "a lone particle feels no force");
 }

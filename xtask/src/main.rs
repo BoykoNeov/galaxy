@@ -21,10 +21,14 @@ use glam::Vec3;
 
 // --- Scenario: a parabolic (Toomre) coplanar-PROGRADE encounter of two rotating
 //     exponential-disk galaxies — the IC that makes thin curved tidal tails (a
-//     cold disk resonantly amplified in a prograde passage), which the earlier
-//     two-Plummer movie physically could not. Each galaxy is a cold, low-mass disk
-//     in a live Plummer halo that carries most of the mass and stabilizes it. Both
-//     disks default to prograde (spin +Z, co-rotating with the x–y orbit).
+//     disk resonantly amplified in a prograde passage), which the earlier
+//     two-Plummer movie physically could not. Each galaxy is a low-mass disk in a
+//     live Plummer halo that carries most of the mass and stabilizes it. Both disks
+//     default to prograde (spin +Z, co-rotating with the x–y orbit). The disks are
+//     WARM (Toomre Q≈1.5): in-plane + vertical velocity dispersion balanced by the
+//     asymmetric-drift rotation lag, so the disks resist the local fragmentation a
+//     fully-cold (Q→0) disk suffers over the several orbits of the passage while
+//     still amplifying the thin prograde tails.
 const G: f64 = 1.0;
 // Galaxy 1 (primary): halo + disk.
 const HALO_M1: f64 = 1.0;
@@ -39,6 +43,7 @@ const DISK_RD2: f64 = 0.45;
 // Shared disk geometry (thin; truncated a few scale lengths out).
 const DISK_HZ_FRAC: f64 = 0.1; // scale height = 0.1·Rd (thin disk)
 const DISK_RMAX_FRAC: f64 = 4.0; // truncate at 4·Rd
+const DISK_Q: f64 = 1.5; // Toomre warmth — Q>1 suppresses fragmentation, tails intact
 const ECC: f64 = 1.0; // parabolic — the classic tidal-tail case
 const PERI: f64 = 1.5;
 const SEP: f64 = 8.0;
@@ -98,14 +103,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DISK_HZ_FRAC * DISK_RD1,
         DISK_RMAX_FRAC * DISK_RD1,
         Plummer::new(G, HALO_M1, HALO_A1),
-    );
+    )
+    .with_toomre_q(DISK_Q);
     let galaxy2 = ExponentialDisk::new(
         DISK_M2,
         DISK_RD2,
         DISK_HZ_FRAC * DISK_RD2,
         DISK_RMAX_FRAC * DISK_RD2,
         Plummer::new(G, HALO_M2, HALO_A2),
-    );
+    )
+    .with_toomre_q(DISK_Q);
     // Default orientation is prograde/prograde (coplanar) — the cleanest-tail
     // passage. Set `collision.orient1/orient2` for retrograde or inclined disks.
     let collision = DiskCollision::new(galaxy1, galaxy2, ECC, PERI, SEP);

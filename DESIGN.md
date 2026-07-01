@@ -65,7 +65,7 @@ renderer.
 galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
 ├─ solvers/      DirectSum (oracle), BarnesHut (workhorse)   [later: ParticleMesh, TreePM]
-├─ ic/           Plummer sphere, exp-disk-in-halo, two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [next: Hernquist/NFW halo, warm disk] [later: cosmological ICs]
+├─ ic/           Plummer sphere, exp-disk-in-halo (cold + warm Toomre-Q), two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [next: Hernquist/NFW halo] [later: cosmological ICs]
 ├─ io/           snapshot read/write: Rust-native versioned binary (DONE) [HDF5 behind a `validation` feature: later]
 ├─ sim/          headless engine: solver+integrator+IC+stepping loop → snapshots (DONE) [checkpoint/restart: later]
 ├─ renderprep/   snapshots → frame-data; spatial-tree kNN for local density/dispersion
@@ -285,11 +285,47 @@ late-time positions — N-body is chaotic).
     genuine Toomre & Toomre structure the isotropic-Plummer movie could not make. The
     prograde disk resonance is the mechanism; a four-species palette (bright disks / dim
     halos, brightness tied to the disk particle mass) keeps the tails dominant.
-    - **Confirmed cold-disk caveat:** late in the passage the tails diffuse and clump —
-      the predicted fully-cold (Q→0, v_z=0) behavior, **not** a wiring bug. The knob is
-      a small in-plane velocity dispersion (the deferred **warm-disk** milestone); a
-      shorter/tuned integration also sidesteps it. Do not chase this as an IC-assembly
+    - **Confirmed cold-disk caveat (since addressed by the warm disk):** late in the
+      passage the fully-cold (Q→0, v_z=0) tails diffuse and clump — the predicted
+      behavior, **not** a wiring bug. The knob is a small in-plane velocity dispersion,
+      landed as the **warm-disk** milestone below. Do not chase this as an IC-assembly
       bug.
+  - **Warm disk (landed):** opt-in velocity dispersion on `ExponentialDisk` via
+    `with_toomre_q(q)` — the milestone that lets the disk survive the several orbits of a
+    collision without the cold disk's local fragmentation, while keeping the thin
+    prograde tails. The default `new(...)` disk stays fully cold (bit-identical), so
+    every cold gate is untouched; `DiskCollision` passes warmth through with zero
+    structural change (a warm disk is still just an `ExponentialDisk`). The kinematics
+    are closed-form and exactly checkable, keeping the IC's ethos:
+    - **σ_R from Toomre Q:** σ_R(R) = Q · 3.36 · G Σ(R) / κ(R), with the epicyclic
+      frequency in closed form κ² = Ω² + G M'(R)/R², M'(R) = 4πR²ρ_halo(R) + 2πR Σ(R)
+      (exact from the halo density + disk surface density — no numerical derivative).
+    - **σ_φ** = σ_R · κ/(2Ω) (epicyclic ratio); **σ_z** = √(π G Σ hz) (self-gravitating
+      sech² sheet — documented to mildly *under*-support since the halo-dominated disk
+      gets extra vertical pull; the combined-potential σ_z is the forward refinement).
+    - **Asymmetric drift** (mandatory, else the disk is over-supported and expands):
+      v_c² − v̄_φ² = σ_R²·[κ²/(4Ω²) − 1 − d ln(ν σ_R²)/d ln R] (Binney & Tremaine
+      eq. 4.228, midplane/aligned; cross-checked against the RAVE-paper bracket with
+      η=0). v̄_φ² is **clamped ≥ 0** so R→0 (v_c→0, finite bracket) yields no NaN. The
+      density-gradient term splits as 3·d lnΣ/d lnR (exact −R/Rd) − 2·d lnκ/d lnR; only
+      d lnκ/d lnR uses a central difference of the closed-form κ, confining numerical
+      differentiation to the small (few-percent) correction.
+    - **Sampling:** v_R, v_z ∼ N(0,σ), v_φ = v̄_φ + N(0,σ_φ), drawn from a **separate
+      third PRNG sub-stream** (mix²(seed)) via Box–Muller, so a warm and a cold disk
+      with the same seed share every particle **position** — warmth perturbs only
+      velocities. `DiskCollision` now reserves three streams per galaxy (galaxy 2 at
+      mix³(seed)); its structural/orientation gates are seed-agnostic and stay green.
+    - **Gates:** analytic self-consistency (κ vs the definitional κ² = R dΩ²/dR + 4Ω²
+      via a different code path; σ_R *recovers* the input Q; the σ_φ/σ_R ratio; σ_z; the
+      drift sign + O(σ_R²/v_c²) magnitude + ≥0 clamp); statistical realization recovery
+      of Q, σ_z, and the ⟨v_φ⟩ lag; and the **dynamical acceptance** that proves the
+      warmth did something — the warm disk holds equilibrium over an orbit, and (the
+      differential that isolates the drift) removing *only* the drift from a Q=3
+      realization makes the over-supported disk expand 3.0% in mean radius over two
+      orbits vs 0.19% for the drifted disk (a 16× gap; the drift is load-bearing).
+    - **Movie (verified):** `galaxy-xtask` now warms both disks (Q≈1.5). The two-tone
+      thin tails + bridge survive, and the late-passage disks stay smooth (two distinct
+      cores + diffuse debris) rather than fragmenting into the cold run's clumps.
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 
 ## Validation strategy

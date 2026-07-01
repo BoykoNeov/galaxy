@@ -174,19 +174,28 @@ fn assert_structural(gpu: &GpuLbvhTree) {
     for i in 0..n.saturating_sub(1) {
         let me = (n + i) as u32;
         let (l, r) = (gpu.left[i], gpu.right[i]);
-        assert!((l as usize) < total && (r as usize) < total, "child index in range");
+        assert!(
+            (l as usize) < total && (r as usize) < total,
+            "child index in range"
+        );
         assert_ne!(l, r, "internal node's two children must differ");
-        assert_eq!(gpu.parent[l as usize], me, "left child's parent must point back");
-        assert_eq!(gpu.parent[r as usize], me, "right child's parent must point back");
+        assert_eq!(
+            gpu.parent[l as usize], me,
+            "left child's parent must point back"
+        );
+        assert_eq!(
+            gpu.parent[r as usize], me,
+            "right child's parent must point back"
+        );
         child_count[l as usize] += 1;
         child_count[r as usize] += 1;
     }
-    for u in 0..total {
+    for (u, &cc) in child_count.iter().enumerate() {
         if u == root {
-            assert_eq!(child_count[u], 0, "root must not be any node's child");
+            assert_eq!(cc, 0, "root must not be any node's child");
             assert_eq!(gpu.parent[u], NO_PARENT, "root parent must be NO_PARENT");
         } else {
-            assert_eq!(child_count[u], 1, "every non-root node has exactly one parent");
+            assert_eq!(cc, 1, "every non-root node has exactly one parent");
         }
     }
 }
@@ -200,9 +209,16 @@ fn assert_structural(gpu: &GpuLbvhTree) {
 /// contains all inputs. `r` is the position box half-width (the com tolerance scale).
 fn assert_full(pos: &[DVec3], mass: &[f64], r: f64) {
     let (sorted_codes, sorted_pos, sorted_mass) = sorted_inputs(pos, mass);
+    assert_full_with_codes(&sorted_codes, &sorted_pos, &sorted_mass, r);
+}
+
+/// Like [`assert_full`] but with the sorted codes supplied directly — lets a test drive
+/// a chosen *topology* (e.g. a degenerate monotone chain) with arbitrary leaf payload,
+/// since [`reference_aggregate`] folds `(tree, pos, mass)` independently of the codes.
+fn assert_full_with_codes(sorted_codes: &[u32], sorted_pos: &[DVec3], sorted_mass: &[f64], r: f64) {
     let n = sorted_codes.len();
-    let gpu = builder().build(&sorted_codes, &sorted_pos, &sorted_mass);
-    let refr: KarrasTree = reference_karras(&sorted_codes);
+    let gpu = builder().build(sorted_codes, sorted_pos, sorted_mass);
+    let refr: KarrasTree = reference_karras(sorted_codes);
 
     // Topology bit-exact.
     assert_eq!(gpu.left, refr.left);
@@ -211,7 +227,7 @@ fn assert_full(pos: &[DVec3], mass: &[f64], r: f64) {
     assert_structural(&gpu);
 
     // Reference aggregate over the SAME f32-narrowed leaves the GPU folds.
-    let pos_f = narrow(&sorted_pos);
+    let pos_f = narrow(sorted_pos);
     let mass_f: Vec<f64> = sorted_mass.iter().map(|&m| m as f32 as f64).collect();
     let agg = reference_aggregate(&refr, &pos_f, &mass_f);
 
@@ -228,8 +244,14 @@ fn assert_full(pos: &[DVec3], mass: &[f64], r: f64) {
         let rcom = agg.com[u].to_array();
         for a in 0..3 {
             // AABB min/max are exact under widening (min/max just picks a leaf coord).
-            assert_eq!(gmin[a] as f64, rmin[a], "aabb_min bit-exact @node {u} axis {a}");
-            assert_eq!(gmax[a] as f64, rmax[a], "aabb_max bit-exact @node {u} axis {a}");
+            assert_eq!(
+                gmin[a] as f64, rmin[a],
+                "aabb_min bit-exact @node {u} axis {a}"
+            );
+            assert_eq!(
+                gmax[a] as f64, rmax[a],
+                "aabb_max bit-exact @node {u} axis {a}"
+            );
             assert!(
                 (gcom[a] as f64 - rcom[a]).abs() <= com_tol,
                 "com within f32 tolerance @node {u} axis {a}: {} vs {}",
@@ -263,10 +285,9 @@ fn assert_full(pos: &[DVec3], mass: &[f64], r: f64) {
     // Root AABB contains every input position (f32-narrowed).
     let root = if n == 1 { 0 } else { n };
     for p in &pos_f {
-        let pa = p.to_array();
-        for a in 0..3 {
-            assert!(gpu.aabb_min[root][a] as f64 <= pa[a], "root min bounds all");
-            assert!(gpu.aabb_max[root][a] as f64 >= pa[a], "root max bounds all");
+        for (a, &pv) in p.to_array().iter().enumerate() {
+            assert!(gpu.aabb_min[root][a] as f64 <= pv, "root min bounds all");
+            assert!(gpu.aabb_max[root][a] as f64 >= pv, "root max bounds all");
         }
     }
 }
@@ -290,6 +311,21 @@ fn gpu_tree_aggregation_coincident() {
     assert_full(&pos, &mass, 2.0);
 }
 
+/// Aggregation over a **monotone-chain** topology — the deepest, right-leaning tree,
+/// where the single-invocation aggregation walk performs up to N-1 folds in one leaf's
+/// cascade (the path unique to this design's serial fold). Synthetic distinct codes
+/// force the chain; the leaf payload is an arbitrary cloud (positions are independent of
+/// the codes for `reference_aggregate`), so this gates the deep cascade's *values*, not
+/// just its topology.
+#[test]
+fn gpu_tree_aggregation_monotone_chain() {
+    let n = 2048;
+    let sorted_codes: Vec<u32> = (0..n as u32).collect();
+    let pos = cloud(0xC0FFEE, n, 4.0, DVec3::ZERO);
+    let mass = masses(0xBEE, n);
+    assert_full_with_codes(&sorted_codes, &pos, &mass, 4.0);
+}
+
 // ---------------------------------------------------------------------------
 // determinism (same-device, run-to-run) — topology AND aggregation
 // ---------------------------------------------------------------------------
@@ -310,7 +346,10 @@ fn gpu_tree_is_bit_deterministic() {
     assert_eq!(a.parent, c.parent);
     assert_eq!(a.aabb_min, c.aabb_min, "aabb_min run-to-run deterministic");
     assert_eq!(a.aabb_max, c.aabb_max);
-    assert_eq!(a.com, c.com, "com run-to-run deterministic (order-independent fold)");
+    assert_eq!(
+        a.com, c.com,
+        "com run-to-run deterministic (order-independent fold)"
+    );
     assert_eq!(a.mass, c.mass);
 }
 

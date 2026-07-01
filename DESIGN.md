@@ -197,6 +197,21 @@ late-time positions — N-body is chaotic).
     looking down Z shows the tidal tails face-on (not edge-on). The renderer's default
     view axis is +Z; the view axis is a `Camera` parameter so the deferred orbit views
     are a config change, not a code change.
+  - **wgpu render stage (landed):** `galaxy-render` productionizes the spike. A
+    `Renderer` holds a **reusable** headless GPU context (built once, driven per frame
+    — no per-frame adapter/device init, so a 1000-frame movie pays setup once);
+    `render_frame` CPU-projects each particle to NDC via the `Camera`, draws it as an
+    instanced Gaussian quad additively blended into an `Rgba32Float` target
+    (`FLOAT32_BLENDABLE`), and reads back a **linear** `HdrImage` (256-aligned padded
+    row copy, un-padded on read). No tonemapping here — that is `grade`'s job, so the
+    HDR intermediate stays regradeable. Output is linear EXR via `exr` (pure-Rust, not
+    a landmine). Errors are typed (`NoAdapter`/`MissingFeature`/…), never panics. CPU
+    projection is the MVP choice; the world-space vertex-shader path is the 10⁸ swap.
+    Tested by invariants (GPU-gated, always-on): additive **commutativity**
+    (order-independent within relative tol), **flux linearity** (2× brightness → 2×
+    total flux), **32F headroom** (overlap exceeds 1.0, no clamp), **centered-splat
+    symmetry** (odd dims). Plus CPU camera-math and EXR round-trip tests. A left-over
+    `bin/spike.rs` remains as the feasibility artifact.
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 
 ## Validation strategy

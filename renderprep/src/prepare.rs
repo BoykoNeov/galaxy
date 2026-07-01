@@ -30,8 +30,37 @@ impl Default for PrepConfig {
     }
 }
 
+/// White fallback when the palette is empty.
+const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
+
 /// Map a physics `State` to renderable frame-data under `config`. Pure and
 /// order-preserving: particle `i` in the state becomes column entry `i`.
-pub fn prepare(_state: &State, _config: &PrepConfig) -> FrameData {
-    todo!("progenitor->color, mass->brightness, constant size")
+pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
+    let n = state.len();
+    let mut pos = Vec::with_capacity(n);
+    let mut color = Vec::with_capacity(n);
+    let mut brightness = Vec::with_capacity(n);
+
+    for i in 0..n {
+        pos.push(state.pos[i].as_vec3()); // f64 -> f32 projection for the GPU
+        color.push(palette_color(config, state.progenitor[i].0));
+        brightness.push(config.brightness_per_mass * state.mass[i] as f32);
+    }
+
+    FrameData {
+        pos,
+        color,
+        brightness,
+        size: vec![config.size; n],
+    }
+}
+
+/// Emissive color for a progenitor: `palette[progenitor % len]`, or white if the
+/// palette is empty. Wrapping keeps the map total and deterministic for any tag.
+fn palette_color(config: &PrepConfig, progenitor: u16) -> [f32; 3] {
+    if config.palette.is_empty() {
+        WHITE
+    } else {
+        config.palette[progenitor as usize % config.palette.len()]
+    }
 }

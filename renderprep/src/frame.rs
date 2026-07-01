@@ -14,6 +14,8 @@
 //! there is no lossy field to call out; the whole stage is already an f32 projection
 //! of the f64 physics state.
 
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use glam::Vec3;
@@ -98,39 +100,170 @@ impl FrameData {
     }
 
     /// The axis-aligned bounding box `(min, max)` over all positions. Returns
-    /// `(ZERO, ZERO)` for an empty frame.
+    /// `(ZERO, ZERO)` for an empty frame (there is no meaningful box).
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        todo!("compute AABB over pos")
+        match self.pos.split_first() {
+            None => (Vec3::ZERO, Vec3::ZERO),
+            Some((&first, rest)) => rest
+                .iter()
+                .fold((first, first), |(mn, mx), &p| (mn.min(p), mx.max(p))),
+        }
     }
 }
 
-/// Write frame-data to any sink. `n_particles` and `bounds` are taken from `data`;
-/// `time` is taken from `header`.
-pub fn to_writer<W: std::io::Write>(
-    _writer: &mut W,
-    _header: &FrameHeader,
-    _data: &FrameData,
+/// Write frame-data to any sink. `n_particles` and `bounds` are taken from `data`
+/// (authoritative); only `time` is taken from `header`.
+pub fn to_writer<W: Write>(
+    writer: &mut W,
+    header: &FrameHeader,
+    data: &FrameData,
 ) -> Result<(), FrameError> {
-    todo!("serialize frame-data (versioned LE)")
+    let n = data.len();
+    // Typed error rather than an index panic if the SoA columns disagree.
+    if data.color.len() != n || data.size.len() != n || data.brightness.len() != n {
+        return Err(FrameError::Corrupt(
+            "FrameData columns have mismatched lengths".to_string(),
+        ));
+    }
+
+    writer.write_all(&MAGIC)?;
+    write_u32(writer, FRAME_VERSION)?;
+
+    let (bmin, bmax) = data.bounds(); // authoritative bounds, from the data
+    write_f64(writer, header.time)?;
+    write_u64(writer, n as u64)?; // authoritative count, from the data
+    write_vec3(writer, bmin)?;
+    write_vec3(writer, bmax)?;
+
+    for &p in &data.pos {
+        write_vec3(writer, p)?;
+    }
+    for &c in &data.color {
+        write_f32(writer, c[0])?;
+        write_f32(writer, c[1])?;
+        write_f32(writer, c[2])?;
+    }
+    for &s in &data.size {
+        write_f32(writer, s)?;
+    }
+    for &b in &data.brightness {
+        write_f32(writer, b)?;
+    }
+    Ok(())
 }
 
 /// Read frame-data from any source, reconstructing `(FrameHeader, FrameData)`.
-pub fn from_reader<R: std::io::Read>(
-    _reader: &mut R,
-) -> Result<(FrameHeader, FrameData), FrameError> {
-    todo!("deserialize frame-data (versioned LE)")
+pub fn from_reader<R: Read>(reader: &mut R) -> Result<(FrameHeader, FrameData), FrameError> {
+    let magic: [u8; 8] = read_array(reader)?;
+    if magic != MAGIC {
+        return Err(FrameError::BadMagic);
+    }
+    let version = read_u32(reader)?;
+    if version != FRAME_VERSION {
+        return Err(FrameError::UnsupportedVersion {
+            found: version,
+            expected: FRAME_VERSION,
+        });
+    }
+
+    let time = read_f64(reader)?;
+    let n_particles = read_u64(reader)?;
+    let bounds_min = read_vec3(reader)?;
+    let bounds_max = read_vec3(reader)?;
+
+    let n = usize::try_from(n_particles)
+        .map_err(|_| FrameError::Corrupt(format!("n_particles {n_particles} too large")))?;
+    // Capacity is only a hint — capped so a garbage count cannot trigger a huge
+    // allocation; the read loops grow the vectors and error out on a short stream.
+    let cap = n.min(1 << 20);
+
+    let mut pos = Vec::with_capacity(cap);
+    for _ in 0..n {
+        pos.push(read_vec3(reader)?);
+    }
+    let mut color = Vec::with_capacity(cap);
+    for _ in 0..n {
+        color.push([read_f32(reader)?, read_f32(reader)?, read_f32(reader)?]);
+    }
+    let mut size = Vec::with_capacity(cap);
+    for _ in 0..n {
+        size.push(read_f32(reader)?);
+    }
+    let mut brightness = Vec::with_capacity(cap);
+    for _ in 0..n {
+        brightness.push(read_f32(reader)?);
+    }
+
+    let header = FrameHeader {
+        time,
+        n_particles,
+        bounds_min,
+        bounds_max,
+    };
+    let data = FrameData {
+        pos,
+        color,
+        size,
+        brightness,
+    };
+    Ok((header, data))
 }
 
 /// Convenience: write frame-data to a file (buffered).
 pub fn write_file<P: AsRef<Path>>(
-    _path: P,
-    _header: &FrameHeader,
-    _data: &FrameData,
+    path: P,
+    header: &FrameHeader,
+    data: &FrameData,
 ) -> Result<(), FrameError> {
-    todo!("buffered file write")
+    let mut writer = BufWriter::new(File::create(path)?);
+    to_writer(&mut writer, header, data)?;
+    writer.flush()?; // surface flush errors instead of swallowing them on drop
+    Ok(())
 }
 
 /// Convenience: read frame-data from a file (buffered).
-pub fn read_file<P: AsRef<Path>>(_path: P) -> Result<(FrameHeader, FrameData), FrameError> {
-    todo!("buffered file read")
+pub fn read_file<P: AsRef<Path>>(path: P) -> Result<(FrameHeader, FrameData), FrameError> {
+    let mut reader = BufReader::new(File::open(path)?);
+    from_reader(&mut reader)
+}
+
+// ---------- little-endian primitive (de)serialization ----------
+
+fn write_u32<W: Write>(w: &mut W, v: u32) -> io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+fn write_u64<W: Write>(w: &mut W, v: u64) -> io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+fn write_f32<W: Write>(w: &mut W, v: f32) -> io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+fn write_f64<W: Write>(w: &mut W, v: f64) -> io::Result<()> {
+    w.write_all(&v.to_le_bytes())
+}
+fn write_vec3<W: Write>(w: &mut W, v: Vec3) -> io::Result<()> {
+    write_f32(w, v.x)?;
+    write_f32(w, v.y)?;
+    write_f32(w, v.z)
+}
+
+fn read_array<R: Read, const N: usize>(r: &mut R) -> io::Result<[u8; N]> {
+    let mut buf = [0u8; N];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
+}
+fn read_u32<R: Read>(r: &mut R) -> io::Result<u32> {
+    Ok(u32::from_le_bytes(read_array(r)?))
+}
+fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
+    Ok(u64::from_le_bytes(read_array(r)?))
+}
+fn read_f32<R: Read>(r: &mut R) -> io::Result<f32> {
+    Ok(f32::from_le_bytes(read_array(r)?))
+}
+fn read_f64<R: Read>(r: &mut R) -> io::Result<f64> {
+    Ok(f64::from_le_bytes(read_array(r)?))
+}
+fn read_vec3<R: Read>(r: &mut R) -> io::Result<Vec3> {
+    Ok(Vec3::new(read_f32(r)?, read_f32(r)?, read_f32(r)?))
 }

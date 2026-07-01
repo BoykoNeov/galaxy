@@ -116,14 +116,16 @@ impl DiskCollision {
 
         // Each galaxy is sampled in its own zero-COM/zero-momentum body frame from
         // well-separated PRNG streams. `ExponentialDisk::sample` internally consumes
-        // TWO streams — `seed` (halo) and `mix_seed(seed)` (disk) — so galaxy 1 owns
-        // {seed, mix(seed)}. Galaxy 2 must start clear of both, hence two mix steps:
-        // it owns {mix²(seed), mix³(seed)}, disjoint from galaxy 1 (SplitMix64's
-        // finalizer is a bijection, so the four seeds are distinct).
+        // THREE streams — `seed` (halo), `mix(seed)` (disk positions), and `mix²(seed)`
+        // (disk velocity dispersion) — so galaxy 1 owns {seed, mix, mix²}. Galaxy 2
+        // must start clear of all three, hence three mix steps: it owns
+        // {mix³, mix⁴, mix⁵}, disjoint from galaxy 1 (SplitMix64's finalizer is a
+        // bijection, so the six seeds are distinct). All three streams are reserved
+        // whether or not the disks are warm, so warmth never shifts the seeding.
         let s1 = self.galaxy1.sample(n_halo1, n_disk1, seed);
         let s2 = self
             .galaxy2
-            .sample(n_halo2, n_disk2, mix_seed(mix_seed(seed)));
+            .sample(n_halo2, n_disk2, mix_seed(mix_seed(mix_seed(seed))));
 
         let n = n_halo1 + n_disk1 + n_halo2 + n_disk2;
         let mut pos = Vec::with_capacity(n);

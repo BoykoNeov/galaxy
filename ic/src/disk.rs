@@ -41,9 +41,13 @@
 
 use galaxy_core::{DVec3, ParticleId, Progenitor, State};
 
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 
 use crate::Plummer;
+
+/// Toomre's stellar stability factor: Q = σ_R κ / (3.36 G Σ). The 3.36 is the
+/// value for a collisionless (stellar) disk; π is the gas value.
+const TOOMRE_FACTOR: f64 = 3.36;
 
 /// A cold exponential disk of low-mass particles inside a live Plummer halo/bulge.
 ///
@@ -115,40 +119,108 @@ impl ExponentialDisk {
         self.toomre_q
     }
 
-    /// Orbital (angular) frequency Ω(R) = v_c(R)/R.
+    /// Orbital (angular) frequency Ω(R) = v_c(R)/R. Zero at R = 0.
     pub fn orbital_frequency(&self, r: f64) -> f64 {
-        todo!("warm-disk kinematics")
+        if r <= 0.0 {
+            return 0.0;
+        }
+        self.circular_velocity(r) / r
     }
 
     /// Epicyclic frequency κ(R): the radial oscillation frequency of a near-circular
-    /// orbit. Closed form κ² = Ω² + G M'(R)/R², M'(R) = 4πR²ρ_halo(R) + 2πR Σ(R).
+    /// orbit. Closed form κ² = Ω² + G M'(R)/R², where M'(R) = dM_enc/dR is the
+    /// derivative of the same combined enclosed mass that sets v_c — the spherical
+    /// halo's shell mass 4πR²ρ_halo(R) plus the disk's annulus mass 2πR Σ(R). Both
+    /// densities are exact closed forms, so κ is exact (no numerical derivative).
+    /// The identity follows from κ² = R dΩ²/dR + 4Ω² with Ω² = G M_enc/R³.
     pub fn epicyclic_frequency(&self, r: f64) -> f64 {
-        todo!("warm-disk kinematics")
+        if r <= 0.0 {
+            return 0.0;
+        }
+        let omega = self.orbital_frequency(r);
+        let m_prime = 4.0 * PI * r * r * self.halo.density(r) + TAU * r * self.surface_density(r);
+        (omega * omega + self.g * m_prime / (r * r)).sqrt()
     }
 
     /// Radial velocity dispersion σ_R(R) from the Toomre criterion:
     /// σ_R = Q · 3.36 · G Σ(R) / κ(R). Zero for the cold disk (`toomre_q == None`).
     pub fn radial_dispersion(&self, r: f64) -> f64 {
-        todo!("warm-disk kinematics")
+        match self.toomre_q {
+            None => 0.0,
+            Some(q) => {
+                let kappa = self.epicyclic_frequency(r);
+                if kappa <= 0.0 {
+                    return 0.0;
+                }
+                q * TOOMRE_FACTOR * self.g * self.surface_density(r) / kappa
+            }
+        }
     }
 
-    /// Azimuthal velocity dispersion σ_φ(R) = σ_R · κ/(2Ω) (epicyclic ratio).
-    /// Zero for the cold disk.
+    /// Azimuthal velocity dispersion σ_φ(R) = σ_R · κ/(2Ω), from the epicyclic
+    /// relation σ_φ²/σ_R² = κ²/(4Ω²). Zero for the cold disk.
     pub fn azimuthal_dispersion(&self, r: f64) -> f64 {
-        todo!("warm-disk kinematics")
+        if self.toomre_q.is_none() {
+            return 0.0;
+        }
+        let omega = self.orbital_frequency(r);
+        if omega <= 0.0 {
+            return 0.0;
+        }
+        self.radial_dispersion(r) * self.epicyclic_frequency(r) / (2.0 * omega)
     }
 
-    /// Vertical velocity dispersion σ_z(R) = √(π G Σ(R) hz) for the self-gravitating
-    /// sech²(z/hz) sheet. Zero for the cold disk.
+    /// Vertical velocity dispersion σ_z(R) = √(π G Σ(R) hz) — the isothermal value
+    /// for a self-gravitating sech²(z/hz) sheet. Zero for the cold disk.
+    ///
+    /// Caveat (for the combined-potential refinement): this is the disk's *own*
+    /// self-gravity value. Because the disk is submaximal and halo-dominated, the
+    /// halo adds vertical restoring force, so this mildly *under*-supports the layer
+    /// (it settles a little). Still strictly better than the cold v_z = 0.
     pub fn vertical_dispersion(&self, r: f64) -> f64 {
-        todo!("warm-disk kinematics")
+        if self.toomre_q.is_none() {
+            return 0.0;
+        }
+        (PI * self.g * self.surface_density(r) * self.scale_height).sqrt()
     }
 
     /// Mean azimuthal streaming speed v̄_φ(R): the circular speed reduced by
-    /// asymmetric drift, v_c² − v̄_φ² = σ_R²·[σ_φ²/σ_R² − 1 − d ln(ν σ_R²)/d ln R],
-    /// clamped to a non-negative v̄_φ². Equals v_c for the cold disk.
+    /// asymmetric drift (a warm disk needs less rotation because pressure helps
+    /// support it). Binney & Tremaine (eq. 4.228), midplane, aligned ellipsoid:
+    ///
+    ///   v_c² − v̄_φ² = σ_R²·[σ_φ²/σ_R² − 1 − d ln(ν σ_R²)/d ln R].
+    ///
+    /// v̄_φ² is clamped to ≥ 0: near R → 0, v_c → 0 while the bracket stays finite,
+    /// so the raw v̄_φ² can dip negative — the clamp keeps the IC free of NaNs.
+    /// Equals v_c for the cold disk.
     pub fn mean_azimuthal_velocity(&self, r: f64) -> f64 {
-        todo!("warm-disk kinematics")
+        let vc = self.circular_velocity(r);
+        if self.toomre_q.is_none() {
+            return vc;
+        }
+        let sigma_r = self.radial_dispersion(r);
+        let omega = self.orbital_frequency(r);
+        if sigma_r <= 0.0 || omega <= 0.0 {
+            return vc;
+        }
+        let kappa = self.epicyclic_frequency(r);
+        let ratio2 = kappa * kappa / (4.0 * omega * omega); // σ_φ²/σ_R²
+        let bracket = ratio2 - 1.0 - self.dlog_nu_sigma_r2(r);
+        (vc * vc - sigma_r * sigma_r * bracket).max(0.0).sqrt()
+    }
+
+    /// d ln(ν σ_R²)/d ln R for the asymmetric-drift bracket. With constant scale
+    /// height ν ∝ Σ(R), and σ_R² ∝ (Σ/κ)², so ν σ_R² ∝ Σ³/κ² and the log-derivative
+    /// splits as 3·d lnΣ/d lnR − 2·d lnκ/d lnR. The exponential's slope is exact,
+    /// d lnΣ/d lnR = −R/Rd (the truncation is a sampling cutoff, not a local density
+    /// feature); only d lnκ/d lnR uses a central difference of the closed-form κ(R),
+    /// confining the numerical derivative to this small drift correction.
+    fn dlog_nu_sigma_r2(&self, r: f64) -> f64 {
+        let dlog_sigma = -r / self.scale_length;
+        let h = 1e-5_f64;
+        let ln_kappa = |rr: f64| self.epicyclic_frequency(rr).ln();
+        let dlog_kappa = (ln_kappa(r * h.exp()) - ln_kappa(r * (-h).exp())) / (2.0 * h);
+        3.0 * dlog_sigma - 2.0 * dlog_kappa
     }
 
     /// The fraction of an *untruncated* exponential disk's mass that lies within
@@ -204,16 +276,26 @@ impl ExponentialDisk {
 
     /// Sample the galaxy: `n_halo` Plummer halo particles (`Progenitor(0)`) drawn
     /// from the halo distribution function, followed by `n_disk` disk particles
-    /// (`Progenitor(1)`) on cold near-circular orbits. Deterministic in `seed`,
-    /// contiguous unique ids, delivered in the zero-COM / zero-momentum frame.
+    /// (`Progenitor(1)`) on near-circular orbits (cold, or warm with dispersion if a
+    /// Toomre `Q` was set). Deterministic in `seed`, contiguous unique ids, delivered
+    /// in the zero-COM / zero-momentum frame.
+    ///
+    /// Consumes THREE well-separated PRNG streams off `seed`: the halo (`seed`), the
+    /// disk *positions* (`mix(seed)`), and the disk *velocity dispersion*
+    /// (`mix²(seed)`, drawn only when warm). Decoupling positions from the velocity
+    /// stream means a warm and a cold disk with the same seed share every particle
+    /// position — warmth perturbs only velocities. (`DiskCollision` reserves all
+    /// three streams per galaxy when spacing its second galaxy's seed.)
     pub fn sample(&self, n_halo: usize, n_disk: usize, seed: u64) -> State {
         // Halo: reuse the Plummer sampler on the primary seed stream. It returns a
         // zero-COM/zero-momentum sphere already tagged Progenitor(0).
         let halo = self.halo.sample(n_halo, seed);
 
-        // Disk: an independent PRNG stream (one mix step off the halo's seed) so
-        // the two populations never share draws.
+        // Disk positions: an independent stream (one mix step off the halo's seed).
+        // Disk velocity dispersion: a SECOND independent stream (two mix steps), so
+        // the number of position draws is fixed at 3/particle regardless of warmth.
         let mut rng = SplitMix64::new(mix_seed(seed));
+        let mut rng_v = SplitMix64::new(mix_seed(mix_seed(seed)));
         let hz = self.scale_height;
         let m_disk_each = self.disk_mass / n_disk as f64;
 
@@ -247,10 +329,28 @@ impl ExponentialDisk {
 
             pos.push(DVec3::new(r * cos_phi, r * sin_phi, z));
 
-            // Cold, purely azimuthal orbit with spin along +Z: v = v_c(R)·φ̂,
-            // φ̂ = (−sinφ, cosφ, 0). No radial or vertical velocity (fully cold).
-            let v_c = self.circular_velocity(r);
-            vel.push(DVec3::new(-v_c * sin_phi, v_c * cos_phi, 0.0));
+            // Velocity. Cylindrical basis: R̂ = (cosφ, sinφ, 0), φ̂ = (−sinφ, cosφ, 0),
+            // ẑ. The cold disk is a pure azimuthal orbit v = v_c(R)·φ̂ (spin +Z). A
+            // warm disk adds Gaussian dispersion (σ_R, σ_φ, σ_z) about the drifting
+            // mean v̄_φ, drawn from the SEPARATE velocity stream (Box–Muller), so the
+            // position stream is untouched and warm/cold positions match bit-for-bit.
+            let (v_r, v_phi, v_z) = match self.toomre_q {
+                None => (0.0, self.circular_velocity(r), 0.0),
+                Some(_) => {
+                    let (g_r, g_z) = box_muller(rng_v.next_f64(), rng_v.next_f64());
+                    let (g_phi, _) = box_muller(rng_v.next_f64(), rng_v.next_f64());
+                    (
+                        self.radial_dispersion(r) * g_r,
+                        self.mean_azimuthal_velocity(r) + self.azimuthal_dispersion(r) * g_phi,
+                        self.vertical_dispersion(r) * g_z,
+                    )
+                }
+            };
+            vel.push(DVec3::new(
+                v_r * cos_phi - v_phi * sin_phi,
+                v_r * sin_phi + v_phi * cos_phi,
+                v_z,
+            ));
 
             mass.push(m_disk_each);
             progenitor.push(Progenitor(1));
@@ -329,6 +429,14 @@ impl SplitMix64 {
     fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
+}
+
+/// Box–Muller transform: two uniforms in [0, 1) → two independent standard normals
+/// N(0, 1). `u1` is clamped off 0 so the ln is finite (`next_f64` can return 0).
+fn box_muller(u1: f64, u2: f64) -> (f64, f64) {
+    let radius = (-2.0 * u1.max(f64::MIN_POSITIVE).ln()).sqrt();
+    let (sin, cos) = (TAU * u2).sin_cos();
+    (radius * cos, radius * sin)
 }
 
 /// One SplitMix64 step, deriving the disk's PRNG seed from the halo's so the two

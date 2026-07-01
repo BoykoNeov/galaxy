@@ -173,14 +173,17 @@ fn asymmetric_drift_lags_v_c_and_scales_with_dispersion() {
         // Correct sign: the warm disk lags the circular speed (pressure support).
         assert!(vbar < vc, "v̄_φ({r})={vbar} should lag v_c={vc}");
         assert!(vbar > 0.0, "v̄_φ({r})={vbar} must stay positive");
-        // Magnitude: the drift v_c²−v̄_φ² is of order σ_R² (a few percent of v_c²),
-        // never a large fraction of v_c² for this warmth.
-        let drift = vc * vc - vbar * vbar;
-        let sigma_r2 = d.radial_dispersion(r).powi(2);
-        assert!(drift > 0.0, "drift must be positive at r={r}");
+        // Magnitude: the FRACTIONAL lag (v_c−v̄_φ)/v_c ≈ (v_c²−v̄_φ²)/(2v_c²) is of
+        // order (σ_R/v_c)² — the asymmetric-drift equation v_c²−v̄_φ² = σ_R²·B with
+        // the O(1–10) density-gradient bracket B. Bound it by 10·(σ_R/v_c)² (ample
+        // margin on B), which pins the lag to the dispersion scale without asserting
+        // B's exact value.
+        let frac_lag = (vc - vbar) / vc;
+        let sigma_ratio2 = (d.radial_dispersion(r) / vc).powi(2);
+        assert!(frac_lag > 0.0, "lag must be positive at r={r}");
         assert!(
-            drift < 4.0 * sigma_r2 + 1e-12,
-            "drift {drift} at r={r} unexpectedly large vs σ_R²={sigma_r2}"
+            frac_lag < 10.0 * sigma_ratio2,
+            "lag {frac_lag} at r={r} not O(σ_R²/v_c²)={sigma_ratio2}"
         );
     }
 }
@@ -329,7 +332,10 @@ fn warm_realization_mean_vphi_lags_circular_speed() {
         let vc = v_c_indep(&d, mean_r);
         // Asymmetric drift: the mean azimuthal streaming lags the circular speed,
         // and matches the analytic v̄_φ.
-        assert!(mean_vphi < vc, "bin [{lo},{hi}): ⟨v_φ⟩={mean_vphi} !< v_c={vc}");
+        assert!(
+            mean_vphi < vc,
+            "bin [{lo},{hi}): ⟨v_φ⟩={mean_vphi} !< v_c={vc}"
+        );
         let vbar = d.mean_azimuthal_velocity(mean_r);
         assert!(
             (mean_vphi - vbar).abs() < 0.06 * vc,

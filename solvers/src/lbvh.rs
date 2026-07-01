@@ -128,6 +128,24 @@ pub fn reference_morton(pos: &[DVec3]) -> MortonReference {
     }
 }
 
+/// Deterministic Morton sort: the permutation `order` of `0..codes.len()` that sorts the
+/// bodies by `(code, original index)` ascending. Extracted from [`LbvhFlat::build`] so it is
+/// the single source of truth for the tie-break convention and can serve as the oracle for
+/// the GPU sort stage (exactly as [`reference_morton`] is the oracle for the GPU Morton+bbox
+/// stage).
+///
+/// The key is the **pair** `(code, index)`: equal codes (same 1024³ cell, or coincident
+/// particles) break ties by ascending original index. Because `index` is unique, the
+/// resulting permutation is a *total* order — a deterministic function of `codes` alone —
+/// and any correct stable sort keyed on `code` over the input order `0..n` reproduces it.
+/// That is the exact ordering a GPU radix sort must match (bit-for-bit; the sort is pure
+/// integer, so there is no precision caveat here, unlike the f32 Morton stage).
+pub fn reference_sort(codes: &[u32]) -> Vec<u32> {
+    let mut order: Vec<u32> = (0..codes.len() as u32).collect();
+    order.sort_by_key(|&i| (codes[i as usize], i));
+    order
+}
+
 /// Augmented-key common-prefix length δ(a, b) over the **sorted** array (Karras 2012).
 /// The augmented key is `(code, sorted_position)`: when two codes are equal the prefix
 /// extends into the position bits (`32 + clz(a ^ b)`), so all keys are distinct and the
@@ -283,9 +301,8 @@ impl LbvhFlat {
         // exact pipeline the GPU Morton+bbox build stage is gated against.
         let codes = reference_morton(pos).codes;
 
-        // Deterministic sort by (code, original index).
-        let mut order: Vec<u32> = (0..n as u32).collect();
-        order.sort_by_key(|&i| (codes[i as usize], i));
+        // Deterministic sort by (code, original index) — the GPU-sort oracle.
+        let order = reference_sort(&codes);
         let sorted_codes: Vec<u32> = order.iter().map(|&i| codes[i as usize]).collect();
 
         // Karras internal nodes over the sorted order (none for a single leaf).

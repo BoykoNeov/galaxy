@@ -11,4 +11,6 @@ pub mod potential;
 
 pub use barnes_hut::{BarnesHut, BuildMode, FlatNode, FlatTree};
 pub use direct_sum::DirectSum;
-pub use lbvh::{reference_morton, Lbvh, LbvhFlat, LbvhNode, MortonBounds, MortonReference};
+pub use lbvh::{
+    reference_morton, reference_sort, Lbvh, LbvhFlat, LbvhNode, MortonBounds, MortonReference,
+};

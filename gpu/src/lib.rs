@@ -33,6 +33,7 @@
 //! a GPU-resident build (Morton/LBVH) and TreePM/PM remain the deferred 10⁸ door.
 
 pub mod gpu_direct_sum;
+pub mod gpu_lbvh;
 pub mod gpu_tree;
 pub mod lbvh_flatten;
 pub mod lbvh_morton;
@@ -40,6 +41,7 @@ pub mod lbvh_sort;
 pub mod lbvh_tree;
 
 pub use gpu_direct_sum::GpuDirectSum;
+pub use gpu_lbvh::GpuLbvh;
 pub use gpu_tree::GpuTree;
 pub use lbvh_flatten::{GpuLbvhFlat, GpuLbvhFlattener};
 pub use lbvh_morton::{GpuMorton, GpuMortonBuilder};

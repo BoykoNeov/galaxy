@@ -16,7 +16,7 @@
 //! window. Run under the BarnesHut workhorse; the *sampling* correctness is pinned
 //! independently by the solver-free analytic gates in `disk_sampling.rs`.
 
-use galaxy_core::{DVec3, ForceSolver, Integrator, LeapfrogKdk, Progenitor, State, StaticBackground};
+use galaxy_core::{DVec3, Integrator, LeapfrogKdk, Progenitor, State, StaticBackground};
 use galaxy_ic::{ExponentialDisk, Plummer};
 use galaxy_solvers::BarnesHut;
 
@@ -93,7 +93,10 @@ fn cold_disk_holds_together_and_conserves_invariants() {
     }
 
     assert!(max_e_err < 0.02, "energy not conserved: {max_e_err:e}");
-    assert!(max_lz_err < 0.02, "angular momentum L_z not conserved: {max_lz_err:e}");
+    assert!(
+        max_lz_err < 0.02,
+        "angular momentum L_z not conserved: {max_lz_err:e}"
+    );
     assert!(
         max_rhalf_dev < 0.20,
         "disk half-mass radius drifted grossly: {max_rhalf_dev}"

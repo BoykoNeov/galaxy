@@ -64,13 +64,20 @@ fn central_surface_density_normalizes_to_disk_mass() {
             d.surface_density(r)
         );
     }
-    assert_eq!(d.surface_density(d.r_max + 1e-9), 0.0, "Σ must vanish past r_max");
+    assert_eq!(
+        d.surface_density(d.r_max + 1e-9),
+        0.0,
+        "Σ must vanish past r_max"
+    );
 }
 
 #[test]
 fn disk_enclosed_mass_limits_and_density_derivative_agree() {
     let d = fiducial();
-    assert!(d.disk_enclosed_mass(0.0).abs() < 1e-12, "M_d(<0) should be 0");
+    assert!(
+        d.disk_enclosed_mass(0.0).abs() < 1e-12,
+        "M_d(<0) should be 0"
+    );
     assert!(
         (d.disk_enclosed_mass(d.r_max) - d.disk_mass).abs() < 1e-12 * d.disk_mass,
         "M_d(<r_max) should equal the total disk mass"
@@ -148,20 +155,25 @@ fn disk_radial_profile_matches_analytic_cdf() {
     let d = fiducial();
     let s = d.sample(N_HALO, N_DISK, SEED);
     let idx = disk_indices(&s);
-    let radii: Vec<f64> = idx.iter().map(|&i| cylindrical(s.pos[i], s.vel[i]).0).collect();
+    let radii: Vec<f64> = idx
+        .iter()
+        .map(|&i| cylindrical(s.pos[i], s.vel[i]).0)
+        .collect();
 
     // Fraction of disk particles within cylindrical R must match M_d(<R)/M_d.
     for &r in &[0.25_f64, 0.5, 1.0, 1.5] {
         let frac_measured = radii.iter().filter(|&&x| x <= r).count() as f64 / N_DISK as f64;
-        let frac_analytic =
-            disk_enclosed(d.disk_mass, d.scale_length, d.r_max, r) / d.disk_mass;
+        let frac_analytic = disk_enclosed(d.disk_mass, d.scale_length, d.r_max, r) / d.disk_mass;
         assert!(
             (frac_measured - frac_analytic).abs() < 0.03,
             "enclosed fraction within R={r}: measured {frac_measured} vs analytic {frac_analytic}"
         );
     }
     // No particle beyond the truncation radius.
-    assert!(radii.iter().all(|&x| x <= d.r_max + 1e-9), "disk truncated at r_max");
+    assert!(
+        radii.iter().all(|&x| x <= d.r_max + 1e-9),
+        "disk truncated at r_max"
+    );
 }
 
 #[test]
@@ -172,25 +184,30 @@ fn disk_rotation_curve_matches_analytic_vc() {
 
     // Bin by cylindrical R; mean v_φ per bin must sit on the analytic v_c(R).
     // The disk is cold (no dispersion) so asymmetric drift is negligible.
+    // Compare ⟨v_φ⟩ to v_c at the bin's MEAN radius (not the geometric midpoint):
+    // where v_c has a steep gradient the density-weighted mean radius is the fair
+    // comparison point, leaving only a small Jensen gap.
     let edges = [0.2_f64, 0.4, 0.6, 0.8, 1.0, 1.4];
     for w in edges.windows(2) {
         let (lo, hi) = (w[0], w[1]);
-        let mid = 0.5 * (lo + hi);
-        let mut sum = 0.0;
+        let mut sum_vphi = 0.0;
+        let mut sum_r = 0.0;
         let mut n = 0usize;
         for &i in &idx {
             let (r, v_phi, _, _) = cylindrical(s.pos[i], s.vel[i]);
             if r >= lo && r < hi {
-                sum += v_phi;
+                sum_vphi += v_phi;
+                sum_r += r;
                 n += 1;
             }
         }
         assert!(n > 50, "bin [{lo},{hi}) underpopulated: {n}");
-        let mean_vphi = sum / n as f64;
-        let vc = d.circular_velocity(mid);
+        let mean_vphi = sum_vphi / n as f64;
+        let mean_r = sum_r / n as f64;
+        let vc = d.circular_velocity(mean_r);
         assert!(
             (mean_vphi - vc).abs() < 0.05 * vc,
-            "bin [{lo},{hi}): ⟨v_φ⟩={mean_vphi} vs v_c({mid})={vc}"
+            "bin [{lo},{hi}): ⟨v_φ⟩={mean_vphi} vs v_c(⟨R⟩={mean_r})={vc}"
         );
     }
 }
@@ -200,27 +217,42 @@ fn disk_has_coherent_spin_and_zero_net_momentum() {
     let d = fiducial();
     let s = d.sample(N_HALO, N_DISK, SEED);
 
-    // Total angular momentum L = Σ m (r × v) over the whole galaxy. The disk's
-    // coherent rotation makes L_z ≫ |L_x|, |L_y|, and L_z > 0 (spin along +Z).
-    let mut l = DVec3::ZERO;
+    // Axial-spin coherence is the DISK's invariant: the halo is intentionally
+    // non-rotating, and its finite-N angular-momentum shot noise (~M⟨rv⟩/√N) is
+    // not the disk's spin — so the L_z ≫ |L_x|,|L_y| ratio is measured over the
+    // disk population, where every particle contributes m·R·v_c to L_z.
+    let mut l_disk = DVec3::ZERO;
+    for &i in &disk_indices(&s) {
+        l_disk += s.pos[i].cross(s.vel[i]) * s.mass[i];
+    }
+    assert!(
+        l_disk.z > 0.0,
+        "disk spin must be along +Z: L_z = {}",
+        l_disk.z
+    );
+    assert!(
+        l_disk.z > 20.0 * l_disk.x.abs().max(l_disk.y.abs()),
+        "disk spin not coherently axial: L = {l_disk:?}"
+    );
+
+    // Zero-COM / zero-momentum frame is a property of the WHOLE galaxy.
     let mut mom = DVec3::ZERO;
     let mut com = DVec3::ZERO;
     let mut mtot = 0.0;
     for i in 0..s.len() {
-        let (p, v, m) = (s.pos[i], s.vel[i], s.mass[i]);
-        l += p.cross(v) * m;
-        mom += v * m;
-        com += p * m;
-        mtot += m;
+        mom += s.vel[i] * s.mass[i];
+        com += s.pos[i] * s.mass[i];
+        mtot += s.mass[i];
     }
-    assert!(l.z > 0.0, "net spin must be along +Z: L_z = {}", l.z);
     assert!(
-        l.z.abs() > 20.0 * l.x.abs().max(l.y.abs()),
-        "spin not coherently axial: L = {l:?}"
+        mom.length() < 1e-9 * mtot.max(1.0),
+        "net momentum not zero: {mom:?}"
     );
-    // Delivered in the zero-COM / zero-momentum frame (recentered to roundoff).
-    assert!(mom.length() < 1e-9 * mtot.max(1.0), "net momentum not zero: {mom:?}");
-    assert!((com / mtot).length() < 1e-9, "COM not at origin: {:?}", com / mtot);
+    assert!(
+        (com / mtot).length() < 1e-9,
+        "COM not at origin: {:?}",
+        com / mtot
+    );
 }
 
 #[test]
@@ -243,8 +275,15 @@ fn disk_is_flattened_and_not_expanding() {
     }
     let n = idx.len() as f64;
     let (rms_z, rms_r) = ((sz2 / n).sqrt(), (sr2 / n).sqrt());
-    assert!(rms_z < 0.2 * rms_r, "disk not thin: RMS z {rms_z} vs RMS R {rms_r}");
+    assert!(
+        rms_z < 0.2 * rms_r,
+        "disk not thin: RMS z {rms_z} vs RMS R {rms_r}"
+    );
     // Cold disk: no net radial or vertical streaming.
     assert!((svr / n).abs() < 0.02, "net radial streaming: {}", svr / n);
-    assert!((svz / n).abs() < 0.02, "net vertical streaming: {}", svz / n);
+    assert!(
+        (svz / n).abs() < 0.02,
+        "net vertical streaming: {}",
+        svz / n
+    );
 }

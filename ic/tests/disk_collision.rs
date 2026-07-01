@@ -87,7 +87,11 @@ fn relative_orbit_recovers_requested_conic_from_combined_masses() {
     // The two-body mass is the FULL galaxy mass (disk + halo), not just the halo.
     let mu = g * (g1.total_mass() + g2.total_mass());
 
-    for &(e, rp, r0) in &[(0.5_f64, 1.0_f64, 2.5_f64), (1.0, 1.0, 6.0), (1.5, 0.7, 5.0)] {
+    for &(e, rp, r0) in &[
+        (0.5_f64, 1.0_f64, 2.5_f64),
+        (1.0, 1.0, 6.0),
+        (1.5, 0.7, 5.0),
+    ] {
         let c = DiskCollision::new(g1, g2, e, rp, r0);
         let (r_rel, v_rel) = c.relative_state();
         assert!(
@@ -97,10 +101,16 @@ fn relative_orbit_recovers_requested_conic_from_combined_masses() {
         );
         assert!(r_rel.dot(v_rel) < 0.0, "e={e}: should be approaching");
         let (a, ecc) = elements(r_rel, v_rel, mu);
-        assert!((ecc - e).abs() < 1e-9, "e={e}: recovered eccentricity {ecc}");
+        assert!(
+            (ecc - e).abs() < 1e-9,
+            "e={e}: recovered eccentricity {ecc}"
+        );
         if (e - 1.0).abs() > 1e-9 {
             let q = a * (1.0 - e);
-            assert!((q - rp).abs() < 1e-7 * rp, "e={e}: pericenter {q} expected {rp}");
+            assert!(
+                (q - rp).abs() < 1e-7 * rp,
+                "e={e}: pericenter {q} expected {rp}"
+            );
         }
     }
 }
@@ -115,7 +125,10 @@ fn com_states_split_into_zero_momentum_frame() {
     assert!(((r2 - r1) - r_rel).length() < 1e-12, "r2−r1 ≠ r_rel");
     assert!(((v2 - v1) - v_rel).length() < 1e-12, "v2−v1 ≠ v_rel");
     assert!((r1 * m1 + r2 * m2).length() < 1e-12, "COM not at origin");
-    assert!((v1 * m1 + v2 * m2).length() < 1e-12, "net momentum not zero");
+    assert!(
+        (v1 * m1 + v2 * m2).length() < 1e-12,
+        "net momentum not zero"
+    );
 }
 
 // ---------- 2. assembly ----------
@@ -129,7 +142,10 @@ fn combined_state_count_mass_and_frame() {
 
     let mtot = c.galaxy1.total_mass() + c.galaxy2.total_mass();
     let summed: f64 = s.mass.iter().sum();
-    assert!((summed - mtot).abs() < 1e-12 * mtot, "total mass {summed} ≠ {mtot}");
+    assert!(
+        (summed - mtot).abs() < 1e-12 * mtot,
+        "total mass {summed} ≠ {mtot}"
+    );
 
     // Global zero-COM / zero-momentum frame.
     let mut com = DVec3::ZERO;
@@ -138,7 +154,11 @@ fn combined_state_count_mass_and_frame() {
         com += s.pos[i] * s.mass[i];
         mom += s.vel[i] * s.mass[i];
     }
-    assert!((com / mtot).length() < 1e-9, "COM not zeroed: {:?}", com / mtot);
+    assert!(
+        (com / mtot).length() < 1e-9,
+        "COM not zeroed: {:?}",
+        com / mtot
+    );
     assert!(mom.length() < 1e-9, "net momentum not zeroed: {mom:?}");
     assert_eq!(s.time, 0.0);
     assert_eq!(s.a, 1.0);
@@ -168,7 +188,11 @@ fn four_progenitors_partition_with_contiguous_ids() {
     let ids: HashSet<u64> = s.id.iter().map(|p| p.0).collect();
     let n = NH1 + ND1 + NH2 + ND2;
     assert_eq!(ids.len(), n, "ids not unique");
-    assert_eq!(ids, (0..n as u64).collect::<HashSet<_>>(), "ids not contiguous 0..N");
+    assert_eq!(
+        ids,
+        (0..n as u64).collect::<HashSet<_>>(),
+        "ids not contiguous 0..N"
+    );
 }
 
 #[test]
@@ -190,8 +214,14 @@ fn galaxies_placed_at_their_com_orbital_states() {
     let (rc2, vc2) = mean_state(&s, &g2);
 
     let tol = 0.03 * c.galaxy1.scale_length;
-    assert!((rc1 - r1).length() < tol, "galaxy 1 COM {rc1:?} vs r1 {r1:?}");
-    assert!((rc2 - r2).length() < tol, "galaxy 2 COM {rc2:?} vs r2 {r2:?}");
+    assert!(
+        (rc1 - r1).length() < tol,
+        "galaxy 1 COM {rc1:?} vs r1 {r1:?}"
+    );
+    assert!(
+        (rc2 - r2).length() < tol,
+        "galaxy 2 COM {rc2:?} vs r2 {r2:?}"
+    );
     assert!((vc1 - v1).length() < 0.03, "galaxy 1 bulk velocity ≠ v1");
     assert!((vc2 - v2).length() < 0.03, "galaxy 2 bulk velocity ≠ v2");
 }
@@ -212,8 +242,16 @@ fn sample_is_deterministic_in_seed() {
 #[test]
 fn default_encounter_is_coplanar_prograde_both_disks_spin_plus_z() {
     let c = fiducial();
-    assert_eq!(c.orient1, Orientation::prograde(), "galaxy 1 defaults to prograde");
-    assert_eq!(c.orient2, Orientation::prograde(), "galaxy 2 defaults to prograde");
+    assert_eq!(
+        c.orient1,
+        Orientation::prograde(),
+        "galaxy 1 defaults to prograde"
+    );
+    assert_eq!(
+        c.orient2,
+        Orientation::prograde(),
+        "galaxy 2 defaults to prograde"
+    );
 
     let s = c.sample(NH1, ND1, NH2, ND2, SEED);
     let l1 = spin_angular_momentum(&s, &indices(&s, Progenitor(1)));
@@ -237,7 +275,11 @@ fn retrograde_galaxy2_flips_only_its_disk_spin() {
     let l1 = spin_angular_momentum(&s, &indices(&s, Progenitor(1)));
     let l2 = spin_angular_momentum(&s, &indices(&s, Progenitor(3)));
     assert!(l1.z > 0.0, "galaxy 1 still prograde: L_z={}", l1.z);
-    assert!(l2.z < 0.0, "galaxy 2 retrograde must flip L_z: L_z={}", l2.z);
+    assert!(
+        l2.z < 0.0,
+        "galaxy 2 retrograde must flip L_z: L_z={}",
+        l2.z
+    );
     // Retrograde is coplanar: the disk still lies in the orbital plane (spin axial).
     assert!(
         l2.z.abs() > 20.0 * l2.x.abs().max(l2.y.abs()),
@@ -260,5 +302,8 @@ fn inclined_galaxy1_tilts_its_disk_angular_momentum() {
     );
     // Galaxy 2 untouched — still prograde +Z.
     let l2 = spin_angular_momentum(&s, &indices(&s, Progenitor(3)));
-    assert!(l2.z > 0.0 && l2.z > 20.0 * l2.x.abs().max(l2.y.abs()), "galaxy 2 must stay prograde");
+    assert!(
+        l2.z > 0.0 && l2.z > 20.0 * l2.x.abs().max(l2.y.abs()),
+        "galaxy 2 must stay prograde"
+    );
 }

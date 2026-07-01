@@ -38,12 +38,22 @@ fn retrograde_flips_the_spin_to_minus_z() {
         "retrograde spin must be −Z, got {spin:?}"
     );
     // A π rotation about +x keeps the line of nodes (x) fixed and flips y with z.
-    assert!((o.apply(DVec3::X) - DVec3::X).length() < 1e-12, "node line +x must be fixed");
+    assert!(
+        (o.apply(DVec3::X) - DVec3::X).length() < 1e-12,
+        "node line +x must be fixed"
+    );
 }
 
 #[test]
 fn inclined_tilts_the_spin_by_the_requested_angle() {
-    for &i in &[0.0_f64, 0.3, 1.0, std::f64::consts::FRAC_PI_2, 2.5, std::f64::consts::PI] {
+    for &i in &[
+        0.0_f64,
+        0.3,
+        1.0,
+        std::f64::consts::FRAC_PI_2,
+        2.5,
+        std::f64::consts::PI,
+    ] {
         let o = Orientation::inclined(i);
         let spin = o.apply(SPIN);
         assert!(
@@ -52,7 +62,11 @@ fn inclined_tilts_the_spin_by_the_requested_angle() {
             angle_off_z(spin)
         );
         // Tilt is about the line of nodes (+x): the tilted spin has no x-component.
-        assert!(spin.x.abs() < 1e-12, "inclined({i}) tilts about +x, spin.x={}", spin.x);
+        assert!(
+            spin.x.abs() < 1e-12,
+            "inclined({i}) tilts about +x, spin.x={}",
+            spin.x
+        );
     }
     // inclined(0) == prograde, inclined(π) == retrograde.
     assert!((Orientation::inclined(0.0).apply(SPIN) - DVec3::Z).length() < 1e-12);
@@ -95,7 +109,10 @@ fn orientation_is_rigid_length_and_dot_preserving() {
     let o = Orientation::from_angles(1.1, 2.3);
     let a = DVec3::new(1.0, -2.0, 0.5);
     let b = DVec3::new(-0.3, 0.7, 2.0);
-    assert!((o.apply(a).length() - a.length()).abs() < 1e-12, "rotation must preserve length");
+    assert!(
+        (o.apply(a).length() - a.length()).abs() < 1e-12,
+        "rotation must preserve length"
+    );
     assert!(
         (o.apply(a).dot(o.apply(b)) - a.dot(b)).abs() < 1e-12,
         "rotation must preserve dot products (rigid)"

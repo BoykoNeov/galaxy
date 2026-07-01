@@ -135,12 +135,28 @@ impl DiskCollision {
         // its COM orbital state. `ExponentialDisk::sample` already tags halo=0,
         // disk=1, so galaxy 1 needs no remap.
         place_galaxy(
-            &s1, self.orient1, r1, v1, 0, &mut pos, &mut vel, &mut mass, &mut progenitor,
+            &s1,
+            self.orient1,
+            r1,
+            v1,
+            0,
+            &mut pos,
+            &mut vel,
+            &mut mass,
+            &mut progenitor,
         );
         // Galaxy 2: same, but shift its progenitor tags by +2 so its halo becomes
         // Progenitor(2) and its disk Progenitor(3) — four distinct species overall.
         place_galaxy(
-            &s2, self.orient2, r2, v2, 2, &mut pos, &mut vel, &mut mass, &mut progenitor,
+            &s2,
+            self.orient2,
+            r2,
+            v2,
+            2,
+            &mut pos,
+            &mut vel,
+            &mut mass,
+            &mut progenitor,
         );
 
         // The per-galaxy COM split zeros the barycenter analytically, but rotation

@@ -170,6 +170,17 @@ late-time positions — N-body is chaotic).
     headroom below core count, so it stays a live option rather than closed. See
     `barnes_hut::build_tests::bench_build` (ignored) to re-measure.
 - **M3** — renderprep + wgpu render + grade → first tidal-tail movie
+  - **headless-wgpu feasibility spike (landed):** before building M3 around wgpu,
+    a throwaway probe (`render/src/bin/spike.rs`) confirmed the risky part works on
+    this box: a **headless** adapter (no surface) comes up (RTX 5090 / Vulkan), the
+    `FLOAT32_BLENDABLE` device feature is available, and additive-blended Gaussian
+    splats accumulate into an `Rgba32Float` offscreen target past 1.0 (32F headroom,
+    no clamp), copy-to-buffer + map readback returns the pixels. This pins Contract 3
+    positions to **f32** (GPU vertex layout). Portability caveat: additive blend into
+    32F *requires* `FLOAT32_BLENDABLE` — not universal; adapters lacking it would need
+    an `Rgba16Float` target (DESIGN rejects 16F for core banding) or compute-shader
+    accumulation. wgpu 29 API notes: `multiview`→`multiview_mask`,
+    `experimental_features` on `DeviceDescriptor`, `PollType::Wait` is a struct variant.
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 
 ## Validation strategy

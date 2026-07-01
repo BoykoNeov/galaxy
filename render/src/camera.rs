@@ -34,8 +34,16 @@ impl Camera {
     /// The basis is orthonormalized: `right = view_dir × up_hint`, `up = right ×
     /// view_dir`.
     pub fn orthographic(target: Vec3, view_dir: Vec3, up_hint: Vec3, half_extent: Vec2) -> Self {
-        let _ = (target, view_dir, up_hint, half_extent);
-        todo!("orthonormalize basis, store fields")
+        let forward = view_dir.normalize();
+        let right = forward.cross(up_hint).normalize();
+        let up = right.cross(forward).normalize();
+        Camera {
+            target,
+            right,
+            up,
+            forward,
+            half_extent,
+        }
     }
 
     /// Auto-frame the axis-aligned box `[min, max]` looking along `view_dir`: center
@@ -50,8 +58,34 @@ impl Camera {
         margin: f32,
         aspect: f32,
     ) -> Self {
-        let _ = (min, max, view_dir, up_hint, margin, aspect);
-        todo!("frame the AABB, aspect-correct the box")
+        let target = (min + max) * 0.5;
+        let forward = view_dir.normalize();
+        let right = forward.cross(up_hint).normalize();
+        let up = right.cross(forward).normalize();
+
+        // Half-extent that encloses all 8 AABB corners along the screen axes.
+        let mut er = 0.0f32;
+        let mut eu = 0.0f32;
+        for &x in &[min.x, max.x] {
+            for &y in &[min.y, max.y] {
+                for &z in &[min.z, max.z] {
+                    let d = Vec3::new(x, y, z) - target;
+                    er = er.max(d.dot(right).abs());
+                    eu = eu.max(d.dot(up).abs());
+                }
+            }
+        }
+        // Margin, and a floor so a degenerate (flat) scene still yields a valid box.
+        er = (er * (1.0 + margin)).max(1e-6);
+        eu = (eu * (1.0 + margin)).max(1e-6);
+        // Widen the short axis so the box matches the image aspect (no distortion).
+        if er / eu < aspect {
+            er = eu * aspect;
+        } else {
+            eu = er / aspect;
+        }
+
+        Self::orthographic(target, view_dir, up_hint, Vec2::new(er, eu))
     }
 
     /// Convenience: face-on view of `[min, max]` down the orbital normal (+Z), with
@@ -70,15 +104,20 @@ impl Camera {
     /// Project a world position to NDC. Points inside the view box map to
     /// `[-1, 1]²`; the depth axis is dropped (orthographic, additive → no depth).
     pub fn project(&self, world: Vec3) -> Vec2 {
-        let _ = world;
-        todo!("(p - target) · right/up, divided by half_extent")
+        let d = world - self.target;
+        Vec2::new(
+            d.dot(self.right) / self.half_extent.x,
+            d.dot(self.up) / self.half_extent.y,
+        )
     }
 
     /// NDC half-extent of a splat of the given world-space radius — the size to
     /// draw its quad. Isotropic in world space; the aspect-correct box keeps it
     /// isotropic on screen too.
     pub fn splat_ndc(&self, world_radius: f32) -> Vec2 {
-        let _ = world_radius;
-        todo!("world_radius / half_extent")
+        Vec2::new(
+            world_radius / self.half_extent.x,
+            world_radius / self.half_extent.y,
+        )
     }
 }

@@ -616,18 +616,40 @@ late-time positions — N-body is chaotic).
     - **Scope: re-uploads the pointer tree; traversal deferred.** `GpuLbvhFlattener` composes
       `GpuLbvhBuilder` and re-uploads the M4e tree to its own device (the M4d/M4e readback
       pattern). The **parallel Euler-tour flatten** and a **GPU-resident fuse** (no readback
-      between build/aggregate/flatten) are the named scale refinements. It wires into no solver
-      yet (there is still no `GpuLbvh`).
-  - **Remaining M4+:** the **last stage of the GPU port of the M4b LBVH build** is a `GpuLbvh`
-    f32 binary-BVH **traversal** kernel (M4g) that walks the M4f flat form — the direct
-    analogue of how `GpuTree` traverses the CPU-built octree, but over the per-axis
-    `half_extents` binary node (not `GpuTree`'s scalar-`half` cube) — its **θ→0 physics gate**
-    is where the end-to-end f32 topology straddle is finally checked (θ→0 opens every node to
-    its leaves, so the walk *is* direct summation regardless of the possibly-divergent f32
-    topology, yet still catches any dropped/double-counted subtree or bad skip pointer). Then,
-    separately and larger, keeping particle *state* GPU-resident across steps (which changes
-    the `accelerations(&State)→acc` interface) / PM / TreePM / gas (SPH) / cosmology (Friedmann
-    Background + periodic solver + IC pipeline).
+      between build/aggregate/flatten) are the named scale refinements. Its consumer is the
+      **M4g** `GpuLbvh` traversal below.
+  - **GpuLbvh f32 traversal — end-to-end GPU-resident LBVH (landed, M4g) — fifth and final
+    stage of the GPU port of the M4b LBVH build:** `galaxy_gpu::GpuLbvh` is the first solver to
+    run the **whole f32 pipeline end-to-end** — `GpuMorton` (f32 codes) → `GpuSort` → gather →
+    `GpuLbvhBuilder` → `GpuLbvhFlattener` → an f32 stackless **traversal** kernel over the M4f
+    flat form. Same `(g, softening, theta)` semantics as `galaxy_solvers::Lbvh`; the traversal
+    mirrors `LbvhFlat::accel` exactly but over the binary node's **per-axis `half_extents`**
+    (cell size `s = 2·max(half)`, not `GpuTree`'s scalar-`half` cube — the easy pattern-match
+    trap).
+    - **θ→0 is where the end-to-end f32 topology straddle is finally checked.** Every earlier
+      stage was gated against its CPU reference in isolation; this is the first gate on the
+      whole f32 chain. The subtlety: f32 Morton can quantize a coordinate into a different cell
+      than f64 (the M4c divergence), so the GPU tree's *topology* may differ from CPU `Lbvh`'s —
+      but θ→0 opens every node to its leaves, so the walk *is* direct summation **regardless of
+      topology**. It is therefore *insensitive* to the straddle, yet still catches any dropped/
+      double-counted subtree or bad skip pointer. So θ→0 does not *assert* the topology matches;
+      it shows the f32 pipeline runs end-to-end and *still* yields exact forces despite a
+      possibly-different topology. (Using CPU Morton here would make the gate green but vacuous
+      w.r.t. its purpose — the straddle only exists when the codes are computed in f32.)
+    - **Gates:** θ→0 vs the f64 `DirectSum` oracle (RMS < 3e-4, worst < 5e-2 — the same f32
+      floor as `GpuDirectSum`/`GpuTree`); finite-θ bounded + grows with θ, bounds **set from
+      measurement** (max over 32 seeds ≈ 6.8e-3 at θ=0.3, 3.3e-2 at θ=0.6 — looser than
+      `GpuTree`'s same-θ gate because `GpuLbvh` builds its *own* f32 tree, so whole cells differ,
+      not just opening flips); tracks CPU `Lbvh` at same θ (coarse RMS); momentum-flux at θ→0;
+      same-device bit-determinism; empty/single edges. GPU-gated, fail-loud.
+    - **Scope: reference-grade composition; GPU-resident fuse deferred.** Each stage owns its
+      own wgpu device and the pointer tree / flat form round-trips through host memory between
+      stages (the M4d/M4e/M4f readback pattern), so a `GpuLbvh` holds several devices and
+      re-uploads between stages. The **single-device, GPU-resident fuse** (no host round-trips,
+      state kept on the GPU across steps) is the named scale refinement.
+  - **Remaining M4+:** keeping particle *state* GPU-resident across steps (the GPU-resident fuse
+    above, which changes the `accelerations(&State)→acc` interface) / PM / TreePM / gas (SPH) /
+    cosmology (Friedmann Background + periodic solver + IC pipeline).
 
 ## Validation strategy
 

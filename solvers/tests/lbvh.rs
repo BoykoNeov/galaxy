@@ -199,10 +199,13 @@ fn lbvh_karras_structure_is_wellformed() {
             assert_eq!(nodes[0].next, end, "root subtree must span the whole array");
 
             // Binary structure + AABB containment, checked from the flat form.
-            let aabb = |nd: &galaxy_solvers::LbvhNode| (nd.center - nd.half_extents, nd.center + nd.half_extents);
+            let aabb = |nd: &galaxy_solvers::LbvhNode| {
+                (nd.center - nd.half_extents, nd.center + nd.half_extents)
+            };
             let contains = |(pmin, pmax): (DVec3, DVec3), (cmin, cmax): (DVec3, DVec3)| {
                 let eps = 1e-9;
-                cmin.cmpge(pmin - DVec3::splat(eps)).all() && cmax.cmple(pmax + DVec3::splat(eps)).all()
+                cmin.cmpge(pmin - DVec3::splat(eps)).all()
+                    && cmax.cmple(pmax + DVec3::splat(eps)).all()
             };
             for (k, nd) in nodes.iter().enumerate() {
                 if nd.body_count > 0 {
@@ -210,13 +213,22 @@ fn lbvh_karras_structure_is_wellformed() {
                 }
                 let left = k + 1;
                 let right = nodes[left].next as usize;
-                assert!(right < nd.next as usize, "right child inside subtree at {k}");
+                assert!(
+                    right < nd.next as usize,
+                    "right child inside subtree at {k}"
+                );
                 assert_eq!(
                     nodes[right].next, nd.next,
                     "right child must end the parent subtree at {k}"
                 );
-                assert!(contains(aabb(nd), aabb(&nodes[left])), "left AABB ⊄ parent at {k}");
-                assert!(contains(aabb(nd), aabb(&nodes[right])), "right AABB ⊄ parent at {k}");
+                assert!(
+                    contains(aabb(nd), aabb(&nodes[left])),
+                    "left AABB ⊄ parent at {k}"
+                );
+                assert!(
+                    contains(aabb(nd), aabb(&nodes[right])),
+                    "right AABB ⊄ parent at {k}"
+                );
             }
 
             // Root AABB contains every position.

@@ -1,4 +1,5 @@
 use galaxy_core::{DVec3, ForceSolver, State};
+use rayon::prelude::*;
 
 /// Barnes-Hut octree solver (monopole-only). An O(N log N) approximation to
 /// direct summation, controlled by the opening angle `theta`: a node is used as
@@ -255,10 +256,27 @@ impl BarnesHut {
 }
 
 impl ForceSolver for BarnesHut {
-    fn accelerations(&mut self, _state: &State, _acc: &mut [DVec3]) {
-        // GREEN step: rayon `par_iter_mut` over targets, bit-exact to
-        // `accelerations_serial`. See solvers/tests/barnes_hut_parallel.rs.
-        todo!("parallel Barnes-Hut force fill via rayon")
+    fn accelerations(&mut self, state: &State, acc: &mut [DVec3]) {
+        let n = state.len();
+        assert_eq!(acc.len(), n, "acc length must match particle count");
+        if n == 0 {
+            return;
+        }
+        // Build the tree once (serial), then only read it. `accel_node` is `&self`
+        // and each target writes exactly its own `acc[i]`, so the fill is a pure
+        // map over independent targets — parallelizing it is data-race-free and
+        // bit-exact to the serial reference (no per-target sum is reassociated).
+        let tree = Octree::build(&state.pos, &state.mass);
+        let q = Query {
+            pos: &state.pos,
+            mass: &state.mass,
+            theta: self.theta,
+            eps2: self.softening * self.softening,
+        };
+        let g = self.g;
+        acc.par_iter_mut().enumerate().for_each(|(i, a)| {
+            *a = tree.accel_node(0, i, &q) * g;
+        });
     }
 
     #[allow(clippy::needless_range_loop)]

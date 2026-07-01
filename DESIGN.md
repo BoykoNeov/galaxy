@@ -417,8 +417,10 @@ late-time positions — N-body is chaotic).
     - **Scope honesty.** A genuine GPU *traversal* (the part that dominates at scale),
       but the **build stays on the CPU** (already rayon-parallel) and the state is
       re-uploaded each `accelerations` call — a **GPU-resident build** (Morton/LBVH) is
-      the next deferred step, and the CPU build becomes the Amdahl ceiling well before
-      10⁸. Realistically opens the **10⁷ band** that O(N²) `GpuDirectSum` cannot. The
+      the next deferred step (its CPU f64 reference / oracle landed as **M4b** below;
+      the GPU port of that build is what remains), and the CPU build becomes the Amdahl
+      ceiling well before 10⁸. Realistically opens the **10⁷ band** that O(N²)
+      `GpuDirectSum` cannot. The
       f32 precision floor (large-coordinate `xᵢ−xⱼ` cancellation) is unchanged from the
       direct-sum kernel — the tree geometry narrows f64→f32 harmlessly (O(1e-6)); the
       dominant error is still the accumulation/cancellation, worst in the clustered,
@@ -429,8 +431,51 @@ late-time positions — N-body is chaotic).
       coarse guard); same-device bit-determinism; momentum-flux at the f32 floor at
       θ→0; empty/single edge cases. Plus the solvers-side f64 flatten test (bit-exact
       topology + reassociation-precision forces). GPU-gated, fail-loud.
-  - **Remaining M4+:** GPU-resident tree build (Morton/LBVH) / PM / TreePM / gas (SPH)
-    / cosmology (Friedmann Background + periodic solver + IC pipeline).
+  - **CPU LBVH reference (landed, M4b) — the oracle for the GPU-resident build:**
+    `galaxy_solvers::Lbvh` is a Barnes-Hut monopole `ForceSolver` built on a **Morton-code
+    Linear BVH** (Karras 2012 binary radix tree) instead of the octree. It is pure **CPU
+    f64** and adds no GPU code — its purpose is to be the algorithmic + numerical reference
+    the deferred GPU-resident build ports to, exactly as `FlatTree`'s CPU f64 walk is the
+    oracle for `GpuTree` (one level up: the *build*, not just the traverse). The deliverable
+    is the GPU-shaped build *pipeline* run in f64: bounding box → 30-bit Morton codes → sort
+    by `(code, index)` → Karras binary radix tree → bottom-up aggregation → DFS skip-pointer
+    flatten, then a stackless BVH walk.
+    - **Why a binary radix tree, not the octree.** "LBVH" *is* the Karras binary tree:
+      exactly `N` single-body leaves (Morton-sorted) + `N−1` internal nodes = `2N−1` total,
+      each internal node with two children. Opening reuses the Barnes (1994) form, but the
+      cell size is the node's AABB **longest side** `s = max(2·half_extents)` (a binary node
+      may be non-cubic), not the octree cube's `2·half`. Because a binary node ≠ an octree
+      cell, the `GpuTree` "vs CPU `BarnesHut` at the same θ" gate does **not** transfer to
+      this path and is dropped, not fudged — the surviving pins are the topology-independent
+      ones (θ→0, momentum flux) plus finite-θ bounded/grows.
+    - **Determinism is designed in, for the future GPU sort.** Morton ties (same 1024³ cell,
+      or exactly coincident particles) are broken by original index in the sort *and* by
+      Karras's `δ` extending into the sorted position when codes are equal — so the tree
+      topology, and therefore the forces, are a deterministic function of the input (a
+      coincident-particle determinism gate pins it). That is the same tie-break a future GPU
+      radix sort must implement; the bottom-up aggregation folds each node from its two
+      children in fixed `(left, right)` order — the CPU analogue of the Karras atomic-*flag*
+      combine (deterministic result, **no** float `atomicAdd`).
+    - **Scope honesty.** No GPU code yet — this is the reference, not the GPU build. The
+      build recurses (fine for the oracle; a scale build is iterative). 30-bit Morton (`u32`,
+      1024³) is the first landing; **63-bit** (2× `u32` sort passes on the GPU) is the
+      documented resolution refinement for the dense-core / large-coordinate regime.
+      Coincident particles get distinct single-body leaves (index tie-break), not the
+      octree's bucket-at-the-coincidence-floor.
+    - **Gates:** θ→0 reproduces the f64 `DirectSum` oracle to roundoff (< 1e-9 worst rel
+      err — the clean, **topology-independent** correctness gate); finite-θ RMS bounded and
+      grows with θ (O(θ²), looser bounds than the octree gate for the longest-side `s`);
+      momentum flux Σmᵢaᵢ=0 at θ→0; Karras structure (2N−1 nodes, leaves a permutation of
+      `0..N`, strict binary child layout + AABB containment, all checked from the flat
+      skip-pointer form); coincident-particle determinism; empty/single; and the Morton
+      primitives (bit-spread, interleave, axis monotonicity). Always-on (no GPU adapter).
+  - **Remaining M4+:** the **GPU port of the M4b LBVH build** (each stage gated vs the CPU
+    reference: Morton+bbox kernel → **GPU sort** [the load-bearing risk — deterministic
+    `u32` radix, same-device gate] → Karras tree-build kernel + atomic-flag bottom-up
+    aggregation → a `GpuLbvh` f32 binary-BVH traversal kernel; then, separately and larger,
+    keeping particle *state* GPU-resident across steps, which changes the
+    `accelerations(&State)→acc` interface) / PM / TreePM / gas (SPH) / cosmology (Friedmann
+    Background + periodic solver + IC pipeline).
 
 ## Validation strategy
 

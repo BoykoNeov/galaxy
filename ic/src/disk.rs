@@ -24,6 +24,16 @@
 //! elementary, and the sampled kinematics can be compared to an independent
 //! closed form (mirroring the Plummer virial check).
 //!
+//! Caveats (deliberate, for the follow-up "warm disk" milestone):
+//! - The sech² vertical layer is a *geometric* profile, not a vertical
+//!   equilibrium: particles are given no vertical velocity support (v_z = 0), so
+//!   the sheet settles toward the midplane and phase-mixes thinner. Fine for the
+//!   in-plane tidal-tail visual; it is not a self-consistent isothermal disk.
+//! - The disk is fully cold (no random velocity dispersion, Toomre Q → 0). Over a
+//!   single isolated orbit it holds, but across the several orbits of a collision
+//!   a maximally-cold disk can fragment/clump before the tail develops. A small
+//!   in-plane dispersion is the natural knob to add when the collision needs it.
+//!
 //! Disk particles are tagged `Progenitor(1)` (species: disk) and halo particles
 //! `Progenitor(0)` (species: halo/bulge), so the renderer can color them apart and
 //! tests can select the disk population robustly. `sample` returns the halo
@@ -117,7 +127,13 @@ impl ExponentialDisk {
     /// Circular speed v_c(R) = √(G · [M_halo(<R) + M_disk(<R)] / R) from the
     /// combined enclosed mass — the spherical Plummer term plus the cylindrical
     /// disk term. This is the target mean azimuthal speed of the cold disk.
+    ///
+    /// v_c(0) = 0 by symmetry (no enclosed mass at the center): the explicit guard
+    /// keeps a particle sampled exactly at R=0 from producing a √(0/0)=NaN velocity.
     pub fn circular_velocity(&self, r: f64) -> f64 {
+        if r <= 0.0 {
+            return 0.0;
+        }
         let m_enc = self.halo.enclosed_mass(r) + self.disk_enclosed_mass(r);
         (self.g * m_enc / r).sqrt()
     }

@@ -186,8 +186,8 @@ late-time positions — N-body is chaotic).
     non-rotating** Plummer spheres (`ic/plummer.rs`: position *and* velocity drawn in
     random directions, net momentum subtracted), so an encounter physically yields
     stripping / bridges / plumes — **not** thin curved streams. This is an IC
-    property, not a render limitation: the tail *visual* is unlocked by the deferred
-    rotating-disk IC (`ic/` `[next: … exp disk, bulge]`), not by more rendering work.
+    property, not a render limitation: the tail *visual* is unlocked by the
+    rotating-disk IC (**landed, see M3.5**), not by more rendering work.
     (Note for that tuning pass: the p98 `framing_radius` crop trims the outermost
     stripped material — loosen it when the goal is maximal tidal extent.)
   - Deferred (not on the first-movie path): bloom, kNN density/velocity-dispersion
@@ -234,6 +234,36 @@ late-time positions — N-body is chaotic).
     total flux), **32F headroom** (overlap exceeds 1.0, no clamp), **centered-splat
     symmetry** (odd dims). Plus CPU camera-math and EXR round-trip tests. A left-over
     `bin/spike.rs` remains as the feasibility artifact.
+- **M3.5** ✅ (IC only) — rotating exponential-disk IC (`ic/disk.rs`, `ExponentialDisk`),
+  the IC that unlocks the thin Toomre tidal-tail visual M3 could not produce. A cold,
+  low-mass exponential disk (surface density Σ₀e^(−R/Rd), truncated; sech² vertical
+  layer) of `Progenitor(1)` particles is embedded in a **live Plummer halo/bulge**
+  (`Progenitor(0)`) that carries most of the mass. The disk is placed on **cold
+  near-circular orbits** with spin along **+Z**: v_φ(R) = v_c(R) from the *combined*
+  enclosed mass (spherical Plummer + cylindrical disk), so the rotation curve is an
+  **elementary closed form** — the exponential disk's Bessel-function potential is
+  sidestepped, keeping the IC exactly checkable.
+  - **Model choice: "cold kinematic"** (over warm-self-consistent / test-particle).
+    The disk is **submaximal** (fiducial 10% of halo mass): the smooth halo dominates
+    the rotation and dilutes the cold disk's self-gravity, which is the stabilization
+    mechanism — a *maximal* cold disk has Toomre Q ≪ 1 and is **not** an equilibrium,
+    so the Plummer "stays in equilibrium" gate is deliberately **not** reused.
+  - **Gates:** solver-free analytic self-consistency (Σ₀ normalization, enclosed-mass
+    ↔ density-derivative, v_c vs independent combined-enclosed-mass); a realization's
+    radial CDF and ⟨v_φ⟩(R) on the analytic v_c; **coherent +Z spin** with zero net
+    momentum/COM — the invariant that distinguishes a disk from isotropic Plummer;
+    and a loose one-inner-orbit BarnesHut gate (energy + L_z conservation, bounded
+    half-mass radius and thickness). Spin coherence is measured over the disk
+    population (halo shot-noise ≠ disk spin); v_c compared at each bin's mean radius.
+  - **Known caveats (documented, for the warm-disk follow-up):** the sech² layer has
+    no vertical velocity support (v_z=0) → it is a geometric profile that settles, not
+    a vertical equilibrium; the disk is fully cold (Q→0) and could fragment over the
+    several orbits of a *collision* — a small in-plane dispersion is the knob to add.
+  - **NOT yet done (this is the IC only):** wiring disk galaxies into `Collision`
+    (which still takes two `Plummer`s), the spin-orbit **orientation** parameter for a
+    prograde passage, and the actual two-disk **collision → tidal-tail movie**. The
+    default disk (spin +Z, orbit plane x–y) is already coplanar-prograde and face-on
+    to the +Z camera, so that next step is wiring + tuning, not new physics.
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 
 ## Validation strategy

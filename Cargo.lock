@@ -296,6 +296,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-renderprep"
+version = "0.0.0"
+dependencies = [
+ "galaxy-core",
+ "glam",
+ "thiserror",
+]
+
+[[package]]
 name = "galaxy-sim"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,9 @@
+[package]
+name = "galaxy-renderprep"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+galaxy-core = { path = "../core" }
+glam = { workspace = true }
+thiserror = { workspace = true }

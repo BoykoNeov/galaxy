@@ -11,7 +11,7 @@ pub mod state;
 pub mod traits;
 
 pub use background::StaticBackground;
-pub use glam::DVec3;
+pub use glam::{DQuat, DVec3};
 pub use integrator::LeapfrogKdk;
 pub use state::{ParticleId, Progenitor, State};
 pub use traits::{Background, ForceSolver, Integrator};

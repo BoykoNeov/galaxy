@@ -8,6 +8,7 @@
 
 pub mod collision;
 pub mod disk;
+mod encounter;
 pub mod plummer;
 
 pub use collision::Collision;

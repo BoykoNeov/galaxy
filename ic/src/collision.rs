@@ -21,6 +21,7 @@
 
 use galaxy_core::{DVec3, ParticleId, Progenitor, State};
 
+use crate::encounter;
 use crate::Plummer;
 
 /// A two-body Kepler encounter between two Plummer galaxies.
@@ -62,21 +63,7 @@ impl Collision {
             galaxy1.g, galaxy2.g,
             "both galaxies must share the same gravitational constant G"
         );
-        assert!(eccentricity > 0.0, "eccentricity must be positive");
-        assert!(pericenter > 0.0, "pericenter must be positive");
-        assert!(
-            separation >= pericenter,
-            "initial separation ({separation}) must be >= pericenter ({pericenter})"
-        );
-        // A bound orbit (e < 1) cannot start beyond apocenter r_peri(1+e)/(1−e):
-        // there is no point on the conic at a larger separation.
-        if eccentricity < 1.0 {
-            let apocenter = pericenter * (1.0 + eccentricity) / (1.0 - eccentricity);
-            assert!(
-                separation <= apocenter * (1.0 + 1e-12),
-                "initial separation ({separation}) exceeds apocenter ({apocenter}) for a bound orbit (e={eccentricity})"
-            );
-        }
+        encounter::validate_orbit(eccentricity, pericenter, separation);
         Self {
             galaxy1,
             galaxy2,
@@ -95,34 +82,8 @@ impl Collision {
     /// `r_rel = r2 − r1` and `v_rel = v2 − v1`, on the incoming branch of the
     /// Kepler orbit. Pericenter lies along +x; the orbit is in the x–y plane.
     pub fn relative_state(&self) -> (DVec3, DVec3) {
-        let e = self.eccentricity;
-        let r0 = self.separation;
         let mu = self.g() * (self.galaxy1.total_mass + self.galaxy2.total_mass);
-
-        // Conic about the focus: r(ν) = p / (1 + e·cos ν), with semi-latus rectum
-        // p = r_peri·(1 + e) and specific angular momentum h = √(μ·p).
-        let p = self.pericenter * (1.0 + e);
-        let h = (mu * p).sqrt();
-
-        // True anomaly at the starting separation, on the *incoming* branch (ν<0
-        // ⇒ the bodies are approaching). Clamp guards float drift at the apsides.
-        let cos_nu = ((p / r0 - 1.0) / e).clamp(-1.0, 1.0);
-        let nu = -cos_nu.acos();
-        let (sin_nu, cos_nu) = (nu.sin(), nu.cos());
-
-        // Polar velocity components for a Kepler orbit:
-        //   v_r = (μ/h)·e·sin ν,   v_θ = (μ/h)·(1 + e·cos ν) = h/r.
-        let mu_over_h = mu / h;
-        let v_r = mu_over_h * e * sin_nu;
-        let v_t = mu_over_h * (1.0 + e * cos_nu);
-
-        // Pericenter along +x, orbit in the x–y plane: radial r̂ = (cos ν, sin ν, 0),
-        // transverse t̂ = (−sin ν, cos ν, 0).
-        let r_hat = DVec3::new(cos_nu, sin_nu, 0.0);
-        let t_hat = DVec3::new(-sin_nu, cos_nu, 0.0);
-        let r_rel = r_hat * r0;
-        let v_rel = r_hat * v_r + t_hat * v_t;
-        (r_rel, v_rel)
+        encounter::relative_state(mu, self.eccentricity, self.pericenter, self.separation)
     }
 
     /// The two COMs' `(position, velocity)` in the global zero-COM /
@@ -131,14 +92,12 @@ impl Collision {
     /// `v2 − v1 = v_rel`.
     pub fn com_states(&self) -> ((DVec3, DVec3), (DVec3, DVec3)) {
         let (r_rel, v_rel) = self.relative_state();
-        let m1 = self.galaxy1.total_mass;
-        let m2 = self.galaxy2.total_mass;
-        let mtot = m1 + m2;
-        // Split r_rel = r2 − r1 about the barycenter: r1 = −(m2/M)·r_rel,
-        // r2 = +(m1/M)·r_rel ⇒ m1·r1 + m2·r2 = 0 (and likewise for velocities).
-        let f1 = -m2 / mtot;
-        let f2 = m1 / mtot;
-        ((r_rel * f1, v_rel * f1), (r_rel * f2, v_rel * f2))
+        encounter::com_states(
+            self.galaxy1.total_mass,
+            self.galaxy2.total_mass,
+            r_rel,
+            v_rel,
+        )
     }
 
     /// Sample the full collision: `n1` particles for galaxy 1 (tagged

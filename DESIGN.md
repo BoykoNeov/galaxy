@@ -641,7 +641,14 @@ late-time positions — N-body is chaotic).
       measurement** (max over 32 seeds ≈ 6.8e-3 at θ=0.3, 3.3e-2 at θ=0.6 — looser than
       `GpuTree`'s same-θ gate because `GpuLbvh` builds its *own* f32 tree, so whole cells differ,
       not just opening flips); tracks CPU `Lbvh` at same θ (coarse RMS); momentum-flux at θ→0;
-      same-device bit-determinism; empty/single edges. GPU-gated, fail-loud.
+      same-device bit-determinism; empty/single edges. Plus a **straddle-made-provable** gate:
+      θ→0 alone is topology-insensitive, so it passes whether or not f32/f64 Morton ever
+      actually diverged — and at the N=128 test scale they never do. So a dedicated test finds
+      (at N=20000, where a particle lands within an f32 ulp of a cell boundary) seeds whose GPU
+      f32 topology genuinely differs from the f64 `reference_karras` tree, asserts ≥1 such seed
+      exists, then shows GpuLbvh at θ→0 *still* matches `DirectSum` on exactly those seeds — the
+      straddle is thereby exercised **and** survived, not merely present in the code path.
+      GPU-gated, fail-loud.
     - **Scope: reference-grade composition; GPU-resident fuse deferred.** Each stage owns its
       own wgpu device and the pointer tree / flat form round-trips through host memory between
       stages (the M4d/M4e/M4f readback pattern), so a `GpuLbvh` holds several devices and

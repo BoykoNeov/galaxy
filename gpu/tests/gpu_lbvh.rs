@@ -24,8 +24,8 @@
 //! the tests fail loudly (matches the M3/M4 convention).
 
 use galaxy_core::{DVec3, ForceSolver, State};
-use galaxy_gpu::GpuLbvh;
-use galaxy_solvers::{DirectSum, Lbvh};
+use galaxy_gpu::{GpuLbvh, GpuMortonBuilder, GpuSorter};
+use galaxy_solvers::{reference_karras, reference_morton, reference_sort, DirectSum, Lbvh};
 
 const G: f64 = 1.0;
 const EPS: f64 = 0.05;
@@ -223,4 +223,86 @@ fn gpu_lbvh_handles_empty_and_single() {
     );
     let a = accel(&mut solver, &one);
     assert_eq!(a, vec![DVec3::ZERO], "a lone particle feels no force");
+}
+
+/// A cube of half-width `r` centered at the origin — larger than [`cluster`]'s box so the
+/// f32-vs-f64 Morton straddle actually triggers (it never does at the θ→0 test's N=128/r=1.5
+/// scale; it needs enough near-boundary particles).
+fn cube(seed: u64, n: usize, r: f64) -> State {
+    let mut state = seed | 1;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+    let mut pos = Vec::with_capacity(n);
+    let mut mass = Vec::with_capacity(n);
+    for _ in 0..n {
+        pos.push(DVec3::new(next() - 0.5, next() - 0.5, next() - 0.5) * (2.0 * r));
+        mass.push(0.1 + 0.9 * next());
+    }
+    let vel = vec![DVec3::ZERO; n];
+    State::from_phase_space(pos, vel, mass)
+}
+
+/// **The straddle made provable, not merely possible.** The θ→0-vs-DirectSum gate is
+/// topology-*insensitive*, so on its own it passes whether or not the f32 and f64 Morton
+/// topologies ever actually diverged — and at N=128/r=1.5 they never do. This test closes
+/// that: at a scale where the straddle *does* fire (N large enough that some particle sits
+/// within an f32 ulp of a 1024³ cell boundary), it (1) **proves** the GPU f32 tree topology
+/// differs from the f64 `reference_karras` topology on ≥1 seed, then (2) shows GpuLbvh at
+/// θ→0 **still** reproduces the exact `DirectSum` forces on exactly those diverged seeds — so
+/// the end-to-end f32 topology straddle is exercised *and* survived, which is the whole point
+/// of the θ→0 gate.
+#[test]
+fn gpu_lbvh_theta_zero_survives_a_real_topology_straddle() {
+    const N: usize = 20_000; // large enough that some particle lands within an f32 ulp of a
+    const R: f64 = 3.0; // cell boundary; small coords keep θ→0 at the f32 floor.
+    let mut morton = GpuMortonBuilder::new().expect("wgpu adapter required");
+    let mut sorter = GpuSorter::new().expect("wgpu adapter required");
+
+    // Pass 1: find seeds whose GPU f32 tree topology differs from the f64 reference tree.
+    // Deterministic (fixed seeds + same-device f32), so this is not a flaky search.
+    let mut diverged: Vec<u64> = Vec::new();
+    for seed in 0..96u64 {
+        let s = cube(seed, N, R);
+        let gpu_codes = morton.compute(&s.pos).codes;
+        let f64_codes = reference_morton(&s.pos).codes;
+        let g_order = sorter.sort(&gpu_codes).order;
+        let g_sorted: Vec<u32> = g_order.iter().map(|&i| gpu_codes[i as usize]).collect();
+        let f_order = reference_sort(&f64_codes);
+        let f_sorted: Vec<u32> = f_order.iter().map(|&i| f64_codes[i as usize]).collect();
+        let gt = reference_karras(&g_sorted);
+        let ft = reference_karras(&f_sorted);
+        if gt.left != ft.left || gt.right != ft.right || gt.parent != ft.parent {
+            diverged.push(seed);
+        }
+    }
+    assert!(
+        !diverged.is_empty(),
+        "expected the f32 Morton topology straddle to fire on >=1 of 96 seeds — else the \
+         end-to-end straddle is never exercised and the θ→0 gate is vacuous"
+    );
+
+    // Pass 2: on the diverged seeds, θ→0 GpuLbvh must still match DirectSum — the f32
+    // pipeline yields exact forces despite building a genuinely different tree than f64.
+    // Capped at a few seeds since the DirectSum oracle is O(N²) at N=20000.
+    let mut solver = gpu(G, EPS, 1e-6);
+    let mut ds = DirectSum::new(G, EPS);
+    for &seed in diverged.iter().take(3) {
+        let s = cube(seed, N, R);
+        let exact = accel(&mut ds, &s);
+        let got = accel(&mut solver, &s);
+        let rms = rms_rel_err(&got, &exact);
+        let worst = worst_rel_err(&got, &exact);
+        assert!(
+            rms < 3e-4,
+            "θ→0 must survive a real topology straddle (seed {seed}): RMS {rms:e}"
+        );
+        assert!(
+            worst < 5e-2,
+            "θ→0 worst must survive a real topology straddle (seed {seed}): {worst:e}"
+        );
+    }
 }

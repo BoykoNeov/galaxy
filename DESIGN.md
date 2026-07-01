@@ -65,6 +65,7 @@ renderer.
 galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
 ├─ solvers/      DirectSum (oracle), BarnesHut (workhorse)   [later: ParticleMesh, TreePM]
+├─ gpu/          GpuDirectSum — wgpu-compute O(N²) direct sum (f32, tiled gather) (DONE) [later: GPU tree / TreePM]
 ├─ ic/           Plummer sphere, exp-disk-in-halo (cold + warm Toomre-Q), two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [next: Hernquist/NFW halo] [later: cosmological ICs]
 ├─ io/           snapshot read/write: Rust-native versioned binary (DONE) [HDF5 behind a `validation` feature: later]
 ├─ sim/          headless engine: solver+integrator+IC+stepping loop → snapshots (DONE) [checkpoint/restart: later]
@@ -335,7 +336,53 @@ late-time positions — N-body is chaotic).
       cold disk here; a maximal or longer-integrated disk would separate more). The
       rigorous, non-visual evidence that the warmth is load-bearing is the exact
       kinematic gates + the dynamical drift differential (16× expansion), not the movie.
-- **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
+- **M4** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
+  - **GPU direct-sum solver (landed):** `galaxy-gpu`'s `GpuDirectSum` is an exact
+    O(N²) Plummer-softened direct summation run as a **wgpu compute** kernel — the same
+    algebra as the CPU `DirectSum` oracle, moved to the GPU for throughput. It drops in
+    behind the `ForceSolver` trait (the "swappable solvers" door), reusing a device/
+    queue/pipeline built once with storage buffers grown lazily. This validates the
+    GPU-**compute** infrastructure (the render stage was GPU-**graphics**) and is the
+    first step of the 10⁸ scaling path.
+    - **f32 is forced by the toolchain, not a design choice.** wgpu/naga has no
+      portable native f64 compute (`SHADER_FLOAT64` is rarely present across backends),
+      so the kernel runs in **f32** while the engine is f64. The honest lever is the
+      **accumulation strategy**, and **float-float (`df64`) emulation** of the `xᵢ − xⱼ`
+      difference and the accumulator is the named forward refinement for
+      precision-critical runs. The dominant f32 error is *not* a uniform ~1e-6: it is
+      catastrophic cancellation in `xᵢ − xⱼ` (large coordinates, close pairs) plus small
+      terms swallowed while summing N contributions into one f32 accumulator — **worst**
+      in the clustered, large-coordinate collision regime the GPU path is for. The gates
+      pin this analytically: unit-box forces match the f64 oracle to < 3e-4 RMS, while a
+      rigid offset to |x| ≈ 5000 degrades to ~5e-3 RMS (worst-pair ≈ √2·D·ε_f32/softening
+      ≈ 1.7e-2) — a documented, coordinate-scale-driven precision floor, the analogue of
+      "BH error grows with θ". Keep collision coordinates near the (zero-COM) origin.
+    - **Gather, not scatter (determinism).** One invocation per *target* `i` loops over
+      all sources `j`, accumulating in a private register and writing `accel[i]` exactly
+      once — no float `atomicAdd` (whose ordering is nondeterministic). The fixed loop
+      order makes it **bit-deterministic on a given device** (cross-device equality is
+      *not* claimed: FMA/rounding differ), matching the parallel-BH "per-target acc never
+      reassociated" discipline. Sources stream through a 256-wide workgroup tile
+      (GPU-Gems N-body pattern); the self term (`dx=0`) and padded lanes (`mass=0`)
+      contribute zero with no per-iteration branch. Requests **no** device features
+      (baseline storage-buffer compute), so it does not narrow adapter support the way
+      the renderer's `FLOAT32_BLENDABLE` does.
+    - **Scope honesty.** O(N²) → realistically a few × 10⁶ particles, **not** 10⁷–10⁸.
+      The 10⁸ door is a GPU *tree* / TreePM / PM solver, not brute force; this is
+      infrastructure validation + an exact fast solver in the 10⁵–10⁶ band + a stepping
+      stone. `potential_energy` delegates to the CPU **f64** reduction for the MVP — a
+      documented inconsistency (the integrator then applies **f32** forces while energy
+      is measured from an **f64** potential, so a drift diagnostic mixes a precision gap
+      with integrator error; the potential is a periodic diagnostic, not the per-step
+      path). The `accelerations(&State)→acc` interface also forces an upload+readback each
+      step; negligible while O(N²) compute dominates, but it becomes the bottleneck for a
+      future GPU-tree where state must stay GPU-resident.
+    - **Gates:** equivalence vs the f64 `DirectSum` oracle at analytically-derived f32
+      tolerances (unit-box + large-coordinate cancellation); same-device bit-determinism;
+      Newton's-third-law momentum-flux (net internal force at the f32 floor); empty/single
+      edge cases. GPU-gated (need a wgpu adapter), fail-loud like the M3 render invariants.
+  - **Remaining M4+:** PM / TreePM / GPU-tree / gas (SPH) / cosmology (Friedmann
+    Background + periodic solver + IC pipeline).
 
 ## Validation strategy
 

@@ -373,11 +373,21 @@ impl GpuSorter {
             pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups(1, 1, 1); // single-invocation counting sort
         }
-        // Even NUM_PASSES ⇒ result is back in buffer A.
+        // The result lands in the buffer written by the last pass: A after an even pass
+        // count, B after an odd one. Selecting by parity (rather than hardcoding A) keeps
+        // this correct if a future refinement changes NUM_PASSES — e.g. the 63-bit two-word
+        // sort — where hardcoding A would silently read stale pre-sort data.
+        let key_b = self.key_b.as_ref().expect("buffers ensured above");
+        let idx_b = self.idx_b.as_ref().expect("buffers ensured above");
+        let (final_keys, final_idx) = if NUM_PASSES.is_multiple_of(2) {
+            (key_a, idx_a)
+        } else {
+            (key_b, idx_b)
+        };
         let keys_rb = self.keys_readback.as_ref().expect("buffers ensured above");
         let idx_rb = self.idx_readback.as_ref().expect("buffers ensured above");
-        enc.copy_buffer_to_buffer(key_a, 0, keys_rb, 0, bytes);
-        enc.copy_buffer_to_buffer(idx_a, 0, idx_rb, 0, bytes);
+        enc.copy_buffer_to_buffer(final_keys, 0, keys_rb, 0, bytes);
+        enc.copy_buffer_to_buffer(final_idx, 0, idx_rb, 0, bytes);
         self.queue.submit([enc.finish()]);
 
         // Map both readbacks, wait once, read. A map failure here is a genuine GPU loss

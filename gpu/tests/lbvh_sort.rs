@@ -158,7 +158,10 @@ fn gpu_sort_localizes_to_high_byte_pass() {
 // ---------------------------------------------------------------------------
 
 /// Same codes ⇒ bit-identical order on a given device (integer histogram commutes, fixed-
-/// order scatter — determinism is structural, not statistical).
+/// order scatter — determinism is structural, not statistical). With the current
+/// single-invocation scatter this is near-vacuous (there is no nondeterminism source); its
+/// real job is a regression guard for the deferred **parallel** stable scatter, where the
+/// scatter ordering could reintroduce nondeterminism.
 #[test]
 fn gpu_sort_is_bit_deterministic() {
     let pos = cloud(0x50, 6000, 3.0, DVec3::ZERO);

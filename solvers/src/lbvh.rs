@@ -203,6 +203,10 @@ impl LbvhFlat {
     /// Build the LBVH (Morton codes → sort by `(code, index)` → Karras binary radix
     /// tree → bottom-up aggregate) and linearize it to DFS pre-order with skip
     /// pointers. `pos` must be non-empty (the caller handles N=0 before building).
+    ///
+    /// The flatten is recursive, so this is **reference-scale** (the tree depth bounds
+    /// the stack); a full 10⁵–10⁶ snapshot wants the iterative build this oracle exists
+    /// to validate. The deferred GPU-resident build is where scale is addressed.
     pub fn build(pos: &[DVec3], mass: &[f64]) -> LbvhFlat {
         let n = pos.len();
         assert!(n > 0, "LbvhFlat::build requires a non-empty system");

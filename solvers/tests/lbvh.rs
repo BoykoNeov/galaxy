@@ -244,15 +244,11 @@ fn lbvh_karras_structure_is_wellformed() {
     }
 }
 
-/// The build + walk are a deterministic function of the input, including when Morton
-/// codes tie: coincident particles (identical positions) share a code, and the
-/// `(code, index)` tie-break must still yield one fixed topology ⇒ bit-identical forces
-/// run to run. A tie-break bug surfaces here as a mismatch.
-#[test]
-fn lbvh_is_deterministic_with_coincident_particles() {
+/// A base cluster plus a knot of exactly-coincident particles (degenerate Morton
+/// codes) — the tie-break / zero-size-node stress input shared by the two tests below.
+fn cluster_with_coincident_knot() -> State {
     let mut pos: Vec<DVec3> = Vec::new();
     let mut mass: Vec<f64> = Vec::new();
-    // A cluster plus a knot of exactly-coincident particles (degenerate Morton codes).
     let base = cluster(3, 60);
     pos.extend_from_slice(&base.pos);
     mass.extend_from_slice(&base.mass);
@@ -260,12 +256,39 @@ fn lbvh_is_deterministic_with_coincident_particles() {
         pos.push(DVec3::new(0.25, -0.1, 0.4));
         mass.push(0.5 + 0.05 * k as f64);
     }
-    let s = State::from_phase_space(pos, mass.iter().map(|_| DVec3::ZERO).collect(), mass);
+    let vel = vec![DVec3::ZERO; pos.len()];
+    State::from_phase_space(pos, vel, mass)
+}
 
+/// The build + walk are a deterministic function of the input, including when Morton
+/// codes tie: coincident particles (identical positions) share a code, and the
+/// `(code, index)` tie-break must still yield one fixed topology ⇒ bit-identical forces
+/// run to run. A tie-break bug surfaces here as a mismatch.
+#[test]
+fn lbvh_is_deterministic_with_coincident_particles() {
+    let s = cluster_with_coincident_knot();
     let mut solver = Lbvh::new(G, EPS, 0.5);
     let a1 = accel(&mut solver, &s);
     let a2 = accel(&mut solver, &s);
     assert_eq!(a1, a2, "LBVH forces must be bit-deterministic run to run");
+}
+
+/// Coincident particles must be handled with the *right* values, not merely
+/// deterministically: a knot of zero-separation particles builds zero-size internal
+/// nodes (`s = 0`), which the walk accepts as exact monopoles for external targets and
+/// opens (softened self-cancelling, `dx = 0`) for targets inside the knot. Both are
+/// exact, so θ→0 must still reproduce the `DirectSum` oracle to roundoff on this
+/// degenerate input — a stronger check than determinism alone.
+#[test]
+fn lbvh_coincident_particles_match_oracle_at_theta_zero() {
+    let s = cluster_with_coincident_knot();
+    let exact = accel(&mut DirectSum::new(G, EPS), &s);
+    let got = accel(&mut Lbvh::new(G, EPS, 1e-6), &s);
+    let worst = worst_rel_err(&got, &exact);
+    assert!(
+        worst < 1e-9,
+        "theta->0 with coincident particles must match the oracle: worst rel err {worst:e}"
+    );
 }
 
 /// Degenerate sizes must not panic and must be physically trivial: an empty system

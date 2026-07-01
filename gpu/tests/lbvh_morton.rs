@@ -155,14 +155,13 @@ fn gpu_lanes_large_coordinate_divergence_is_characterized() {
     }
     // Characterization: at |x|≈1e6 with span≈6, an f32 ulp (~0.12) dwarfs a cell
     // (~6/1024 world units), so `p − bmin` cancellation coarsens the quantization and
-    // lanes diverge from the f64 reference by many cells — the analogue of the
-    // direct-sum "|x|≈5000 degrades to ~5e-3" honesty. Range still holds; not pinned to
-    // ±1. (At |x|≈1e5 the gap is still only ~1 — the divergence is coordinate-driven.)
+    // lanes diverge from the f64 reference by several cells — the analogue of the
+    // direct-sum "|x|≈5000 degrades to ~5e-3" honesty (observed max gap ~6 here; at
+    // |x|≈1e5 it is still only ~1 — the divergence is coordinate-driven). We assert only
+    // the structural bound (lanes in range) and *log* the gap: pinning `max_gap > 1`
+    // would perversely fail on a more accurate device, and pinning it small is the ±1
+    // claim we already deny in this regime.
     eprintln!("large-coordinate max lane gap vs f64 reference: {max_gap}");
-    assert!(
-        max_gap > 1,
-        "expected the large-coordinate regime to exceed the ±1 bound"
-    );
 }
 
 // ---------------------------------------------------------------------------

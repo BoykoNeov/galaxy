@@ -142,7 +142,7 @@ fn gpu_lanes_agree_with_reference_within_one() {
 /// and record the observed max gap.
 #[test]
 fn gpu_lanes_large_coordinate_divergence_is_characterized() {
-    let pos = cloud(3, 8000, 3.0, DVec3::splat(1.0e5));
+    let pos = cloud(3, 8000, 3.0, DVec3::splat(1.0e6));
     let out = builder().compute(&pos);
     let refr = reference_morton(&pos);
 
@@ -153,9 +153,16 @@ fn gpu_lanes_large_coordinate_divergence_is_characterized() {
             max_gap = max_gap.max((g[a] as i64 - r[a] as i64).abs());
         }
     }
-    // Documented divergence at |x|≈1e5 with span≈3 (coord/size ≈ 3e4 ≫ the ~8e3
-    // threshold where f32 cancellation exceeds one cell). Not pinned to ±1.
+    // Characterization: at |x|≈1e6 with span≈6, an f32 ulp (~0.12) dwarfs a cell
+    // (~6/1024 world units), so `p − bmin` cancellation coarsens the quantization and
+    // lanes diverge from the f64 reference by many cells — the analogue of the
+    // direct-sum "|x|≈5000 degrades to ~5e-3" honesty. Range still holds; not pinned to
+    // ±1. (At |x|≈1e5 the gap is still only ~1 — the divergence is coordinate-driven.)
     eprintln!("large-coordinate max lane gap vs f64 reference: {max_gap}");
+    assert!(
+        max_gap > 1,
+        "expected the large-coordinate regime to exceed the ±1 bound"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -169,8 +176,8 @@ fn gpu_codes_are_interleave_of_in_range_lanes() {
     let out = builder().compute(&pos);
     assert_eq!(out.codes.len(), out.lanes.len());
     for (c, l) in out.codes.iter().zip(&out.lanes) {
-        for a in 0..3 {
-            assert!(l[a] < 1024, "lane {} out of [0,1024)", l[a]);
+        for &lane in l {
+            assert!(lane < 1024, "lane {lane} out of [0,1024)");
         }
         assert!(*c < (1u32 << 30), "code {c} exceeds 30 bits");
         assert_eq!(*c, morton3(*l), "code must be the interleave of its lanes");

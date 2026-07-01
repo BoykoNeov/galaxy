@@ -1,0 +1,16 @@
+[package]
+name = "galaxy-gpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+galaxy-core = { path = "../core" }
+galaxy-solvers = { path = "../solvers" }
+glam = { workspace = true }
+thiserror = { workspace = true }
+wgpu = "29"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+proptest = { workspace = true }

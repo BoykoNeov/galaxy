@@ -324,6 +324,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-gpu"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "galaxy-core",
+ "galaxy-solvers",
+ "glam",
+ "pollster",
+ "proptest",
+ "thiserror",
+ "wgpu",
+]
+
+[[package]]
 name = "galaxy-grade"
 version = "0.0.0"
 dependencies = [

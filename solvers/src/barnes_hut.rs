@@ -1,6 +1,31 @@
 use galaxy_core::{DVec3, ForceSolver, State};
 use rayon::prelude::*;
 
+/// How the octree is constructed. The build was the largest serial fraction once
+/// the force fill and potential were parallelized (see DESIGN M2/perf note).
+///
+/// Both modes yield a tree that produces **bit-identical** forces: topology is
+/// pure geometry (deterministic octant tests; bbox min/max is associative+exact),
+/// leaf occupancy is order-independent, and the aggregate COM/mass sums are done
+/// in the same order (bodies ascending by original index, children in octant
+/// order). `ParallelExact` therefore is not a tolerance trade — it is the serial
+/// tree, built in parallel. A tolerance-only Morton bottom-up mode is deferred
+/// pending a benchmark showing `ParallelExact` leaves speedup on the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildMode {
+    /// Sequential build. The reference/oracle; retained for single-thread runs
+    /// and as the equivalence guard for `ParallelExact`.
+    Serial,
+    /// Partition bodies into disjoint subtrees (reusing the serial octant/child
+    /// predicates), build each subtree in parallel into its own arena, then
+    /// stitch. Sidesteps concurrent insertion into a shared tree.
+    ParallelExact,
+}
+
+/// Below this particle count, `ParallelExact` falls back to the serial build:
+/// the partition/stitch/rayon overhead is not worth it for tiny trees.
+const PARALLEL_BUILD_MIN: usize = 512;
+
 /// Barnes-Hut octree solver (monopole-only). An O(N log N) approximation to
 /// direct summation, controlled by the opening angle `theta`: a node is used as
 /// a single softened point mass when `node_size / distance < theta`, else its
@@ -14,6 +39,8 @@ pub struct BarnesHut {
     pub softening: f64,
     /// Opening angle θ. Smaller = more accurate, more work.
     pub theta: f64,
+    /// Tree construction strategy. Defaults to `Serial` via `new`.
+    pub build_mode: BuildMode,
 }
 
 impl BarnesHut {
@@ -22,7 +49,14 @@ impl BarnesHut {
             g,
             softening,
             theta,
+            build_mode: BuildMode::Serial,
         }
+    }
+
+    /// Select the tree construction strategy (builder-style; `BarnesHut` is `Copy`).
+    pub fn with_build_mode(mut self, mode: BuildMode) -> Self {
+        self.build_mode = mode;
+        self
     }
 }
 
@@ -90,7 +124,21 @@ struct Octree {
 }
 
 impl Octree {
-    fn build(pos: &[DVec3], mass: &[f64]) -> Octree {
+    fn build(pos: &[DVec3], mass: &[f64], mode: BuildMode) -> Octree {
+        match mode {
+            BuildMode::Serial => Octree::build_serial(pos, mass),
+            BuildMode::ParallelExact => Octree::build_parallel_exact(pos, mass),
+        }
+    }
+
+    /// Parallel build that reproduces the serial tree bit-for-bit (topology,
+    /// leaf body ordering, and aggregate summation order all preserved). See
+    /// [`BuildMode::ParallelExact`].
+    fn build_parallel_exact(_pos: &[DVec3], _mass: &[f64]) -> Octree {
+        todo!("partition-then-build parallel octree (bit-exact to serial)")
+    }
+
+    fn build_serial(pos: &[DVec3], mass: &[f64]) -> Octree {
         let mut lo = pos[0];
         let mut hi = pos[0];
         for &p in pos {
@@ -242,7 +290,8 @@ impl BarnesHut {
         if n == 0 {
             return;
         }
-        let tree = Octree::build(&state.pos, &state.mass);
+        // Oracle path: always the serial build, regardless of `self.build_mode`.
+        let tree = Octree::build(&state.pos, &state.mass, BuildMode::Serial);
         let q = Query {
             pos: &state.pos,
             mass: &state.mass,
@@ -262,11 +311,13 @@ impl ForceSolver for BarnesHut {
         if n == 0 {
             return;
         }
-        // Build the tree once (serial), then only read it. `accel_node` is `&self`
-        // and each target writes exactly its own `acc[i]`, so the fill is a pure
-        // map over independent targets — parallelizing it is data-race-free and
-        // bit-exact to the serial reference (no per-target sum is reassociated).
-        let tree = Octree::build(&state.pos, &state.mass);
+        // Build the tree once, then only read it. `accel_node` is `&self` and each
+        // target writes exactly its own `acc[i]`, so the fill is a pure map over
+        // independent targets — parallelizing it is data-race-free and bit-exact to
+        // the serial reference (no per-target sum is reassociated). The build itself
+        // may also be parallelized (`build_mode`), and any `BuildMode` yields a
+        // bit-identical tree, so the whole `accelerations` path stays bit-exact.
+        let tree = Octree::build(&state.pos, &state.mass, self.build_mode);
         let q = Query {
             pos: &state.pos,
             mass: &state.mass,
@@ -292,5 +343,118 @@ impl BarnesHut {
     /// module), so the two solvers' potentials stay identical by construction.
     pub fn potential_energy_serial(&self, state: &State) -> f64 {
         crate::potential::potential_energy_serial(state, self.g, self.softening)
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    //! `ParallelExact` must build the *same* tree as the serial reference — not
+    //! "close enough", but topology + per-node `(mass, com, delta)` bit-for-bit.
+    //! Force-equivalence is tested at the integration level (`barnes_hut_parallel`);
+    //! these unit tests can see the private `Octree` and pin the internals directly,
+    //! so a stitching off-by-one (children offset remap across concatenated arenas)
+    //! can't hide behind forces that happen to come out equal.
+    //!
+    //! The comparison is a lockstep traversal from the root in octant order — NOT
+    //! an arena-index compare — because a parallel build legitimately assigns node
+    //! indices in a different order; only the reachable structure must match.
+
+    use super::*;
+
+    /// Deterministic point cloud (LCG, no rand dep). `clustered` concentrates most
+    /// bodies into a tight blob with a sparse halo, so the build's load balance /
+    /// adaptive frontier is exercised against the non-uniform density that real
+    /// galaxy-collision ICs produce.
+    fn cloud(seed: u64, n: usize, clustered: bool) -> (Vec<DVec3>, Vec<f64>) {
+        let mut s = seed | 1;
+        let mut next = move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 11) as f64) / ((1u64 << 53) as f64) // [0, 1)
+        };
+        let mut pos = Vec::with_capacity(n);
+        let mut mass = Vec::with_capacity(n);
+        for i in 0..n {
+            let p = if clustered && i % 8 != 0 {
+                // Tight core near the origin.
+                DVec3::new(next() - 0.5, next() - 0.5, next() - 0.5) * 0.05
+            } else {
+                // Uniform spread (or the sparse halo of the clustered case).
+                DVec3::new(next() - 0.5, next() - 0.5, next() - 0.5) * 3.0
+            };
+            pos.push(p);
+            mass.push(0.1 + 0.9 * next());
+        }
+        (pos, mass)
+    }
+
+    /// Assert two trees have bit-identical structure by walking both from `node`
+    /// in octant order. Compares leaf/internal status, leaf body lists, and the
+    /// aggregated `(mass, com, delta)` to the last bit — the exact quantities the
+    /// force traversal reads.
+    fn assert_same_node(a: &Octree, an: usize, b: &Octree, bn: usize, path: &str) {
+        let na = &a.nodes[an];
+        let nb = &b.nodes[bn];
+        assert_eq!(na.leaf, nb.leaf, "leaf flag differs at {path}");
+        assert_eq!(na.bodies, nb.bodies, "leaf bodies differ at {path}");
+        assert_eq!(
+            na.mass.to_bits(),
+            nb.mass.to_bits(),
+            "mass not bit-exact at {path}"
+        );
+        assert_eq!(
+            na.com.to_array().map(f64::to_bits),
+            nb.com.to_array().map(f64::to_bits),
+            "com not bit-exact at {path}"
+        );
+        assert_eq!(
+            na.delta.to_bits(),
+            nb.delta.to_bits(),
+            "delta not bit-exact at {path}"
+        );
+        assert_eq!(
+            na.half.to_bits(),
+            nb.half.to_bits(),
+            "half not bit-exact at {path}"
+        );
+        assert_eq!(
+            na.center.to_array().map(f64::to_bits),
+            nb.center.to_array().map(f64::to_bits),
+            "center not bit-exact at {path}"
+        );
+        for oct in 0..8 {
+            let ca = na.children[oct];
+            let cb = nb.children[oct];
+            assert_eq!(
+                ca == SENTINEL,
+                cb == SENTINEL,
+                "child presence differs at {path}, octant {oct}"
+            );
+            if ca != SENTINEL {
+                assert_same_node(a, ca as usize, b, cb as usize, &format!("{path}/{oct}"));
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_exact_build_is_bit_identical_to_serial() {
+        // Sizes straddle PARALLEL_BUILD_MIN so both the small-N fallback and the
+        // genuinely-partitioned path are covered.
+        for &n in &[600usize, 1024, 4096] {
+            for seed in 0..8u64 {
+                for &clustered in &[false, true] {
+                    let (pos, mass) = cloud(seed, n, clustered);
+                    let ser = Octree::build(&pos, &mass, BuildMode::Serial);
+                    let par = Octree::build(&pos, &mass, BuildMode::ParallelExact);
+                    assert_eq!(
+                        ser.nodes.len(),
+                        par.nodes.len(),
+                        "node count differs (n={n}, seed={seed}, clustered={clustered})"
+                    );
+                    assert_same_node(&ser, 0, &par, 0, "root");
+                }
+            }
+        }
     }
 }

@@ -227,6 +227,35 @@ fn galaxies_placed_at_their_com_orbital_states() {
 }
 
 #[test]
+fn two_galaxies_are_drawn_independently() {
+    // Same model and counts for both galaxies, so a gross seeding regression
+    // (e.g. seeding galaxy 2 with the raw `seed` instead of a well-separated
+    // stream) would make halo1==halo2 and disk1==disk2. Each of the two matching
+    // populations must differ. (This guards the coarse case; it cannot see the
+    // finer `mix(mix(seed))` sub-stream correlation, which is washed out by the
+    // halo/disk samplers consuming their streams differently.)
+    let disk = ExponentialDisk::new(0.1, 0.5, 0.05, 2.0, Plummer::new(1.0, 1.0, 1.0));
+    let c = DiskCollision::new(disk, disk, 1.0, 1.5, 8.0);
+    let s = c.sample(1500, 1500, 1500, 1500, 99);
+
+    // Compare each population's COM-subtracted (internal) positions, so the mere
+    // orbital offset between the two galaxies doesn't trivially "distinguish" them.
+    let internal = |prog: Progenitor| -> Vec<DVec3> {
+        let idx = indices(&s, prog);
+        let (com, _) = mean_state(&s, &idx);
+        idx.iter().map(|&i| s.pos[i] - com).collect()
+    };
+    assert!(
+        internal(Progenitor(0)) != internal(Progenitor(2)),
+        "both halos share one realization (seed collision)"
+    );
+    assert!(
+        internal(Progenitor(1)) != internal(Progenitor(3)),
+        "both disks share one realization (seed collision)"
+    );
+}
+
+#[test]
 fn sample_is_deterministic_in_seed() {
     let c = fiducial();
     let a = c.sample(1000, 1000, 800, 800, 7);

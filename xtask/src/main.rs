@@ -12,26 +12,45 @@ use std::process::Command;
 
 use galaxy_core::{LeapfrogKdk, StaticBackground};
 use galaxy_grade::{grade_file, GradeConfig, ToneMap};
-use galaxy_ic::{Collision, Plummer};
+use galaxy_ic::{DiskCollision, ExponentialDisk, Plummer};
 use galaxy_render::{write_exr, Camera, RenderConfig, Renderer};
 use galaxy_renderprep::{prepare, PrepConfig};
 use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_xtask::framing_radius;
 use glam::Vec3;
 
-// --- Scenario: a parabolic (Toomre) encounter of two Plummer galaxies ---------
+// --- Scenario: a parabolic (Toomre) coplanar-PROGRADE encounter of two rotating
+//     exponential-disk galaxies — the IC that makes thin curved tidal tails (a
+//     cold disk resonantly amplified in a prograde passage), which the earlier
+//     two-Plummer movie physically could not. Each galaxy is a cold, low-mass disk
+//     in a live Plummer halo that carries most of the mass and stabilizes it. Both
+//     disks default to prograde (spin +Z, co-rotating with the x–y orbit).
 const G: f64 = 1.0;
-const M1: f64 = 1.0;
-const A1: f64 = 1.0;
-const M2: f64 = 0.6;
-const A2: f64 = 0.8;
+// Galaxy 1 (primary): halo + disk.
+const HALO_M1: f64 = 1.0;
+const HALO_A1: f64 = 1.0;
+const DISK_M1: f64 = 0.15;
+const DISK_RD1: f64 = 0.5;
+// Galaxy 2 (secondary): a lighter disk galaxy.
+const HALO_M2: f64 = 0.7;
+const HALO_A2: f64 = 0.9;
+const DISK_M2: f64 = 0.1;
+const DISK_RD2: f64 = 0.45;
+// Shared disk geometry (thin; truncated a few scale lengths out).
+const DISK_HZ_FRAC: f64 = 0.1; // scale height = 0.1·Rd (thin disk)
+const DISK_RMAX_FRAC: f64 = 4.0; // truncate at 4·Rd
 const ECC: f64 = 1.0; // parabolic — the classic tidal-tail case
 const PERI: f64 = 1.5;
 const SEP: f64 = 8.0;
 const EPS: f64 = 0.05;
 const THETA: f64 = 0.5;
-const N1: usize = 4000;
-const N2: usize = 2500;
+// Halos need enough particles for a smooth stabilizing potential; disks get many
+// for tail detail (disk flux is set by disk MASS, not count, so extra disk
+// particles buy resolution at no brightness cost).
+const NH1: usize = 5000;
+const ND1: usize = 5000;
+const NH2: usize = 3500;
+const ND2: usize = 3500;
 const SEED: u64 = 0x00C0_FFEE;
 
 // --- Time stepping ------------------------------------------------------------
@@ -44,13 +63,20 @@ const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const FALLOFF: f32 = 6.0;
 const SPLAT_SIZE: f32 = 0.12; // world units
-const PEAK_BRIGHTNESS: f32 = 0.3; // per-particle peak, so dense cores overlap to white
+const PEAK_BRIGHTNESS: f32 = 0.3; // per-DISK-particle peak, so dense cores saturate
 const EXPOSURE: f32 = 1.0;
 const FRAME_PERCENTILE: f32 = 0.98; // crop the top 2% escapers when framing
 const FPS: u32 = 30;
-// Progenitor palette: galaxy 0 warm, galaxy 1 cool — the iconic two-tone tails.
-const WARM: [f32; 3] = [1.0, 0.5, 0.25];
-const COOL: [f32; 3] = [0.35, 0.6, 1.0];
+// Four-species palette: the two DISKS carry full-magnitude two-tone hues (warm /
+// cool) — they are the bright tails — while the two halos are dim tints, a soft
+// background glow. Brightness scales with mass, and halo particles are ~10× more
+// massive than disk particles, so the halo hues are pushed well below the disks'
+// to keep the tails dominant. Order matches the progenitor tags: halo1=0, disk1=1,
+// halo2=2, disk2=3.
+const HALO1_COLOR: [f32; 3] = [0.05, 0.035, 0.025];
+const DISK1_COLOR: [f32; 3] = [1.0, 0.5, 0.25]; // warm
+const HALO2_COLOR: [f32; 3] = [0.025, 0.035, 0.05];
+const DISK2_COLOR: [f32; 3] = [0.35, 0.6, 1.0]; // cool
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out: PathBuf = std::env::args()
@@ -65,19 +91,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("output → {}", out.display());
 
-    // 1. Initial conditions.
-    let collision = Collision::new(
-        Plummer::new(G, M1, A1),
-        Plummer::new(G, M2, A2),
-        ECC,
-        PERI,
-        SEP,
+    // 1. Initial conditions: two rotating disk galaxies on a prograde encounter.
+    let galaxy1 = ExponentialDisk::new(
+        DISK_M1,
+        DISK_RD1,
+        DISK_HZ_FRAC * DISK_RD1,
+        DISK_RMAX_FRAC * DISK_RD1,
+        Plummer::new(G, HALO_M1, HALO_A1),
     );
-    let ic = collision.sample(N1, N2, SEED);
-    let mean_mass = ic.mass.iter().sum::<f64>() / ic.len() as f64;
+    let galaxy2 = ExponentialDisk::new(
+        DISK_M2,
+        DISK_RD2,
+        DISK_HZ_FRAC * DISK_RD2,
+        DISK_RMAX_FRAC * DISK_RD2,
+        Plummer::new(G, HALO_M2, HALO_A2),
+    );
+    // Default orientation is prograde/prograde (coplanar) — the cleanest-tail
+    // passage. Set `collision.orient1/orient2` for retrograde or inclined disks.
+    let collision = DiskCollision::new(galaxy1, galaxy2, ECC, PERI, SEP);
+    let ic = collision.sample(NH1, ND1, NH2, ND2, SEED);
+    // Brightness is tied to the DISK particle mass so a lone disk particle peaks
+    // near PEAK_BRIGHTNESS and dense disk cores additively saturate to white; the
+    // dim halo hues then keep the more-massive halo particles a faint background.
+    let disk_particle_mass = DISK_M1 / ND1 as f64;
     println!(
-        "IC: {} particles ({N1}+{N2}), mean mass {mean_mass:.3e}",
-        ic.len()
+        "IC: {} particles (halo {}+{}, disk {}+{}), disk particle mass {disk_particle_mass:.3e}",
+        ic.len(),
+        NH1,
+        NH2,
+        ND1,
+        ND2,
     );
 
     // 2. Simulate → snapshots.
@@ -104,8 +147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Renderprep: snapshot → frame-data. Scale brightness so a lone particle
     //    peaks near PEAK_BRIGHTNESS and dense cores additively saturate to white.
     let prep = PrepConfig {
-        palette: vec![WARM, COOL],
-        brightness_per_mass: PEAK_BRIGHTNESS / mean_mass as f32,
+        palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
+        brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
         size: SPLAT_SIZE,
     };
     let mut snaps: Vec<PathBuf> = std::fs::read_dir(&snap_dir)?

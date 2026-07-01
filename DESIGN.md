@@ -570,22 +570,64 @@ late-time positions — N-body is chaotic).
       atomic-flag build (with device fences) is the named scale refinement.
     - **Scope: raw pointer tree, flatten deferred.** It does **not** emit the DFS
       skip-pointer `LbvhFlat` form; deriving `center`/`half`/`delta` + the `next` skip
-      pointer (a subtree-size prefix-sum / Euler-tour) is the next stage, so the deferred
-      `GpuLbvh` traverses the same form the CPU `LbvhFlat::accel` walk uses.
+      pointer (a subtree-size prefix-sum / Euler-tour) is the **M4f** stage below, so the
+      deferred `GpuLbvh` traverses the same form the CPU `LbvhFlat::accel` walk uses.
     - **Gates:** topology bit-exact vs `reference_karras` (Morton clouds, all-equal codes,
       heavy duplicates, monotone chain, large N 2¹⁶) + structural (2N−1 nodes, parent
       back-pointers, one parent per non-root node, `NO_PARENT` root); AABB min/max bit-exact
       + com/mass f32-tolerance vs `reference_aggregate` (incl. a monotone-chain deep-cascade
       case + coincident leaves), child AABB ⊆ parent, root bounds all; same-device
       bit-determinism (topology **and** aggregation); N=0/1/2 edges. GPU-gated, fail-loud.
-  - **Remaining M4+:** the **rest of the GPU port of the M4b LBVH build** (each stage gated
-    vs the CPU reference; Morton+bbox M4c, sort M4d, Karras tree-build + aggregation M4e
-    above): the **DFS skip-pointer flatten** of the M4e pointer tree (deriving
-    `center`/`half`/`delta` + `next`) → a `GpuLbvh` f32 binary-BVH **traversal** kernel that
-    walks that form (its θ→0 physics gate is where the end-to-end f32 topology straddle is
-    finally checked); then, separately and larger, keeping particle *state* GPU-resident
-    across steps, which changes the `accelerations(&State)→acc` interface) / PM / TreePM /
-    gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline).
+  - **GPU DFS skip-pointer flatten (landed, M4f) — fourth stage of the GPU-resident
+    build:** `galaxy_gpu::GpuLbvhFlattener` linearizes the M4e Karras pointer tree into the
+    DFS pre-order skip-pointer `LbvhFlat` form on the GPU (wgpu compute), gated against the
+    CPU reference `galaxy_solvers::reference_flatten` (extracted as the single source of
+    truth, completing the `reference_morton`/`reference_sort`/`reference_karras`/
+    `reference_aggregate`/`reference_flatten` set; `LbvhFlat::build` now drives that staged
+    chain, so the CPU path is a stage-for-stage mirror of the GPU pipeline). This is the form
+    the deferred `GpuLbvh` traversal walks with a single index — the exact shape the CPU
+    `LbvhFlat::accel` walk uses.
+    - **Two kernels, split like M4e's build/aggregate.** `flatten_structure` is a **single
+      invocation**: the flatten is inherently serial (a DFS emission order) and WGSL 1.0 has
+      no device-scope fence for a parallel Euler-tour, so — exactly as the M4e aggregation
+      collapsed to one invocation — it runs the DESIGN's **subtree-size prefix** in two serial
+      passes with *no recursion and no fixed-size stack*: (A) a bottom-up visit-flag climb
+      (the M4e aggregate shape) computes `size[u]`; (B) a top-down pre-order walk assigns each
+      node its DFS slot `d` (the emit counter) and writes `next = d + size[u]`, using an
+      explicit stack **in a storage buffer** of capacity `2N−1` (a workgroup-local array
+      overflows on the depth-`N−1` monotone chain — the guarded trap). `leaf_bodies[body_start]
+      = order[u]` maps each sorted leaf back to its **original** particle index (the space the
+      traversal excludes the self term in). `flatten_geometry` is genuinely parallel (one
+      invocation per DFS slot): it derives `center`/`half`/`com`/`mass`/`delta` from the M4e
+      aggregate at the slot's unified index — race-free, no atomics.
+    - **Structure integer ⇒ bit-exact; geometry f32 ⇒ tolerance.** The DFS layout (`next` /
+      `body_start` / `body_count` / `leaf_bodies`) is a pure-integer function of the fixed
+      topology → **bit-exact** vs `reference_flatten` (the load-bearing gate — a dropped/
+      double-counted subtree or a skip-pointer off-by-one shows up here). Geometry is f32:
+      `center`/`half` = `(min±max)/2` (min/max exact under widening, the halving sum rounds),
+      `com`/`mass` are f32-lossy folds, `delta = |com − center|` an f32-lossy sqrt → tolerance
+      vs the f64 reference over the same narrowed leaves.
+    - **Gates:** structure bit-exact vs `reference_flatten` (seeded clouds, monotone chain,
+      all-equal codes, coincident, large N) + geometry f32-tolerance; topology-free invariants
+      (a full-open skip-pointer walk — the θ→0 traversal's structural core — visits each body
+      exactly once; skip pointers strictly increase; `N`/`N−1` leaf/internal counts; root spans
+      the tree); same-device bit-determinism; N=0/1/2 edges. GPU-gated, fail-loud. Note WGSL
+      reserves `meta`, so the slot-metadata buffer is `slot_meta`.
+    - **Scope: re-uploads the pointer tree; traversal deferred.** `GpuLbvhFlattener` composes
+      `GpuLbvhBuilder` and re-uploads the M4e tree to its own device (the M4d/M4e readback
+      pattern). The **parallel Euler-tour flatten** and a **GPU-resident fuse** (no readback
+      between build/aggregate/flatten) are the named scale refinements. It wires into no solver
+      yet (there is still no `GpuLbvh`).
+  - **Remaining M4+:** the **last stage of the GPU port of the M4b LBVH build** is a `GpuLbvh`
+    f32 binary-BVH **traversal** kernel (M4g) that walks the M4f flat form — the direct
+    analogue of how `GpuTree` traverses the CPU-built octree, but over the per-axis
+    `half_extents` binary node (not `GpuTree`'s scalar-`half` cube) — its **θ→0 physics gate**
+    is where the end-to-end f32 topology straddle is finally checked (θ→0 opens every node to
+    its leaves, so the walk *is* direct summation regardless of the possibly-divergent f32
+    topology, yet still catches any dropped/double-counted subtree or bad skip pointer). Then,
+    separately and larger, keeping particle *state* GPU-resident across steps (which changes
+    the `accelerations(&State)→acc` interface) / PM / TreePM / gas (SPH) / cosmology (Friedmann
+    Background + periodic solver + IC pipeline).
 
 ## Validation strategy
 

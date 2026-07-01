@@ -172,7 +172,7 @@ struct ChildRef {
     idx: usize,
 }
 
-/// One Karras internal node: its two children, resolved during `karras_internal`.
+/// One Karras internal node: its two children, resolved by [`karras_node`].
 #[derive(Clone, Copy)]
 struct Internal {
     left: ChildRef,
@@ -186,9 +186,10 @@ struct Internal {
 /// range's own prefix) partitions it into two children. Duplicate codes are handled by
 /// δ's position extension, so every node splits deterministically.
 ///
-/// Shared by [`karras_internal`] (the CPU flatten path) and [`reference_karras`] (the
-/// GPU tree-build oracle) so both agree on the tie-break **bit-for-bit** — a second
-/// Karras that disagreed would be silent topology drift. The GPU port replicates this
+/// The single Karras node builder, shared by [`reference_karras`] (which assembles all
+/// `N-1` nodes into the unified-index [`KarrasTree`]) so the CPU build and the GPU
+/// tree-build oracle agree on the tie-break **bit-for-bit** — a second Karras that
+/// disagreed would be silent topology drift. The GPU port replicates this
 /// exact search; note the indices are **signed** (`delta` returns −1 for out-of-range
 /// probes) — a `u32` port breaks at the range boundaries.
 fn karras_node(codes: &[u32], ii: usize) -> Internal {
@@ -236,14 +237,6 @@ fn karras_node(codes: &[u32], ii: usize) -> Internal {
         idx: (gamma + 1) as usize,
     };
     Internal { left, right }
-}
-
-/// Build all `N-1` Karras internal nodes over the sorted `codes` (each via
-/// [`karras_node`]).
-fn karras_internal(codes: &[u32]) -> Vec<Internal> {
-    (0..(codes.len() - 1))
-        .map(|ii| karras_node(codes, ii))
-        .collect::<Vec<_>>()
 }
 
 /// Sentinel parent index for the root of a [`KarrasTree`] (it has no parent). Also the
@@ -433,13 +426,17 @@ pub struct LbvhFlat {
 }
 
 impl LbvhFlat {
-    /// Build the LBVH (Morton codes → sort by `(code, index)` → Karras binary radix
-    /// tree → bottom-up aggregate) and linearize it to DFS pre-order with skip
-    /// pointers. `pos` must be non-empty (the caller handles N=0 before building).
+    /// Build the LBVH and linearize it to DFS pre-order with skip pointers, driving the
+    /// **staged reference chain** that mirrors the GPU-resident pipeline stage-for-stage:
+    /// [`reference_morton`] → [`reference_sort`] → gather → [`reference_karras`] →
+    /// [`reference_aggregate`] → [`reference_flatten`]. `pos` must be non-empty (the caller
+    /// handles N=0 before building).
     ///
-    /// The flatten is recursive, so this is **reference-scale** (the tree depth bounds
-    /// the stack); a full 10⁵–10⁶ snapshot wants the iterative build this oracle exists
-    /// to validate. The deferred GPU-resident build is where scale is addressed.
+    /// Routing the build through the same oracles each GPU stage is gated against (rather
+    /// than a fused recursive build) is what makes the CPU path a *stage-for-stage* mirror
+    /// of the GPU: the flatten in particular is now [`reference_flatten`], the M4f oracle.
+    /// The flatten is still recursive, so this is **reference-scale** (tree depth bounds
+    /// the stack); the deferred GPU-resident build is where scale is addressed.
     pub fn build(pos: &[DVec3], mass: &[f64]) -> LbvhFlat {
         let n = pos.len();
         assert!(n > 0, "LbvhFlat::build requires a non-empty system");
@@ -450,35 +447,19 @@ impl LbvhFlat {
         // exact pipeline the GPU Morton+bbox build stage is gated against.
         let codes = reference_morton(pos).codes;
 
-        // Deterministic sort by (code, original index) — the GPU-sort oracle.
+        // Deterministic sort by (code, original index) — the GPU-sort oracle. Gather the
+        // codes and leaf payload into that sorted order (the pre-gather the GPU build/
+        // aggregate/flatten stages all consume; leaf `k` → `sorted_pos[k]`).
         let order = reference_sort(&codes);
         let sorted_codes: Vec<u32> = order.iter().map(|&i| codes[i as usize]).collect();
+        let sorted_pos: Vec<DVec3> = order.iter().map(|&i| pos[i as usize]).collect();
+        let sorted_mass: Vec<f64> = order.iter().map(|&i| mass[i as usize]).collect();
 
-        // Karras internal nodes over the sorted order (none for a single leaf).
-        let internal = if n > 1 {
-            karras_internal(&sorted_codes)
-        } else {
-            Vec::new()
-        };
-
-        // Flatten to DFS pre-order with skip pointers, aggregating bottom-up. The root
-        // is internal node 0 (or the single leaf when n == 1).
-        let mut nodes: Vec<LbvhNode> = Vec::with_capacity(2 * n - 1);
-        let mut leaf_bodies: Vec<u32> = Vec::with_capacity(n);
-        let root = ChildRef {
-            leaf: n == 1,
-            idx: 0,
-        };
-        flatten(
-            root,
-            &internal,
-            &order,
-            pos,
-            mass,
-            &mut nodes,
-            &mut leaf_bodies,
-        );
-        LbvhFlat { nodes, leaf_bodies }
+        // Karras topology (unified-index pointer tree) → bottom-up aggregate → flatten to
+        // DFS pre-order with skip pointers. Each is the CPU oracle for its GPU stage.
+        let tree = reference_karras(&sorted_codes);
+        let agg = reference_aggregate(&tree, &sorted_pos, &sorted_mass);
+        reference_flatten(&tree, &agg, &order)
     }
 
     /// f64 reference traversal: acceleration on `target` from a stackless walk of the
@@ -543,44 +524,67 @@ impl LbvhFlat {
     }
 }
 
-/// Recursively emit `child`'s subtree into DFS pre-order, filling each node's `next`
-/// skip pointer once its subtree is laid down and returning the subtree's aggregate.
-/// Children are emitted left-then-right, so a node's first child is `self+1` and its
-/// right child is `nodes[self+1].next` — the strict-binary layout the walk relies on.
-fn flatten(
-    child: ChildRef,
-    internal: &[Internal],
+/// Flatten a [`KarrasTree`] + its [`KarrasAgg`] into the DFS pre-order skip-pointer
+/// [`LbvhFlat`] form — the CPU f64 **oracle for the deferred GPU DFS-flatten stage**
+/// (DESIGN M4f), completing the `reference_morton`/`reference_sort`/`reference_karras`/
+/// `reference_aggregate` set. It consumes the *aggregated pointer tree* rather than
+/// re-deriving geometry, so the CPU build ([`LbvhFlat::build`]) is now a stage-for-stage
+/// mirror of the GPU pipeline (build → aggregate → flatten).
+///
+/// `order` maps a sorted leaf back to its **original** particle index: leaf at unified
+/// index `k` (`k < N`) emits `leaf_bodies[…] = order[k]`, so the flat form's leaves carry
+/// original indices (the traversal excludes the self term by original index). `order` must
+/// have length `N` (the same permutation [`reference_sort`] produced).
+///
+/// The layout is the strict-binary DFS pre-order the stackless walk relies on: children
+/// emitted left-then-right, so a node's first child is `self+1`, its `next` skip pointer is
+/// one past its whole subtree, and `next > self` always. Geometry (`center`/`half_extents`/
+/// `delta`) is derived from the node's aggregate AABB/com exactly as [`LbvhFlat::accel`]
+/// consumes it; a GPU port derives the same in f32 (min/max exact, `delta = |com − center|`
+/// an f32-lossy sqrt → tolerance).
+pub fn reference_flatten(tree: &KarrasTree, agg: &KarrasAgg, order: &[u32]) -> LbvhFlat {
+    let n = tree.n;
+    assert_eq!(order.len(), n, "order length must equal N");
+    let mut nodes: Vec<LbvhNode> = Vec::with_capacity(2 * n - 1);
+    let mut leaf_bodies: Vec<u32> = Vec::with_capacity(n);
+    // Root is internal 0 (unified index N) for N > 1, else the single leaf 0.
+    let root = if n == 1 { 0 } else { n as u32 };
+    flatten_unified(root, tree, agg, order, &mut nodes, &mut leaf_bodies);
+    LbvhFlat { nodes, leaf_bodies }
+}
+
+/// Recursively emit the subtree rooted at unified index `u` into DFS pre-order, patching
+/// each node's `next` skip pointer once its subtree is laid down. Reads geometry from the
+/// precomputed `agg` (no re-folding), so the emitted values are bit-identical to the
+/// aggregate the GPU stage produced. Children are emitted left-then-right.
+fn flatten_unified(
+    u: u32,
+    tree: &KarrasTree,
+    agg: &KarrasAgg,
     order: &[u32],
-    pos: &[DVec3],
-    mass: &[f64],
     nodes: &mut Vec<LbvhNode>,
     leaf_bodies: &mut Vec<u32>,
-) -> Agg {
+) {
+    let ui = u as usize;
     let me = nodes.len();
-    if child.leaf {
-        let orig = order[child.idx];
-        let (p, m) = (pos[orig as usize], mass[orig as usize]);
+    if ui < tree.n {
+        // Leaf: its aggregate is just its own position/mass (min == max == com == pos).
         let body_start = leaf_bodies.len() as u32;
-        leaf_bodies.push(orig);
+        leaf_bodies.push(order[ui]);
         nodes.push(LbvhNode {
-            center: p,
+            center: agg.com[ui],
             half_extents: DVec3::ZERO,
-            com: p,
-            mass: m,
+            com: agg.com[ui],
+            mass: agg.mass[ui],
             delta: 0.0,
             next: me as u32 + 1,
             body_start,
             body_count: 1,
         });
-        return Agg {
-            mass: m,
-            com: p,
-            min: p,
-            max: p,
-        };
+        return;
     }
 
-    // Internal: reserve this node's slot, emit both children, then aggregate.
+    // Internal: reserve this node's slot, emit both children, then fill from `agg[u]`.
     nodes.push(LbvhNode {
         center: DVec3::ZERO,
         half_extents: DVec3::ZERO,
@@ -591,31 +595,29 @@ fn flatten(
         body_start: 0,
         body_count: 0,
     });
-    let node = internal[child.idx];
-    let la = flatten(node.left, internal, order, pos, mass, nodes, leaf_bodies);
-    let ra = flatten(node.right, internal, order, pos, mass, nodes, leaf_bodies);
+    let i = ui - tree.n;
+    flatten_unified(tree.left[i], tree, agg, order, nodes, leaf_bodies);
+    flatten_unified(tree.right[i], tree, agg, order, nodes, leaf_bodies);
 
-    // Fold children in fixed (left, right) order — deterministic sums.
-    let agg = fold_agg(la, ra);
-    let center = (agg.min + agg.max) * 0.5;
+    let (mn, mx) = (agg.aabb_min[ui], agg.aabb_max[ui]);
+    let center = (mn + mx) * 0.5;
     nodes[me] = LbvhNode {
         center,
-        half_extents: (agg.max - agg.min) * 0.5,
-        com: agg.com,
-        mass: agg.mass,
-        delta: (agg.com - center).length(),
+        half_extents: (mx - mn) * 0.5,
+        com: agg.com[ui],
+        mass: agg.mass[ui],
+        delta: (agg.com[ui] - center).length(),
         next: nodes.len() as u32,
         body_start: 0,
         body_count: 0,
     };
-    agg
 }
 
 /// Fold two child aggregates into their parent in fixed `(left, right)` order — the
 /// deterministic combine at the heart of the bottom-up aggregation (mass sum,
 /// mass-weighted centre of mass with a geometric-midpoint fallback when both children
-/// are massless, and the AABB union). Shared by [`flatten`] (the CPU build) and
-/// [`reference_aggregate`] (the GPU-aggregation oracle) so the fold is identical
+/// are massless, and the AABB union). Used by [`reference_aggregate`] (the CPU build's
+/// aggregate stage and the GPU-aggregation oracle) so the fold is identical
 /// bit-for-bit. This is the CPU analogue of the Karras atomic-**flag** combine: a fixed
 /// child order, **not** a float `atomicAdd`, so the result is order-independent.
 fn fold_agg(la: Agg, ra: Agg) -> Agg {

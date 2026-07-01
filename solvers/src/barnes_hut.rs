@@ -574,4 +574,40 @@ mod build_tests {
             }
         }
     }
+
+    /// Wall-clock build cost: serial vs `ParallelExact`, on both a uniform and a
+    /// clustered cloud. Ignored (timing, machine-dependent) — run with
+    /// `cargo test -p galaxy-solvers --release -- --ignored --nocapture bench_build`.
+    ///
+    /// This is the gate for the deferred tolerance/Morton mode: if `ParallelExact`
+    /// already saturates the available speedup here, a second (lossy) build
+    /// algorithm isn't worth the codepath. Best-of-k to damp scheduler noise.
+    #[test]
+    #[ignore = "timing benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_build() {
+        use std::time::Instant;
+        let best = |pos: &[DVec3], mass: &[f64], mode: BuildMode| {
+            let mut b = f64::INFINITY;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let tree = Octree::build(pos, mass, mode);
+                let dt = t.elapsed().as_secs_f64();
+                std::hint::black_box(tree.nodes.len());
+                b = b.min(dt);
+            }
+            b * 1e3 // ms
+        };
+        for &n in &[100_000usize, 500_000, 1_000_000] {
+            for &clustered in &[false, true] {
+                let (pos, mass) = cloud(0xB0A7, n, clustered);
+                let s = best(&pos, &mass, BuildMode::Serial);
+                let p = best(&pos, &mass, BuildMode::ParallelExact);
+                let tag = if clustered { "clustered" } else { "uniform  " };
+                println!(
+                    "N={n:>8} {tag}  serial {s:8.2} ms   parallel {p:8.2} ms   speedup {:5.2}x",
+                    s / p
+                );
+            }
+        }
+    }
 }

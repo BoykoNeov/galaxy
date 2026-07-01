@@ -146,8 +146,28 @@ late-time positions — N-body is chaotic).
     so tolerance-tested, not bit-exact). DirectSum's *force* path stays serial by
     choice (small-N oracle; its Newton's-third-law pairing would need a 2×-flops
     row-form to parallelize). Both solvers share one softened-potential kernel.
-    Remaining serial section (next Amdahl ceiling, out of scope here): `Octree::build`
-    — concurrent tree insertion is the hard part and the place to look next for perf.
+  - **parallel `Octree::build` (landed):** the build was the next Amdahl ceiling
+    once the fill was parallel. `BuildMode::ParallelExact` (toggle on `BarnesHut`;
+    `new` defaults to `Serial`) reproduces the serial tree **bit-for-bit** — it is
+    NOT a tolerance trade. `build_cell` recurses the same `octant`/`child_center`
+    split the serial insert uses, keeps bodies ascending per bucket, and folds the
+    aggregate bottom-up in octant order, so topology and every per-node
+    `(mass, com, delta)` match to the bit and the whole `accelerations` path stays
+    bit-exact. Each cell builds into its own arena (no shared-tree mutation → the
+    "concurrent insertion" hazard is sidestepped, not solved) and is spliced with a
+    child-pointer offset remap; the root bbox is a parallel min/max reduction
+    (associative + exact). Large cells fan their 8 children across rayon; dense
+    regions subdivide more, so task count adapts to density. Guarded by a unit test
+    (structural octant-order tree compare, arena-order-independent) + integration
+    force-equivalence & determinism tests, all on uniform *and* clustered clouds.
+    Measured build speedup (release, best-of-5): uniform 1.85×/2.84×/3.57× at
+    100k/500k/1M; clustered 1.17×/1.92×/1.95×. Sub-linear — the serial arena-splice
+    copy at each level (moving descendant nodes into the parent arena, ~O(N log N)
+    serial) is the remaining bottleneck. A tolerance-only **Morton bottom-up** build
+    (linear arena, no splice copy, reassociated COM sums) is **deferred** as a third
+    `BuildMode`, gated on this benchmark: the ~2× clustered result shows real
+    headroom below core count, so it stays a live option rather than closed. See
+    `barnes_hut::build_tests::bench_build` (ignored) to re-measure.
 - **M3** — renderprep + wgpu render + grade → first tidal-tail movie
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 

@@ -128,13 +128,26 @@ fn warm_disk_holds_equilibrium_over_an_orbit() {
         max_zrat = max_zrat.max(rmsz / rmsz0);
     }
 
+    println!(
+        "warm equilibrium: max|dE/E|={max_e:.4} max|dLz/Lz|={max_lz:.4} \
+         max r_half dev={max_rdev:.4} max RMS-z ratio={max_zrat:.4}"
+    );
+    // Measured (seed 0x5EED): dE/E≈2e-4, dLz/Lz≈1e-3 (both excellent), r_half
+    // dev≈0.22, RMS-z ratio≈2.0. The bounds are deliberately looser than the cold
+    // gate's (0.20 / 3.0) because a WARM disk legitimately breathes more: σ_R puts
+    // particles on epicyclic orbits (radial breathing → larger r_half swing), and
+    // the sech² layer is a geometric profile, not a vertical equilibrium in the
+    // combined disk+halo potential, so it puffs toward its true scale height (the
+    // same mechanism the cold gate already tolerates; σ_z here is the disk's
+    // self-gravity value, a documented under-support — see `disk.rs`). The gate is
+    // "holds together" (no collapse, no fly-apart), not "static".
     assert!(max_e < 0.02, "energy not conserved: {max_e:e}");
     assert!(max_lz < 0.02, "L_z not conserved: {max_lz:e}");
     assert!(
-        max_rdev < 0.25,
+        max_rdev < 0.30,
         "warm disk half-mass radius drifted grossly: {max_rdev}"
     );
-    assert!(max_zrat < 3.5, "warm disk puffed up: {max_zrat}");
+    assert!(max_zrat < 3.0, "warm disk puffed up: {max_zrat}");
 }
 
 #[test]

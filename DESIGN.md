@@ -285,11 +285,13 @@ late-time positions — N-body is chaotic).
     genuine Toomre & Toomre structure the isotropic-Plummer movie could not make. The
     prograde disk resonance is the mechanism; a four-species palette (bright disks / dim
     halos, brightness tied to the disk particle mass) keeps the tails dominant.
-    - **Confirmed cold-disk caveat (since addressed by the warm disk):** late in the
-      passage the fully-cold (Q→0, v_z=0) tails diffuse and clump — the predicted
-      behavior, **not** a wiring bug. The knob is a small in-plane velocity dispersion,
-      landed as the **warm-disk** milestone below. Do not chase this as an IC-assembly
-      bug.
+    - **Confirmed cold-disk caveat (warm disk is the knob):** late in the passage a
+      fully-cold (Q→0, v_z=0) disk diffuses and clumps — the predicted behavior, **not**
+      a wiring bug. The physical knob is a small in-plane velocity dispersion, landed as
+      the **warm-disk** milestone below. (How strongly the cold run visibly clumps is
+      scenario-dependent: for the submaximal, halo-dominated fiducial the halo largely
+      stabilizes even the cold disk, so the effect is mild there — see the movie note.)
+      Do not chase this as an IC-assembly bug.
   - **Warm disk (landed):** opt-in velocity dispersion on `ExponentialDisk` via
     `with_toomre_q(q)` — the milestone that lets the disk survive the several orbits of a
     collision without the cold disk's local fragmentation, while keeping the thin
@@ -323,9 +325,16 @@ late-time positions — N-body is chaotic).
       differential that isolates the drift) removing *only* the drift from a Q=3
       realization makes the over-supported disk expand 3.0% in mean radius over two
       orbits vs 0.19% for the drifted disk (a 16× gap; the drift is load-bearing).
-    - **Movie (verified):** `galaxy-xtask` now warms both disks (Q≈1.5). The two-tone
-      thin tails + bridge survive, and the late-passage disks stay smooth (two distinct
-      cores + diffuse debris) rather than fragmenting into the cold run's clumps.
+    - **Movie (verified):** `galaxy-xtask` now warms both disks (Q≈1.5); the two-tone
+      thin tails + bridge survive intact. A same-seed cold (`Q=None`) baseline was
+      rendered for comparison: the warm run's cores stay marginally more distinct and
+      its tails/debris are modestly smoother, while the cold run merges to a rounder
+      blob with grainier debris — but at this submaximal, halo-dominated, 1500-step
+      scenario the difference is **subtle**, not the dramatic discrete-clumping the
+      fully-cold *isolated*-disk caveat anticipated (the halo already stabilizes the
+      cold disk here; a maximal or longer-integrated disk would separate more). The
+      rigorous, non-visual evidence that the warmth is load-bearing is the exact
+      kinematic gates + the dynamical drift differential (16× expansion), not the movie.
 - **M4+** — GPU force kernel / PM / TreePM / gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline)
 
 ## Validation strategy

@@ -215,6 +215,11 @@ impl ExponentialDisk {
     /// d lnΣ/d lnR = −R/Rd (the truncation is a sampling cutoff, not a local density
     /// feature); only d lnκ/d lnR uses a central difference of the closed-form κ(R),
     /// confining the numerical derivative to this small drift correction.
+    ///
+    /// Near `r_max` the `+h` finite-difference point can cross the truncation, where
+    /// `surface_density` drops the disk term from κ — a small kink in the drift there.
+    /// Disk particles are sparse at `r_max` and v̄_φ is clamped ≥ 0, so the resulting
+    /// drift near the edge is approximate; it does not affect the disk body.
     fn dlog_nu_sigma_r2(&self, r: f64) -> f64 {
         let dlog_sigma = -r / self.scale_length;
         let h = 1e-5_f64;

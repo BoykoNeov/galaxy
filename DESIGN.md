@@ -169,18 +169,29 @@ late-time positions — N-body is chaotic).
     `BuildMode`, gated on this benchmark: the ~2× clustered result shows real
     headroom below core count, so it stays a live option rather than closed. See
     `barnes_hut::build_tests::bench_build` (ignored) to re-measure.
-- **M3** ✅ — renderprep + wgpu render + grade → first tidal-tail movie. The full
-  offline pipeline is landed end to end: `galaxy-xtask` builds a parabolic
-  two-Plummer (Toomre) encounter, steps it with BarnesHut+leapfrog to snapshots,
-  then renderprep→render→grade every frame and (optionally) ffmpeg→movie. Verified
-  on a 6500-particle run — 61 frames showing a clear two-tone (progenitor-colored)
-  interacting pair with a bridge of stripped material and tidal scatter. The camera
-  is **stable across the run**: centered on the origin (zero-COM barycenter) and
-  sized to a robust percentile radius (`framing_radius`), because the naive union
-  AABB framed the few escaping particles and shrank the galaxies to dots. Per-frame
-  EXR is retained so the sequence regrades (exposure/tonemap) without re-simulating.
-  Deferred (not on the first-movie path): bloom, kNN density/velocity-dispersion
-  coloring, Blender consumer, multi-camera/orbit views, a `scenario.toml` front-end.
+- **M3** ✅ — renderprep + wgpu render + grade → first **collision** movie (the full
+  offline visualization pipeline). `galaxy-xtask` builds a parabolic two-Plummer
+  encounter, steps it with BarnesHut+leapfrog to snapshots, then
+  renderprep→render→grade every frame and (optionally) ffmpeg→movie. Verified on a
+  6500-particle run — 61 frames showing a clear two-tone (progenitor-colored)
+  interacting pair with a **bridge of stripped material and diffuse tidal debris**.
+  The camera is **stable across the run**: centered on the origin (zero-COM
+  barycenter) and sized to a robust percentile radius (`framing_radius`), because the
+  naive union AABB framed the few escaping particles and shrank the galaxies to dots.
+  Per-frame EXR is retained so the sequence regrades (exposure/tonemap) without
+  re-simulating.
+  - **Accuracy of the "tidal-tail" goal:** classic thin Toomre tails come from
+    *rotating, dynamically cold disks* (coherent disk angular momentum, resonantly
+    amplified in a prograde passage). The current IC samples two **isotropic,
+    non-rotating** Plummer spheres (`ic/plummer.rs`: position *and* velocity drawn in
+    random directions, net momentum subtracted), so an encounter physically yields
+    stripping / bridges / plumes — **not** thin curved streams. This is an IC
+    property, not a render limitation: the tail *visual* is unlocked by the deferred
+    rotating-disk IC (`ic/` `[next: … exp disk, bulge]`), not by more rendering work.
+    (Note for that tuning pass: the p98 `framing_radius` crop trims the outermost
+    stripped material — loosen it when the goal is maximal tidal extent.)
+  - Deferred (not on the first-movie path): bloom, kNN density/velocity-dispersion
+    coloring, Blender consumer, multi-camera/orbit views, a `scenario.toml` front-end.
   - **headless-wgpu feasibility spike (landed):** before building M3 around wgpu,
     a throwaway probe (`render/src/bin/spike.rs`) confirmed the risky part works on
     this box: a **headless** adapter (no surface) comes up (RTX 5090 / Vulkan), the

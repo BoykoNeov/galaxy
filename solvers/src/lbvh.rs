@@ -49,17 +49,83 @@ fn morton3(x: u32, y: u32, z: u32) -> u32 {
     expand10(x) | (expand10(y) << 1) | (expand10(z) << 2)
 }
 
-/// Quantize a position into its 3D Morton code. `bmin` is the cube's low corner and
-/// `scale = cells / size` maps a coordinate into `[0, cells)`; each lane is floored
-/// and clamped to `[0, cells-1]` (the `(1+1e-9)` bbox pad keeps interior points off
-/// the upper edge, but degenerate/2D inputs can still land there — clamp guards it).
-fn morton_code(p: DVec3, bmin: DVec3, scale: f64) -> u32 {
+/// Quantize a position into its three 10-bit Morton lanes. `bmin` is the cube's low
+/// corner and `scale = cells / size` maps a coordinate into `[0, cells)`; each lane is
+/// floored and clamped to `[0, cells-1]` (the `(1+1e-9)` bbox pad keeps interior points
+/// off the upper edge, but degenerate/2D inputs can still land there — clamp guards it).
+fn morton_lanes(p: DVec3, bmin: DVec3, scale: f64) -> [u32; 3] {
     let cells = 1u32 << MORTON_BITS;
     let q = |v: f64| -> u32 { (v.floor().max(0.0) as u32).min(cells - 1) };
-    let x = q((p.x - bmin.x) * scale);
-    let y = q((p.y - bmin.y) * scale);
-    let z = q((p.z - bmin.z) * scale);
-    morton3(x, y, z)
+    [
+        q((p.x - bmin.x) * scale),
+        q((p.y - bmin.y) * scale),
+        q((p.z - bmin.z) * scale),
+    ]
+}
+
+/// The root bounding-cube convention shared by the CPU build and the GPU-build gate:
+/// a cube (`bmin` low corner, `size` edge) with `scale = cells / size` mapping a
+/// coordinate into `[0, cells)`. The single source of truth for the pad/floor constants
+/// so the GPU port (which reconstructs these in f32) has one thing to match.
+#[derive(Clone, Copy, Debug)]
+pub struct MortonBounds {
+    /// Low corner of the bounding cube.
+    pub bmin: DVec3,
+    /// Cube edge length (`2·half`).
+    pub size: f64,
+    /// Quantization scale `cells / size` (`cells = 1024`).
+    pub scale: f64,
+}
+
+/// Reference (f64) Morton quantization: the exact prologue of [`LbvhFlat::build`],
+/// exposed so the deferred GPU-resident build stage can be gated against it. Holds the
+/// bounding cube, the per-particle quantized lanes `[x, y, z]` (each in `[0, 1024)`),
+/// and the interleaved 30-bit codes. The GPU stage runs this same pipeline in f32; the
+/// gate compares **lanes** (±1 tolerance), since a 1-bit lane change jumps the code by a
+/// large power of two.
+#[derive(Clone, Debug)]
+pub struct MortonReference {
+    /// The bounding cube + quantization scale.
+    pub bounds: MortonBounds,
+    /// Per-particle quantized lanes `[x, y, z]`, each in `[0, 1024)`.
+    pub lanes: Vec<[u32; 3]>,
+    /// Per-particle interleaved 30-bit Morton codes (`morton3` of the lanes).
+    pub codes: Vec<u32>,
+}
+
+/// Compute the reference bounding cube and Morton codes for `pos` (f64). This is the
+/// exact bbox + quantization prologue [`LbvhFlat::build`] uses — extracted so it is the
+/// single source of truth for the pad/floor/scale convention and can serve as the oracle
+/// for the GPU Morton+bbox build stage. `pos` must be non-empty.
+///
+/// Convention (must be preserved by any GPU port): cube center `0.5·(lo+hi)`, half
+/// `(0.5·(hi−lo).max_element()).max(1e-12)·(1+1e-9)`, `bmin = center − half`,
+/// `size = 2·half`, `scale = 1024 / size`, lane `= floor((p−bmin)·scale)` clamped to
+/// `[0, 1023]`.
+pub fn reference_morton(pos: &[DVec3]) -> MortonReference {
+    assert!(
+        !pos.is_empty(),
+        "reference_morton requires a non-empty system"
+    );
+    let mut lo = pos[0];
+    let mut hi = pos[0];
+    for &p in pos {
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let center = (lo + hi) * 0.5;
+    let half = (0.5 * (hi - lo).max_element()).max(1e-12) * (1.0 + 1e-9);
+    let bmin = center - DVec3::splat(half);
+    let size = 2.0 * half;
+    let scale = (1u32 << MORTON_BITS) as f64 / size;
+
+    let lanes: Vec<[u32; 3]> = pos.iter().map(|&p| morton_lanes(p, bmin, scale)).collect();
+    let codes: Vec<u32> = lanes.iter().map(|l| morton3(l[0], l[1], l[2])).collect();
+    MortonReference {
+        bounds: MortonBounds { bmin, size, scale },
+        lanes,
+        codes,
+    }
 }
 
 /// Augmented-key common-prefix length δ(a, b) over the **sorted** array (Karras 2012).
@@ -211,22 +277,13 @@ impl LbvhFlat {
         let n = pos.len();
         assert!(n > 0, "LbvhFlat::build requires a non-empty system");
 
-        // Root bounding cube — same convention as `barnes_hut::Octree::build_serial`
-        // (pad + floor) so quantization never lands an interior point on the top edge.
-        let mut lo = pos[0];
-        let mut hi = pos[0];
-        for &p in pos {
-            lo = lo.min(p);
-            hi = hi.max(p);
-        }
-        let center = (lo + hi) * 0.5;
-        let half = (0.5 * (hi - lo).max_element()).max(1e-12) * (1.0 + 1e-9);
-        let bmin = center - DVec3::splat(half);
-        let size = 2.0 * half;
-        let scale = (1u32 << MORTON_BITS) as f64 / size;
+        // Root bounding cube + Morton codes — the single-source-of-truth reference
+        // prologue (same convention as `barnes_hut::Octree::build_serial`: pad + floor,
+        // so quantization never lands an interior point on the top edge). This is the
+        // exact pipeline the GPU Morton+bbox build stage is gated against.
+        let codes = reference_morton(pos).codes;
 
-        // Morton codes, then a deterministic sort by (code, original index).
-        let codes: Vec<u32> = pos.iter().map(|&p| morton_code(p, bmin, scale)).collect();
+        // Deterministic sort by (code, original index).
         let mut order: Vec<u32> = (0..n as u32).collect();
         order.sort_by_key(|&i| (codes[i as usize], i));
         let sorted_codes: Vec<u32> = order.iter().map(|&i| codes[i as usize]).collect();

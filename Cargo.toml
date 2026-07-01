@@ -10,4 +10,5 @@ edition = "2021"
 [workspace.dependencies]
 glam = "0.30"
 proptest = "1"
+rayon = "1"
 thiserror = "2"

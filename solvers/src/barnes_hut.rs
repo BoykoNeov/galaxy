@@ -228,9 +228,14 @@ struct Query<'a> {
     eps2: f64,
 }
 
-impl ForceSolver for BarnesHut {
+impl BarnesHut {
+    /// Serial reference fill: the sequential, single-threaded force evaluation.
+    /// The parallel trait `accelerations` must reproduce this **bit-for-bit** —
+    /// each target's traversal is independent, so parallelizing over targets only
+    /// reorders *which* `acc[i]` is written when, never the ops inside one `acc[i]`.
+    /// Retained as the equivalence-guard oracle (and for single-thread debugging).
     #[allow(clippy::needless_range_loop)]
-    fn accelerations(&mut self, state: &State, acc: &mut [DVec3]) {
+    pub fn accelerations_serial(&self, state: &State, acc: &mut [DVec3]) {
         let n = state.len();
         assert_eq!(acc.len(), n, "acc length must match particle count");
         if n == 0 {
@@ -246,6 +251,14 @@ impl ForceSolver for BarnesHut {
         for i in 0..n {
             acc[i] = tree.accel_node(0, i, &q) * self.g;
         }
+    }
+}
+
+impl ForceSolver for BarnesHut {
+    fn accelerations(&mut self, _state: &State, _acc: &mut [DVec3]) {
+        // GREEN step: rayon `par_iter_mut` over targets, bit-exact to
+        // `accelerations_serial`. See solvers/tests/barnes_hut_parallel.rs.
+        todo!("parallel Barnes-Hut force fill via rayon")
     }
 
     #[allow(clippy::needless_range_loop)]

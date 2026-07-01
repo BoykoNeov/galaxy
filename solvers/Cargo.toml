@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 galaxy-core = { path = "../core" }
 glam = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

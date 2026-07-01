@@ -406,6 +406,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "galaxy-xtask"
+version = "0.0.0"
+dependencies = [
+ "galaxy-core",
+ "galaxy-grade",
+ "galaxy-ic",
+ "galaxy-io",
+ "galaxy-render",
+ "galaxy-renderprep",
+ "galaxy-sim",
+ "galaxy-solvers",
+ "glam",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

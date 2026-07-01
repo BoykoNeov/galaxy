@@ -469,13 +469,48 @@ late-time positions — N-body is chaotic).
       `0..N`, strict binary child layout + AABB containment, all checked from the flat
       skip-pointer form); coincident-particle determinism; empty/single; and the Morton
       primitives (bit-spread, interleave, axis monotonicity). Always-on (no GPU adapter).
-  - **Remaining M4+:** the **GPU port of the M4b LBVH build** (each stage gated vs the CPU
-    reference: Morton+bbox kernel → **GPU sort** [the load-bearing risk — deterministic
-    `u32` radix, same-device gate] → Karras tree-build kernel + atomic-flag bottom-up
-    aggregation → a `GpuLbvh` f32 binary-BVH traversal kernel; then, separately and larger,
-    keeping particle *state* GPU-resident across steps, which changes the
-    `accelerations(&State)→acc` interface) / PM / TreePM / gas (SPH) / cosmology (Friedmann
-    Background + periodic solver + IC pipeline).
+  - **GPU Morton + bounding-box kernel (landed, M4c) — first stage of the GPU-resident
+    build:** `galaxy_gpu::GpuMortonBuilder` ports the *prologue* of `LbvhFlat::build`
+    (bounding box → 30-bit Morton codes) to a two-pass wgpu **compute** stage (f32), gated
+    directly against the CPU reference `galaxy_solvers::reference_morton` (extracted as the
+    single source of truth for the pad/floor/scale convention). It is the smallest, lowest-
+    risk slice — the analogue of how M4b was sliced off M4a — and wires into no solver yet
+    (there is no `GpuLbvh`).
+    - **Two passes, f32.** Pass 1 (`reduce`) folds the bbox in a **single workgroup**
+      (grid-stride → shared-memory tree reduction): min/max never round and are order-
+      independent, so the result is **bit-exact and deterministic with no float atomics**
+      (which WGSL lacks — this is *why* the single-workgroup shape is chosen over a
+      cross-workgroup atomic-min/max, whose monotone-bitcast trick is a rabbit hole for a
+      reference stage). Pass 2 (`quantize`) reconstructs the **exact** CPU bbox convention
+      in f32 (`center`, `half = max(0.5·ext, 1e-12)·(1+1e-9)`, `scale = 1024/size`) and
+      floors+clamps each axis to `[0, 1023]`, then interleaves. The `(1+1e-9)` pad folds to
+      `1.0` in f32; harmless — the `min(1023)` clamp catches the top-edge particle instead
+      of the pad's nudge (a ≤1-lane effect the tolerance gate absorbs).
+    - **No bit-equality vs f64; gate on lanes + determinism.** The GPU has no portable f64
+      compute (same constraint as `GpuDirectSum`/`GpuTree`), so codes run in f32 and cannot
+      bit-match the f64 reference near cell boundaries. Because a 1-bit lane change jumps the
+      code by a large power of two, the tolerance is expressed in **lane** space: `|gpu_lane
+      − ref_lane| ≤ 1` per axis in the well-conditioned near-origin regime (>95% exact). A
+      large-coordinate case is **characterized, not pinned** — at `|x|≈1e6` the f32 `p−bmin`
+      cancellation coarsens quantization to a max lane gap of ~6 vs the reference (the
+      analogue of the direct-sum "|x|≈5000 → 5e-3" honesty).
+    - **Scope honesty (stated plainly).** This proves **quantization + the reduction
+      pattern**. It deliberately does **not** prove the tree matches the reference: f32
+      boundary straddles mean the eventual GPU tree *topology* can differ from the CPU tree
+      — the expected analogue of the `GpuTree` θ-straddle, **not** a bug. The real
+      correctness check is the later θ→0 physics gate on the deferred `GpuLbvh`.
+    - **Gates:** bbox reduction bit-exact vs a CPU reduction over the **same f32-narrowed**
+      positions (isolates the reduction from precision; incl. the `1e-12` collinear floor);
+      per-lane ±1 reference agreement near the origin; large-coordinate divergence
+      characterized; codes are valid 30-bit interleaves of in-range lanes; same-device
+      bit-determinism; single/coincident/empty edge cases. GPU-gated, fail-loud.
+  - **Remaining M4+:** the **rest of the GPU port of the M4b LBVH build** (each stage gated
+    vs the CPU reference; Morton+bbox landed as M4c above): **GPU sort** [the load-bearing
+    risk — deterministic `u32` radix on `(code, index)`, same-device gate] → Karras
+    tree-build kernel + atomic-flag bottom-up aggregation → a `GpuLbvh` f32 binary-BVH
+    traversal kernel; then, separately and larger, keeping particle *state* GPU-resident
+    across steps, which changes the `accelerations(&State)→acc` interface) / PM / TreePM /
+    gas (SPH) / cosmology (Friedmann Background + periodic solver + IC pipeline).
 
 ## Validation strategy
 

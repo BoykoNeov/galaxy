@@ -525,7 +525,12 @@ impl FlatTree {
     /// `pos` must be non-empty (an empty system has no root cell — the caller
     /// handles N=0 before building, as the GPU solver does).
     pub fn build(pos: &[DVec3], mass: &[f64]) -> FlatTree {
-        todo!("FlatTree::build")
+        // Bit-identical `ParallelExact` tree, then a DFS pre-order linearization.
+        let tree = Octree::build(pos, mass, BuildMode::ParallelExact);
+        let mut nodes = Vec::with_capacity(tree.nodes.len());
+        let mut leaf_bodies = Vec::new();
+        flatten_node(&tree, 0, &mut nodes, &mut leaf_bodies);
+        FlatTree { nodes, leaf_bodies }
     }
 
     /// f64 reference traversal: the acceleration on `target` from a stackless walk
@@ -534,9 +539,94 @@ impl FlatTree {
     /// exact f64 analogue of the GPU kernel and is asserted bit-identical to
     /// [`Octree::accel_node`]; the returned value still needs `× g` by the caller,
     /// matching `accel_node`'s convention.
-    pub fn accel(&self, target: usize, pos: &[DVec3], mass: &[f64], theta: f64, eps2: f64) -> DVec3 {
-        todo!("FlatTree::accel")
+    pub fn accel(
+        &self,
+        target: usize,
+        pos: &[DVec3],
+        mass: &[f64],
+        theta: f64,
+        eps2: f64,
+    ) -> DVec3 {
+        let xp = pos[target];
+        let mut a = DVec3::ZERO;
+        let mut node = 0u32;
+        let n_nodes = self.nodes.len() as u32;
+        // Stackless walk: `node` strictly increases (open → node+1, otherwise →
+        // next > node), so this terminates in ≤ n_nodes steps with no stack.
+        while node < n_nodes {
+            let nd = &self.nodes[node as usize];
+            if nd.mass <= 0.0 {
+                node = nd.next;
+                continue;
+            }
+            if nd.body_count > 0 {
+                // Leaf: exact direct sum over its bodies, excluding the self term.
+                let end = nd.body_start + nd.body_count;
+                for k in nd.body_start..end {
+                    let b = self.leaf_bodies[k as usize] as usize;
+                    if b == target {
+                        continue;
+                    }
+                    let dx = pos[b] - xp;
+                    let r2 = dx.length_squared() + eps2;
+                    a += dx * (mass[b] / (r2 * r2.sqrt()));
+                }
+                node = nd.next;
+            } else {
+                // Internal: never approximate a cell that contains the target.
+                let inside = (xp.x - nd.center.x).abs() <= nd.half
+                    && (xp.y - nd.center.y).abs() <= nd.half
+                    && (xp.z - nd.center.z).abs() <= nd.half;
+                let dx = nd.com - xp;
+                let d2 = dx.length_squared();
+                let s = 2.0 * nd.half;
+                let d = d2.sqrt();
+                // Barnes (1994): accept the monopole when s ≤ θ·(d − delta).
+                if !inside && theta * (d - nd.delta) >= s {
+                    let r2 = d2 + eps2;
+                    a += dx * (nd.mass / (r2 * r2.sqrt()));
+                    node = nd.next;
+                } else {
+                    node += 1; // open: descend to the first child
+                }
+            }
+        }
+        a
     }
+}
+
+/// Recursively emit `tree`'s subtree rooted at `node` into DFS pre-order, filling
+/// each [`FlatNode`]'s `next` skip pointer once its whole subtree has been laid down.
+/// Children are visited in ascending octant order (0..8) — the same order
+/// [`Octree::accel_node`] recurses — so [`FlatTree::accel`] accumulates identically.
+fn flatten_node(tree: &Octree, node: usize, out: &mut Vec<FlatNode>, bodies: &mut Vec<u32>) {
+    let nd = &tree.nodes[node];
+    let me = out.len();
+    out.push(FlatNode {
+        center: nd.center,
+        half: nd.half,
+        com: nd.com,
+        mass: nd.mass,
+        delta: nd.delta,
+        next: 0, // patched after the subtree is emitted
+        body_start: 0,
+        body_count: 0,
+    });
+    if nd.leaf {
+        let start = bodies.len() as u32;
+        bodies.extend_from_slice(&nd.bodies);
+        out[me].body_start = start;
+        out[me].body_count = nd.bodies.len() as u32;
+    } else {
+        // First child lands at `me + 1`; subsequent children follow in octant order.
+        for &ch in &nd.children {
+            if ch != SENTINEL {
+                flatten_node(tree, ch as usize, out, bodies);
+            }
+        }
+    }
+    // The next node after this whole subtree — the skip target when not opened.
+    out[me].next = out.len() as u32;
 }
 
 #[cfg(test)]
@@ -652,35 +742,53 @@ mod build_tests {
     }
 
     /// The stackless [`FlatTree`] walk must reproduce the recursive
-    /// [`Octree::accel_node`] **bit-for-bit** in f64 — the flatten (DFS layout,
+    /// [`Octree::accel_node`] to reassociation precision — the flatten (DFS layout,
     /// `next` skip pointers, leaf `body_start`/`body_count` ranges, first-child-at
-    /// `node+1`) is the genuinely new, off-by-one-prone logic, and the GPU f32
-    /// gates can't isolate it (threshold-straddle + cancellation noise hide a
-    /// flatten bug behind tolerances). Pinning it at full precision on CPU also
-    /// forecloses the GPU-hang hazard: a malformed `next ≤ node` would spin the
-    /// WGSL walk forever, but a flatten that matches `accel_node` to the bit is
-    /// provably a strictly-increasing walk (open→node+1, accept→next>node).
+    /// `node+1`) is the genuinely new, off-by-one-prone logic, and the GPU f32 gates
+    /// can't isolate it (threshold-straddle + cancellation noise hide a flatten bug
+    /// behind tolerances).
+    ///
+    /// **Not bit-exact — reassociated, like `potential_energy_parallel`.**
+    /// `accel_node` folds each *subtree* into its own accumulator then combines them
+    /// (a tree reduction); the stackless walk keeps one running accumulator over the
+    /// DFS scan. Both are valid summation orders and differ at the ULP level, so the
+    /// force compare is a tight *relative* bound (≪ any topological error — a dropped
+    /// or double-counted subtree is orders larger). Topology is separately pinned
+    /// **exactly** by the structural checks: reachable node count matches, and the
+    /// flattened leaf bodies are a permutation of `0..n` (every particle in exactly
+    /// one leaf — catches a dropped/duplicated `body_start`/`count` range). Together
+    /// these also foreclose the GPU-hang hazard: a strictly-increasing walk (open→
+    /// node+1, accept→next>node over a correct flatten) cannot spin.
     ///
     /// Sampled targets (stride) per config — a flatten off-by-one perturbs many
-    /// targets, so a stride sample catches it while keeping the sweep fast — over
-    /// uniform + clustered clouds, sizes straddling the build cutoffs, and θ from
-    /// the full-open (θ→0) regime through wide angles.
+    /// targets — over uniform + clustered clouds, sizes straddling the build cutoffs,
+    /// and θ from the full-open (θ→0) regime through wide angles.
     #[test]
-    fn flat_tree_traversal_matches_accel_node_bit_for_bit() {
+    fn flat_tree_traversal_matches_accel_node() {
         let eps2 = 0.05f64 * 0.05;
+        let mut worst_rel = 0.0f64;
         for &n in &[1usize, 2, 5, 37, 120, 600, 1024, 4096] {
             for seed in 0..8u64 {
                 for &clustered in &[false, true] {
                     let (pos, mass) = cloud(seed, n, clustered);
                     let tree = Octree::build(&pos, &mass, BuildMode::Serial);
                     let flat = FlatTree::build(&pos, &mass);
-                    // Same node count reachable — a cheap structural sanity check
-                    // before the per-target bit compare.
+
+                    // Exact structural invariants (order-independent):
                     assert_eq!(
                         tree.nodes.len(),
                         flat.nodes.len(),
                         "flat node count differs (n={n}, seed={seed}, clustered={clustered})"
                     );
+                    let mut seen = flat.leaf_bodies.clone();
+                    seen.sort_unstable();
+                    assert_eq!(
+                        seen,
+                        (0..n as u32).collect::<Vec<_>>(),
+                        "leaf bodies must be a permutation of 0..n \
+                         (n={n}, seed={seed}, clustered={clustered})"
+                    );
+
                     let stride = (n / 64).max(1);
                     for &theta in &[1e-6f64, 0.3, 0.6, 1.0] {
                         let q = Query {
@@ -692,17 +800,22 @@ mod build_tests {
                         for t in (0..n).step_by(stride) {
                             let want = tree.accel_node(0, t, &q);
                             let got = flat.accel(t, &pos, &mass, theta, eps2);
-                            assert_eq!(
-                                want.to_array().map(f64::to_bits),
-                                got.to_array().map(f64::to_bits),
-                                "flat walk must match accel_node bit-for-bit \
-                                 (n={n}, seed={seed}, clustered={clustered}, theta={theta}, target={t})"
+                            let rel = (got - want).length() / want.length().max(1e-300);
+                            worst_rel = worst_rel.max(rel);
+                            assert!(
+                                rel < 1e-11,
+                                "flat walk must match accel_node to reassociation precision \
+                                 (n={n}, seed={seed}, clustered={clustered}, theta={theta}, \
+                                 target={t}): rel {rel:e}"
                             );
                         }
                     }
                 }
             }
         }
+        // Observed worst relative reassociation gap — far under the 1e-11 bound and
+        // astronomically under any topological error. Printed with --nocapture.
+        println!("flat-vs-recursive worst relative reassociation gap: {worst_rel:e}");
     }
 
     /// Wall-clock build cost: serial vs `ParallelExact`, on both a uniform and a

@@ -24,9 +24,13 @@
 //! (FMA/rounding differ), so the determinism gate is same-device.
 //!
 //! ## Scope
-//! O(N²) → realistically a few × 10⁶ particles, **not** 10⁷–10⁸. The 10⁸ door is a
-//! GPU *tree* / TreePM / PM solver; this validates the GPU-compute infrastructure and
-//! is an exact fast solver in the 10⁵–10⁶ band.
+//! [`GpuDirectSum`] is O(N²) → realistically a few × 10⁶ particles, **not** 10⁷–10⁸.
+//!
+//! [`GpuTree`] is the Barnes-Hut O(N log N) step past that: the octree is built and
+//! linearized on the CPU (reusing [`galaxy_solvers::FlatTree`]) and **traversed** on
+//! the GPU by a stackless skip-pointer gather kernel — same f32/determinism story,
+//! now with the tree approximation controlled by θ. It opens the 10⁷ band O(N²) cannot;
+//! a GPU-resident build (Morton/LBVH) and TreePM/PM remain the deferred 10⁸ door.
 
 pub mod gpu_direct_sum;
 pub mod gpu_tree;

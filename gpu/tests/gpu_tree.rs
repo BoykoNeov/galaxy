@@ -100,7 +100,10 @@ fn gpu_tree_theta_to_zero_matches_oracle() {
         // Full-open = direct sum in f32: √128·ε ≈ 1.4e-6 baseline × close-pair
         // conditioning ⇒ ≪ 3e-4 (same bound as the GpuDirectSum unit-box gate).
         assert!(rms < 3e-4, "theta->0 RMS rel err {rms:e} (seed {seed})");
-        assert!(worst < 5e-2, "theta->0 worst rel err {worst:e} (seed {seed})");
+        assert!(
+            worst < 5e-2,
+            "theta->0 worst rel err {worst:e} (seed {seed})"
+        );
     }
 }
 
@@ -164,7 +167,10 @@ fn gpu_tree_is_bit_deterministic_same_device() {
     let s = cluster(7, N);
     let a1 = accel(&mut solver, &s);
     let a2 = accel(&mut solver, &s);
-    assert_eq!(a1, a2, "same-device GPU tree dispatch must be bit-deterministic");
+    assert_eq!(
+        a1, a2,
+        "same-device GPU tree dispatch must be bit-deterministic"
+    );
 }
 
 /// At θ→0 the tree is exact direct summation, so Σ mᵢ aᵢ = 0 to the f32 floor (the

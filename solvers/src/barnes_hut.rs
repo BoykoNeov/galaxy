@@ -468,6 +468,77 @@ impl BarnesHut {
     }
 }
 
+/// One node of a [`FlatTree`] — the Barnes-Hut octree linearized into a flat
+/// array for **stackless** traversal (the GPU-friendly form; a GPU has no
+/// recursion stack). Same geometry the recursive [`Octree`] node carries, plus a
+/// `next` skip pointer and a leaf body range.
+#[derive(Clone, Copy, Debug)]
+pub struct FlatNode {
+    /// Cell geometric center.
+    pub center: DVec3,
+    /// Cell half-side.
+    pub half: f64,
+    /// Aggregate center of mass.
+    pub com: DVec3,
+    /// Aggregate mass.
+    pub mass: f64,
+    /// |com − center| (the Barnes 1994 opening-criterion correction).
+    pub delta: f64,
+    /// **Skip pointer**: the index one past this node's entire subtree in DFS
+    /// pre-order. Traversal that does NOT open this node jumps here; opening a
+    /// node instead advances to `self_index + 1` (its first child, which — by the
+    /// DFS layout — immediately follows it). Because `next > self_index` always
+    /// and opening strictly increments, the flat walk's node index strictly
+    /// increases every step, so it always terminates (no stack, no cycle).
+    pub next: u32,
+    /// For a leaf: start offset into [`FlatTree::leaf_bodies`]. Unused (0) for
+    /// internal nodes.
+    pub body_start: u32,
+    /// For a leaf: number of bodies. **`body_count > 0` iff the node is a leaf** —
+    /// every leaf holds ≥1 body and no internal node holds bodies directly, so this
+    /// is the leaf test (no separate flag needed).
+    pub body_count: u32,
+}
+
+/// The Barnes-Hut octree flattened into a DFS pre-order array with skip pointers —
+/// a **stackless** representation a GPU kernel can walk with a single index and no
+/// recursion. Precision-agnostic (f64 geometry); a GPU consumer narrows to f32.
+///
+/// The traversal contract mirrors the recursive [`Octree::accel_node`] exactly:
+/// children are laid out in ascending octant order (0..8), so the flat walk
+/// accumulates contributions in the *same* order the recursion does — hence
+/// [`FlatTree::accel`] reproduces `accel_node` **bit-for-bit** in f64 (guarded by a
+/// unit test). The GPU kernel is the f32 mirror of that same walk.
+pub struct FlatTree {
+    /// DFS pre-order nodes; the root is index 0.
+    pub nodes: Vec<FlatNode>,
+    /// Concatenated leaf body indices (original particle indices), sliced per leaf
+    /// by `body_start` / `body_count`.
+    pub leaf_bodies: Vec<u32>,
+}
+
+impl FlatTree {
+    /// Build the octree (bit-identical `ParallelExact` tree) and linearize it into
+    /// DFS pre-order with skip pointers. Children are emitted in ascending octant
+    /// order so the flat accumulation order matches [`Octree::accel_node`].
+    ///
+    /// `pos` must be non-empty (an empty system has no root cell — the caller
+    /// handles N=0 before building, as the GPU solver does).
+    pub fn build(pos: &[DVec3], mass: &[f64]) -> FlatTree {
+        todo!("FlatTree::build")
+    }
+
+    /// f64 reference traversal: the acceleration on `target` from a stackless walk
+    /// of the flat tree, using the Barnes (1994) opening criterion with opening
+    /// angle `theta` and softening `eps2 = ε²`. Excludes the self term. This is the
+    /// exact f64 analogue of the GPU kernel and is asserted bit-identical to
+    /// [`Octree::accel_node`]; the returned value still needs `× g` by the caller,
+    /// matching `accel_node`'s convention.
+    pub fn accel(&self, target: usize, pos: &[DVec3], mass: &[f64], theta: f64, eps2: f64) -> DVec3 {
+        todo!("FlatTree::accel")
+    }
+}
+
 #[cfg(test)]
 mod build_tests {
     //! `ParallelExact` must build the *same* tree as the serial reference — not
@@ -575,6 +646,60 @@ mod build_tests {
                         "node count differs (n={n}, seed={seed}, clustered={clustered})"
                     );
                     assert_same_node(&ser, 0, &par, 0, "root");
+                }
+            }
+        }
+    }
+
+    /// The stackless [`FlatTree`] walk must reproduce the recursive
+    /// [`Octree::accel_node`] **bit-for-bit** in f64 — the flatten (DFS layout,
+    /// `next` skip pointers, leaf `body_start`/`body_count` ranges, first-child-at
+    /// `node+1`) is the genuinely new, off-by-one-prone logic, and the GPU f32
+    /// gates can't isolate it (threshold-straddle + cancellation noise hide a
+    /// flatten bug behind tolerances). Pinning it at full precision on CPU also
+    /// forecloses the GPU-hang hazard: a malformed `next ≤ node` would spin the
+    /// WGSL walk forever, but a flatten that matches `accel_node` to the bit is
+    /// provably a strictly-increasing walk (open→node+1, accept→next>node).
+    ///
+    /// Sampled targets (stride) per config — a flatten off-by-one perturbs many
+    /// targets, so a stride sample catches it while keeping the sweep fast — over
+    /// uniform + clustered clouds, sizes straddling the build cutoffs, and θ from
+    /// the full-open (θ→0) regime through wide angles.
+    #[test]
+    fn flat_tree_traversal_matches_accel_node_bit_for_bit() {
+        let eps2 = 0.05f64 * 0.05;
+        for &n in &[1usize, 2, 5, 37, 120, 600, 1024, 4096] {
+            for seed in 0..8u64 {
+                for &clustered in &[false, true] {
+                    let (pos, mass) = cloud(seed, n, clustered);
+                    let tree = Octree::build(&pos, &mass, BuildMode::Serial);
+                    let flat = FlatTree::build(&pos, &mass);
+                    // Same node count reachable — a cheap structural sanity check
+                    // before the per-target bit compare.
+                    assert_eq!(
+                        tree.nodes.len(),
+                        flat.nodes.len(),
+                        "flat node count differs (n={n}, seed={seed}, clustered={clustered})"
+                    );
+                    let stride = (n / 64).max(1);
+                    for &theta in &[1e-6f64, 0.3, 0.6, 1.0] {
+                        let q = Query {
+                            pos: &pos,
+                            mass: &mass,
+                            theta,
+                            eps2,
+                        };
+                        for t in (0..n).step_by(stride) {
+                            let want = tree.accel_node(0, t, &q);
+                            let got = flat.accel(t, &pos, &mass, theta, eps2);
+                            assert_eq!(
+                                want.to_array().map(f64::to_bits),
+                                got.to_array().map(f64::to_bits),
+                                "flat walk must match accel_node bit-for-bit \
+                                 (n={n}, seed={seed}, clustered={clustered}, theta={theta}, target={t})"
+                            );
+                        }
+                    }
                 }
             }
         }

@@ -29,8 +29,10 @@
 //! is an exact fast solver in the 10⁵–10⁶ band.
 
 pub mod gpu_direct_sum;
+pub mod gpu_tree;
 
 pub use gpu_direct_sum::GpuDirectSum;
+pub use gpu_tree::GpuTree;
 
 /// Errors bringing up or driving the GPU compute context. Returned rather than
 /// panicking so callers can degrade to a CPU solver on a headless / GPU-less box.

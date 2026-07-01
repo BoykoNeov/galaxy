@@ -63,6 +63,11 @@ pub struct ExponentialDisk {
     pub r_max: f64,
     /// The live spherical halo/bulge the disk is embedded in.
     pub halo: Plummer,
+    /// Optional Toomre-Q warmth. `None` = the fully-cold kinematic disk (v_φ = v_c,
+    /// zero dispersion). `Some(q)` gives the disk in-plane and vertical velocity
+    /// dispersion targeting Toomre stability parameter `q`, with the mean azimuthal
+    /// streaming reduced by asymmetric drift. Set via [`with_toomre_q`].
+    toomre_q: Option<f64>,
 }
 
 impl ExponentialDisk {
@@ -89,7 +94,61 @@ impl ExponentialDisk {
             scale_height,
             r_max,
             halo,
+            toomre_q: None,
         }
+    }
+
+    /// Return a WARM copy of this disk targeting Toomre stability parameter `q`
+    /// (typically 1.2–2.0). The warm disk carries radial, azimuthal, and vertical
+    /// velocity dispersion set from `q` and the local epicyclic frequency, with the
+    /// mean azimuthal streaming reduced by asymmetric drift so it stays near
+    /// equilibrium. `q` must be strictly positive. Positions are unchanged — warmth
+    /// perturbs only velocities.
+    pub fn with_toomre_q(mut self, q: f64) -> Self {
+        assert!(q > 0.0, "Toomre Q must be positive");
+        self.toomre_q = Some(q);
+        self
+    }
+
+    /// The target Toomre `Q`, or `None` for the fully-cold disk.
+    pub fn toomre_q(&self) -> Option<f64> {
+        self.toomre_q
+    }
+
+    /// Orbital (angular) frequency Ω(R) = v_c(R)/R.
+    pub fn orbital_frequency(&self, r: f64) -> f64 {
+        todo!("warm-disk kinematics")
+    }
+
+    /// Epicyclic frequency κ(R): the radial oscillation frequency of a near-circular
+    /// orbit. Closed form κ² = Ω² + G M'(R)/R², M'(R) = 4πR²ρ_halo(R) + 2πR Σ(R).
+    pub fn epicyclic_frequency(&self, r: f64) -> f64 {
+        todo!("warm-disk kinematics")
+    }
+
+    /// Radial velocity dispersion σ_R(R) from the Toomre criterion:
+    /// σ_R = Q · 3.36 · G Σ(R) / κ(R). Zero for the cold disk (`toomre_q == None`).
+    pub fn radial_dispersion(&self, r: f64) -> f64 {
+        todo!("warm-disk kinematics")
+    }
+
+    /// Azimuthal velocity dispersion σ_φ(R) = σ_R · κ/(2Ω) (epicyclic ratio).
+    /// Zero for the cold disk.
+    pub fn azimuthal_dispersion(&self, r: f64) -> f64 {
+        todo!("warm-disk kinematics")
+    }
+
+    /// Vertical velocity dispersion σ_z(R) = √(π G Σ(R) hz) for the self-gravitating
+    /// sech²(z/hz) sheet. Zero for the cold disk.
+    pub fn vertical_dispersion(&self, r: f64) -> f64 {
+        todo!("warm-disk kinematics")
+    }
+
+    /// Mean azimuthal streaming speed v̄_φ(R): the circular speed reduced by
+    /// asymmetric drift, v_c² − v̄_φ² = σ_R²·[σ_φ²/σ_R² − 1 − d ln(ν σ_R²)/d ln R],
+    /// clamped to a non-negative v̄_φ². Equals v_c for the cold disk.
+    pub fn mean_azimuthal_velocity(&self, r: f64) -> f64 {
+        todo!("warm-disk kinematics")
     }
 
     /// The fraction of an *untruncated* exponential disk's mass that lies within

@@ -330,9 +330,11 @@ fn gpu_tree_aggregation_monotone_chain() {
 // determinism (same-device, run-to-run) — topology AND aggregation
 // ---------------------------------------------------------------------------
 
-/// Same input ⇒ bit-identical topology *and* aggregation on a given device. The
-/// aggregation half is the real claim: it proves the atomic-flag fold is order-
-/// independent (folds from stored left/right, not arrival order), not lucky.
+/// Same input ⇒ bit-identical topology *and* aggregation on a given device. With the
+/// current single-invocation aggregation this is near-vacuous (a serial kernel is
+/// deterministic regardless of fold order) — its real job is a **regression guard for
+/// the deferred parallel atomic-flag refit**, where the cross-workgroup fold ordering
+/// could reintroduce nondeterminism (the same role the M4d sort's determinism gate plays).
 #[test]
 fn gpu_tree_is_bit_deterministic() {
     let pos = cloud(0x50, 5000, 3.0, DVec3::ZERO);
@@ -346,10 +348,7 @@ fn gpu_tree_is_bit_deterministic() {
     assert_eq!(a.parent, c.parent);
     assert_eq!(a.aabb_min, c.aabb_min, "aabb_min run-to-run deterministic");
     assert_eq!(a.aabb_max, c.aabb_max);
-    assert_eq!(
-        a.com, c.com,
-        "com run-to-run deterministic (order-independent fold)"
-    );
+    assert_eq!(a.com, c.com, "com run-to-run deterministic");
     assert_eq!(a.mass, c.mass);
 }
 

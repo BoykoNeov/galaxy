@@ -109,28 +109,36 @@ fn gpu_lbvh_theta_to_zero_matches_oracle() {
         let worst = worst_rel_err(&got, &exact);
         // Full-open = direct sum in f32: same bound as the GpuDirectSum/GpuTree θ→0 gate.
         assert!(rms < 3e-4, "theta->0 RMS rel err {rms:e} (seed {seed})");
-        assert!(worst < 5e-2, "theta->0 worst rel err {worst:e} (seed {seed})");
+        assert!(
+            worst < 5e-2,
+            "theta->0 worst rel err {worst:e} (seed {seed})"
+        );
     }
 }
 
 /// At finite θ the monopole approximation drops the quadrupole ⇒ O(θ²) error that grows with
-/// θ. Bounds are looser than `GpuTree`'s same-θ gate (GpuLbvh builds its own f32 tree, so
-/// whole cells differ, not just opening flips) and were set from measurement, not theory.
+/// θ. Bounds set from measurement (max over 32 seeds ≈ 6.8e-3 at θ=0.3, 3.3e-2 at θ=0.6),
+/// with modest headroom: the O(θ²) BH truncation dominates the topology straddle at these θ,
+/// so these land near `GpuTree`'s vs-DirectSum figures — a broken traversal gives O(1).
 #[test]
 fn gpu_lbvh_finite_theta_bounded_and_grows() {
     const N: usize = 128;
+    // Solvers are hoisted out of the seed loop: each GpuLbvh brings up the whole GPU chain
+    // (several devices), so per-seed construction would dominate wall-clock.
+    let mut lo_solver = gpu(G, EPS, 0.3);
+    let mut hi_solver = gpu(G, EPS, 0.6);
     for seed in 0..32u64 {
         let s = cluster(seed, N);
         let exact = accel(&mut DirectSum::new(G, EPS), &s);
 
-        let lo = accel(&mut gpu(G, EPS, 0.3), &s);
-        let hi = accel(&mut gpu(G, EPS, 0.6), &s);
+        let lo = accel(&mut lo_solver, &s);
+        let hi = accel(&mut hi_solver, &s);
 
         let rms_lo = rms_rel_err(&lo, &exact);
         let rms_hi = rms_rel_err(&hi, &exact);
 
-        assert!(rms_lo < 0.02, "theta=0.3 RMS err {rms_lo:e} (seed {seed})");
-        assert!(rms_hi < 0.08, "theta=0.6 RMS err {rms_hi:e} (seed {seed})");
+        assert!(rms_lo < 0.012, "theta=0.3 RMS err {rms_lo:e} (seed {seed})");
+        assert!(rms_hi < 0.05, "theta=0.6 RMS err {rms_hi:e} (seed {seed})");
         assert!(
             rms_hi > rms_lo,
             "RMS error should grow with theta (seed {seed}): {rms_lo:e} -> {rms_hi:e}"
@@ -170,7 +178,10 @@ fn gpu_lbvh_is_bit_deterministic_same_device() {
     let s = cluster(7, N);
     let a1 = accel(&mut solver, &s);
     let a2 = accel(&mut solver, &s);
-    assert_eq!(a1, a2, "same-device GPU LBVH dispatch must be bit-deterministic");
+    assert_eq!(
+        a1, a2,
+        "same-device GPU LBVH dispatch must be bit-deterministic"
+    );
 }
 
 /// At θ→0 the tree is exact direct summation, so Σ mᵢ aᵢ = 0 to the f32 floor (pairwise

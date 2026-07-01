@@ -7,7 +7,9 @@
 //! `DESIGN.md` (M1) for context.
 
 pub mod collision;
+pub mod disk;
 pub mod plummer;
 
 pub use collision::Collision;
+pub use disk::ExponentialDisk;
 pub use plummer::Plummer;

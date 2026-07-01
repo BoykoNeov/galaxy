@@ -64,8 +64,8 @@ renderer.
 ```
 galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
-├─ solvers/      DirectSum (oracle), BarnesHut (workhorse)   [later: ParticleMesh, TreePM]
-├─ gpu/          GpuDirectSum — wgpu-compute O(N²) direct sum (f32, tiled gather) (DONE) [later: GPU tree / TreePM]
+├─ solvers/      DirectSum (oracle), BarnesHut (workhorse), FlatTree (stackless octree for GPU) (DONE)   [later: ParticleMesh, TreePM]
+├─ gpu/          GpuDirectSum — O(N²) direct sum; GpuTree — O(N log N) Barnes-Hut (CPU build + GPU stackless traverse) (both f32, wgpu compute) (DONE) [later: GPU-resident build (Morton/LBVH) / TreePM]
 ├─ ic/           Plummer sphere, exp-disk-in-halo (cold + warm Toomre-Q), two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [next: Hernquist/NFW halo] [later: cosmological ICs]
 ├─ io/           snapshot read/write: Rust-native versioned binary (DONE) [HDF5 behind a `validation` feature: later]
 ├─ sim/          headless engine: solver+integrator+IC+stepping loop → snapshots (DONE) [checkpoint/restart: later]
@@ -381,8 +381,56 @@ late-time positions — N-body is chaotic).
       tolerances (unit-box + large-coordinate cancellation); same-device bit-determinism;
       Newton's-third-law momentum-flux (net internal force at the f32 floor); empty/single
       edge cases. GPU-gated (need a wgpu adapter), fail-loud like the M3 render invariants.
-  - **Remaining M4+:** PM / TreePM / GPU-tree / gas (SPH) / cosmology (Friedmann
-    Background + periodic solver + IC pipeline).
+  - **GPU Barnes-Hut tree solver (landed, M4a):** `galaxy-gpu`'s `GpuTree` is the
+    O(N log N) step past the O(N²) direct sum — the first genuine **GPU tree**. It is
+    **CPU-build + GPU-traverse**: the octree is built and linearized on the CPU
+    (reusing the tested build) and *walked* on the GPU by a stackless compute kernel.
+    Same `ForceSolver` drop-in, same f32/determinism story as `GpuDirectSum`, now with
+    the tree approximation controlled by θ (identical Barnes 1994 opening criterion as
+    the CPU `BarnesHut`).
+    - **Stackless skip-pointer traversal (the GPU-shaped representation).** A GPU has
+      no recursion stack, so the recursive octree is linearized into
+      `galaxy_solvers::FlatTree`: nodes in **DFS pre-order** (so a node's first child
+      is always the next entry) each carrying a **skip pointer** `next` = the index one
+      past that node's whole subtree. The per-target kernel walks with a single index:
+      open a node → advance to `node+1`; accept a monopole / finish a leaf / skip an
+      empty node → jump to `next`. Because a correct flatten makes the index **strictly
+      increase every step**, the walk provably terminates in ≤ `n_nodes` steps — no
+      stack, and no `next ≤ node` cycle that could hang the device (TDR). Leaves carry a
+      `body_start`/`body_count` range into a concatenated leaf-index array and are
+      resolved by exact direct sum (self term excluded); `body_count > 0` *is* the leaf
+      test (every leaf holds ≥1 body, no internal node holds bodies).
+    - **Gather + fixed order → determinism; reassociated vs the CPU (documented).** One
+      invocation per target writes `acc[i]` once from a private accumulator in a fixed
+      skip-pointer order — bit-deterministic **on a given device** (no float
+      `atomicAdd`), matching the `GpuDirectSum` discipline. It is **not** bit-identical
+      to the CPU `BarnesHut`: the stackless walk keeps one running accumulator over the
+      DFS scan while the recursion folds each subtree separately then combines — a
+      different but equally valid summation order (the exact analogue of
+      `potential_energy_parallel`'s "reductions reassociate → tolerance-tested"). The
+      f64 flat walk is pinned to the recursive `accel_node` at **reassociation
+      precision** (observed worst gap ~1.6e-14 vs a 1e-11 bound) with the flatten
+      topology pinned **exactly** (reachable node count + leaf bodies are a permutation
+      of `0..n`). In f32 the opening *decision* also differs near threshold, flipping a
+      few nodes → a discrete O(θ²) swing for those targets (why the GPU-vs-CPU-BH gate
+      bounds RMS only).
+    - **Scope honesty.** A genuine GPU *traversal* (the part that dominates at scale),
+      but the **build stays on the CPU** (already rayon-parallel) and the state is
+      re-uploaded each `accelerations` call — a **GPU-resident build** (Morton/LBVH) is
+      the next deferred step, and the CPU build becomes the Amdahl ceiling well before
+      10⁸. Realistically opens the **10⁷ band** that O(N²) `GpuDirectSum` cannot. The
+      f32 precision floor (large-coordinate `xᵢ−xⱼ` cancellation) is unchanged from the
+      direct-sum kernel — the tree geometry narrows f64→f32 harmlessly (O(1e-6)); the
+      dominant error is still the accumulation/cancellation, worst in the clustered,
+      large-coordinate collision regime.
+    - **Gates:** θ→0 reproduces the f64 `DirectSum` oracle to f32 (full open = direct
+      sum, the *clean* traversal-isolation gate, no opening straddle); finite-θ error
+      bounded and grows with θ; GPU-tree tracks the CPU `BarnesHut` at the same θ (RMS
+      coarse guard); same-device bit-determinism; momentum-flux at the f32 floor at
+      θ→0; empty/single edge cases. Plus the solvers-side f64 flatten test (bit-exact
+      topology + reassociation-precision forces). GPU-gated, fail-loud.
+  - **Remaining M4+:** GPU-resident tree build (Morton/LBVH) / PM / TreePM / gas (SPH)
+    / cosmology (Friedmann Background + periodic solver + IC pipeline).
 
 ## Validation strategy
 

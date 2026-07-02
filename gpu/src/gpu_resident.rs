@@ -10,11 +10,12 @@
 //! `bodies` (xyz=pos, w=mass) — already the traversal's input — doubles as the resident position
 //! buffer, so the force pipeline reads state in place.
 //!
-//! This is *not* a throughput speedup (the M4h serial stages — sort, aggregate, flatten — are
+//! Residency is *not* a throughput speedup (the M4h serial stages — sort, aggregate, flatten — are
 //! unchanged and still dominate); it removes the per-step sync points, the point of residency.
-//! Each [`step`](Self::step) is still one submit; **batching K steps into a single encoder** (to
-//! also drop per-submit overhead) is the named follow-up — residency and batching are distinct,
-//! and one-submit-per-step is already fully resident.
+//! **Batching** then drops the per-*submit* overhead on top (M4k): [`step`](Self::step) is the
+//! one-submit minimum-latency path, while [`step_many`](Self::step_many) coalesces up to
+//! [`MAX_BATCH`](Self::MAX_BATCH) steps into a single encoder/submit — regrouping encoders without
+//! touching the arithmetic, so the trajectory is bit-identical to stepping one at a time.
 //!
 //! ## Position precision: double-single accumulation (M4j)
 //! The host-driven path ([`galaxy_core::LeapfrogKdk`] + a solver) keeps **authoritative
@@ -27,7 +28,8 @@
 //! stays f32 (mirroring the existing f32-force / f64-energy note). `upload` splits the f64 input
 //! into `hi + lo` and `snapshot` sums them back, so the full f64 precision reaches the host. This
 //! is the M4i precision follow-up DESIGN deferred; velocity remains plain f32 (DS is
-//! position-only). **Batching K steps into one submit** is the still-open throughput follow-up.
+//! position-only). The remaining M4i throughput follow-up — **batching K steps into one submit** —
+//! landed as M4k (see [`step_many`](Self::step_many)).
 //!
 //! ## Not a `ForceSolver`
 //! The [`galaxy_core::ForceSolver`] interface is host-state-in / accel-out — fundamentally
@@ -523,40 +525,80 @@ impl GpuResidentLeapfrog {
         self.submits += 1;
     }
 
-    /// Advance one resident KDK step by `dt`: kick½ · drift · (reset+build+traverse into `acc`) ·
-    /// kick½ — one submit, no readback. Requires a prior [`upload`](Self::upload).
+    /// Append one resident KDK step to `enc` (no submit): kick½ · drift · (reset+build+traverse
+    /// into `acc`) · kick½. Requires `write_step_params(dt)` already written and `n >= 1`. Chaining
+    /// several of these into one encoder is exactly [`step_many`](Self::step_many)'s batch — because
+    /// each pass is its own compute pass, wgpu's usage tracking inserts the read-after-write
+    /// barriers *between steps* too (drift writes `bodies` → the next step's force reads it; the
+    /// closing kick writes `vel` → the next drift reads it), so batching regroups encoders without
+    /// touching the arithmetic. The two half-kicks are **kept separate** across the step boundary:
+    /// `kick½(a)·kick½(a)` is *not* f32-identical to a fused `kick(a·dt)`, so fusing them would
+    /// silently change the trajectory and break the faithful gate.
+    fn encode_one_step(&self, enc: &mut wgpu::CommandEncoder) {
+        let res = self.res.as_ref().expect("resident resources ensured");
+        // Kick½ with a(xₙ) [carried from the previous step's closing kick, or the prime].
+        self.per_particle_pass(enc, "resident-kick-open", &self.kick_pl, &res.kick_bg);
+        // Drift: xₙ → xₙ₊₁.
+        self.per_particle_pass(enc, "resident-drift", &self.drift_pl, &res.drift_bg);
+        // Recompute a(xₙ₊₁) in place (accel), left resident for the next step's opening kick.
+        self.encode_force(enc);
+        // Kick½ with a(xₙ₊₁).
+        self.per_particle_pass(enc, "resident-kick-close", &self.kick_pl, &res.kick_bg);
+    }
+
+    /// Advance one resident KDK step by `dt` in one submit, no readback. Requires a prior
+    /// [`upload`](Self::upload). This is the minimum-latency path; [`step_many`](Self::step_many)
+    /// batches several steps per submit for throughput.
     pub fn step(&mut self, dt: f64) {
         if self.n == 0 {
             self.time += dt;
             return;
         }
         self.write_step_params(dt);
-        let res = self.res.as_ref().expect("resident resources ensured");
-
         let mut enc = self
             .core
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("resident-step-encoder"),
             });
-        // Kick½ with a(xₙ) [carried from the previous step's closing kick, or the prime].
-        self.per_particle_pass(&mut enc, "resident-kick-open", &self.kick_pl, &res.kick_bg);
-        // Drift: xₙ → xₙ₊₁.
-        self.per_particle_pass(&mut enc, "resident-drift", &self.drift_pl, &res.drift_bg);
-        // Recompute a(xₙ₊₁) in place (accel), left resident for the next step's opening kick.
-        self.encode_force(&mut enc);
-        // Kick½ with a(xₙ₊₁).
-        self.per_particle_pass(&mut enc, "resident-kick-close", &self.kick_pl, &res.kick_bg);
+        self.encode_one_step(&mut enc);
         self.core.queue.submit([enc.finish()]);
         self.submits += 1;
 
         self.time += dt;
     }
 
-    /// Advance `steps` resident KDK steps of `dt` (each its own submit; still fully resident).
+    /// Advance `steps` resident KDK steps of `dt`, batching up to [`MAX_BATCH`](Self::MAX_BATCH)
+    /// steps into a **single encoder/submit** — `⌈steps/MAX_BATCH⌉` submits total, dropping the
+    /// per-step submit overhead (the named M4i throughput follow-up) while keeping each submit
+    /// bounded under the OS GPU watchdog. `dt` is constant across the run, so the per-step uniform
+    /// is written **once**; the trajectory is identical to `steps` individual [`step`](Self::step)s
+    /// (only the submit grouping changes — see [`encode_one_step`](Self::encode_one_step)).
     pub fn step_many(&mut self, dt: f64, steps: u64) {
-        for _ in 0..steps {
-            self.step(dt);
+        if self.n == 0 {
+            self.time += steps as f64 * dt;
+            return;
+        }
+        if steps == 0 {
+            return;
+        }
+        self.write_step_params(dt);
+        let mut remaining = steps;
+        while remaining > 0 {
+            let chunk = remaining.min(Self::MAX_BATCH);
+            let mut enc =
+                self.core
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("resident-batch-encoder"),
+                    });
+            for _ in 0..chunk {
+                self.encode_one_step(&mut enc);
+            }
+            self.core.queue.submit([enc.finish()]);
+            self.submits += 1;
+            self.time += chunk as f64 * dt;
+            remaining -= chunk;
         }
     }
 

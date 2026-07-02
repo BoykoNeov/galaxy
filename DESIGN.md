@@ -760,7 +760,8 @@ late-time positions — N-body is chaotic).
       the deferred precision follow-up.** This is a **latency/architecture win** (per-step sync
       points removed), **not** a throughput speedup: the serial M4h stages (sort, aggregate,
       flatten) are unchanged, and each `step` is still one submit — **batching K steps into one
-      encoder** (dropping per-submit overhead too) is the named follow-up, distinct from residency.
+      encoder** (dropping per-submit overhead too) is the named follow-up, distinct from residency
+      (landed as M4k below).
     - **Gates (the two load-bearing ones + invariants).** (1) *Faithful/residency — bit-for-bit:*
       the same stepper run resident (`upload → K steps → snapshot`) vs round-tripped (per step:
       `upload → step → snapshot`) agrees **exactly**, since f32↔f64 snapshot/upload is a lossless
@@ -801,11 +802,24 @@ late-time positions — N-body is chaotic).
       and keeps velocity exact. **New gate:** a force-free single particle drifts K=10⁴ steps and the
       DS accumulator tracks the exact f64 sum `x₀ + K·fl32(v·dt)` within 1e-5 (a plain-f32 running
       sum drifts to ~3.5e-1). GPU-gated, fail-loud.
-  - **Remaining M4+:** batching K resident steps into one submit (the remaining M4i follow-up:
-    latency was removed in M4i, this drops per-submit overhead too); and the still-untouched
-    **PM / TreePM / gas (SPH) / cosmology** (Friedmann Background + periodic solver + IC pipeline).
-    M4i/M4j keep the *leapfrog + LBVH* path resident; extending residency to those
-    solvers/integrators is future work.
+  - **Batched multi-step submits (landed, M4k):** the remaining M4i throughput follow-up. M4i
+    removed the per-step *latency* (round-trips) but left each `step` its own submit; `step_many`
+    now coalesces up to `MAX_BATCH` steps into a **single encoder/submit** (`⌈steps/MAX_BATCH⌉`
+    submits total), dropping the per-submit overhead. `step` stays the one-submit minimum-latency
+    path. Batching only regroups encoders — wgpu's usage tracking inserts the same read-after-write
+    barriers *between* steps (drift→force on `bodies`, close-kick→next drift on `vel`) that it
+    already inserts within a step — so the trajectory is **bit-identical** to stepping one at a
+    time (verified: 150 batched steps == 150 per-step, bit-for-bit); the two half-kicks are kept
+    **unfused** across the step boundary (`kick½(a)·kick½(a)` ≠ f32-fused `kick(a·dt)`). The cap is
+    a TDR/watchdog guard, **not** a throughput target: even 64 collapses the K=10⁴ drift gate from
+    10⁴ submits to ~157. It is a fixed step count, hence **N-blind** — per-step GPU cost scales with
+    N, so a large-N sim could still approach the watchdog at a cap safe for the small-N gates;
+    sizing it per-N against a device timing budget is future work. **Gate:** `step_many` issues
+    exactly `⌈K/MAX_BATCH⌉` submits (a before/after `submits()` delta); the pre-existing nine gates
+    re-validate the trajectory under batching for free. GPU-gated, fail-loud.
+  - **Remaining M4+:** the still-untouched **PM / TreePM / gas (SPH) / cosmology** (Friedmann
+    Background + periodic solver + IC pipeline). M4i/M4j/M4k keep the *leapfrog + LBVH* path
+    resident and throughput-tuned; extending residency to those solvers/integrators is future work.
 
 ## Validation strategy
 

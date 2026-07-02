@@ -1,5 +1,5 @@
-//! M4i/M4j gates for [`GpuResidentLeapfrog`]: GPU-resident leapfrog stepping with double-single
-//! position accumulation.
+//! M4i/M4j/M4k gates for [`GpuResidentLeapfrog`]: GPU-resident leapfrog stepping with double-single
+//! position accumulation and batched multi-step submits.
 //!
 //! ## The two load-bearing gates
 //! 1. **Faithful / residency.** The *same* stepper type run two ways must agree: `resident`
@@ -12,6 +12,10 @@
 //! 2. **Physics — f32 tolerance.** Vs the host-driven reference `LeapfrogKdk + GpuLbvhFused`,
 //!    which holds the *force kernel identical* so the only variable is f32-GPU-KDK vs f64-host-KDK
 //!    (the tightest discriminator). Momentum conservation + bounded energy ride on top.
+//!
+//! **M4k throughput gate** (gate 10) pins that `step_many` coalesces its steps into
+//! `⌈K/MAX_BATCH⌉` submits rather than one-per-step; because batching only regroups encoders,
+//! gates 1–9 re-validate the trajectory under it for free.
 //!
 //! GPU-gated: every test needs a wgpu adapter; without one the constructors return `NoAdapter`
 //! and the tests fail loudly (they are not silently skipped).

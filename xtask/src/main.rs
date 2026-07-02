@@ -1,8 +1,20 @@
 //! Movie orchestrator: builds a two-galaxy collision, steps it to snapshots, then
-//! renderprep → render → grade → ffmpeg into a tidal-tail movie. The scenario is
-//! hardcoded for the MVP (a `scenario.toml` front-end is a later addition).
+//! renderprep → render → grade → ffmpeg into a movie. Two hardcoded scenarios (a
+//! `scenario.toml` front-end is a later addition):
 //!
-//! Usage: `cargo run -p galaxy-xtask --release [out_dir]`
+//!   * `disk` (default) — a parabolic prograde encounter of two warm exponential-disk
+//!     galaxies in live Plummer halos → thin curved **tidal tails** (the M3 demo).
+//!   * `dm` — a 2:1 major **dark-matter merger** of two exponentially-truncated NFW
+//!     halos (ρ∝r⁻¹ cusps) → a single triaxial remnant (the M5e payoff).
+//!
+//! Usage: `cargo run -p galaxy-xtask --release [disk|dm] [out_dir]`
+//!   * A bare first arg that is neither `disk` nor `dm` is taken as `out_dir` with the
+//!     `disk` scenario (back-compat with the original single-scenario CLI).
+//!   * Set `GALAXY_MOVIE_QUICK=1` for a fast low-N, low-res preview (same physical
+//!     time and dt, so the trajectory is faithful — only particle count, frame size,
+//!     and frame cadence are reduced). Use it to sanity-check a scenario before a
+//!     full-resolution render.
+//!
 //! Layout under `out_dir`: `snapshots/` `.snap`, `exr/` linear HDR, `frames/` PNGs,
 //! `movie.mp4` (if ffmpeg is on PATH). The EXR layer is kept so the frames can be
 //! regraded (different exposure/tonemap) without re-simulating or re-rendering.
@@ -10,93 +22,182 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use galaxy_core::{LeapfrogKdk, StaticBackground};
+use galaxy_core::{LeapfrogKdk, State, StaticBackground};
 use galaxy_grade::{grade_file, GradeConfig, ToneMap};
-use galaxy_ic::{DiskCollision, ExponentialDisk, Plummer};
+use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, TruncatedNfw};
 use galaxy_render::{write_exr, Camera, RenderConfig, Renderer};
 use galaxy_renderprep::{prepare, PrepConfig};
 use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_xtask::framing_radius;
 use glam::Vec3;
 
-// --- Scenario: a parabolic (Toomre) coplanar-PROGRADE encounter of two rotating
-//     exponential-disk galaxies — the IC that makes thin curved tidal tails (a
-//     disk resonantly amplified in a prograde passage), which the earlier
-//     two-Plummer movie physically could not. Each galaxy is a low-mass disk in a
-//     live Plummer halo that carries most of the mass and stabilizes it. Both disks
-//     default to prograde (spin +Z, co-rotating with the x–y orbit). The disks are
-//     WARM (Toomre Q≈1.5): in-plane + vertical velocity dispersion balanced by the
-//     asymmetric-drift rotation lag, so the disks resist the local fragmentation a
-//     fully-cold (Q→0) disk suffers over the several orbits of the passage while
-//     still amplifying the thin prograde tails.
+// --- Shared physics / look (both scenarios) ----------------------------------
 const G: f64 = 1.0;
-// Galaxy 1 (primary): halo + disk.
+const THETA: f64 = 0.5; // Barnes-Hut opening angle
+const FALLOFF: f32 = 6.0;
+const PEAK_BRIGHTNESS: f32 = 0.3; // per-particle peak, so dense cores additively saturate
+const EXPOSURE: f32 = 1.0;
+const TONEMAP: ToneMap = ToneMap::AcesApprox;
+const FPS: u32 = 30;
+const FRAME_W: u32 = 1280;
+const FRAME_H: u32 = 720;
+const QUICK_W: u32 = 640;
+const QUICK_H: u32 = 360;
+
+/// Everything a scenario hands the pipeline: the sampled IC plus the sim-timing,
+/// softening, splat look, and framing that differ between the disk and DM movies.
+/// The pipeline (`run_movie`) is single-sourced over this so both scenarios share
+/// one sim→prep→render→grade→ffmpeg path.
+struct Scenario {
+    state: State,
+    prep: PrepConfig,
+    eps: f64,
+    dt: f64,
+    n_steps: u64,
+    snapshot_every: u64,
+    seed: u64,
+    width: u32,
+    height: u32,
+    frame_percentile: f32,
+    info: String,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
+
+    // First positional selects the scenario; anything else is treated as the out dir
+    // (back-compat with the original `... [out_dir]` CLI, which defaulted to disk).
+    let (scenario_name, out_arg): (&str, Option<&str>) = match args.first().map(String::as_str) {
+        Some("disk") => ("disk", args.get(1).map(String::as_str)),
+        Some("dm") | Some("nfw") => ("dm", args.get(1).map(String::as_str)),
+        Some(other) => ("disk", Some(other)),
+        None => ("disk", None),
+    };
+    let out: PathBuf = out_arg.map(PathBuf::from).unwrap_or_else(|| {
+        std::env::temp_dir().join(match scenario_name {
+            "dm" => "galaxy_dm_merger",
+            _ => "galaxy_movie",
+        })
+    });
+
+    println!(
+        "scenario = {scenario_name}{}",
+        if quick { " (quick preview)" } else { "" }
+    );
+    println!("output → {}", out.display());
+
+    let scenario = match scenario_name {
+        "dm" => dm_scenario(quick),
+        _ => disk_scenario(quick),
+    };
+    println!("{}", scenario.info);
+    run_movie(&scenario, &out)
+}
+
+// --- Scenario: DM merger ------------------------------------------------------
+// Two exponentially-truncated NFW halos (M5d) on a parabolic (Toomre) encounter — a
+// 2:1 major dark-matter merger. Both are pure ρ∝r⁻¹ cusps with no disk, so the movie
+// shows two cuspy blobs coalescing into one triaxial remnant — NOT thin tidal tails
+// (those need cold disks). The passage is DEEP (peri=3 ≪ r_vir≈10) so the halos fully
+// overlap at closest approach; dynamical friction in that overlap is what binds a
+// marginally-bound (e=1) pair into a single remnant on the first passage.
+const DM_HALO1_COLOR: [f32; 3] = [1.0, 0.55, 0.3]; // warm (primary)
+const DM_HALO2_COLOR: [f32; 3] = [0.35, 0.6, 1.0]; // cool (secondary)
+const DM_SPLAT_SIZE: f32 = 0.6; // world units — the NFW scene (~40u) is ~8× the disk scene
+const DM_ECC: f64 = 1.0; // parabolic — the classic Toomre encounter
+const DM_PERI: f64 = 3.0;
+const DM_SEP: f64 = 40.0; // > r_vir1 + r_vir2 (=18) so the halos start on a clean approach
+
+fn dm_scenario(quick: bool) -> Scenario {
+    // Primary: M_vir=1, r_s=1, c=10 ⇒ r_vir=10, exponential skirt r_d=3.
+    let g1 = TruncatedNfw::new(Nfw::new(G, 1.0, 1.0, 10.0), 3.0);
+    // Secondary: half the virial mass (2:1 major merger), r_s=0.8 ⇒ r_vir=8, r_d=2.4.
+    let g2 = TruncatedNfw::new(Nfw::new(G, 0.5, 0.8, 10.0), 2.4);
+    let collision = NfwCollision::new(g1, g2, DM_ECC, DM_PERI, DM_SEP);
+
+    // Particle counts split 2:1 to match the mass ratio ⇒ EQUAL particle mass across
+    // both halos (clean, uniform brightness weighting). Quick mode drops N ~6×.
+    let (n1, n2) = if quick { (2000, 1000) } else { (12000, 6000) };
+    let seed = 0x0DEA_D000;
+    let state = collision.sample(n1, n2, seed);
+    let particle_mass = g1.total_mass() / n1 as f64; // = g2.total_mass()/n2 by design
+
+    // Timing: t_dyn≈1.2 (inner NFW scale). dt=0.02 ≈ 0.016·t_dyn resolves the deep
+    // pericenter passage (a bit tighter than the stability test's 0.025·t_dyn). Total
+    // T = n_steps·dt = 320 carries the run past first pericenter (t_peri≈104 for this
+    // orbit, Barker's equation) through the second infall to full coalescence into a
+    // single triaxial remnant — the halos are bound (dynamical friction robs the
+    // orbital energy on the deep, fully-overlapping first passage).
+    let dt = 0.02;
+    let n_steps = 16_000;
+    let snapshot_every = if quick { 400 } else { 200 }; // ~40 / ~80 frames
+
+    let (width, height) = if quick {
+        (QUICK_W, QUICK_H)
+    } else {
+        (FRAME_W, FRAME_H)
+    };
+    let info = format!(
+        "IC: {} particles (halo1 {} + halo2 {}), particle mass {particle_mass:.3e}; \
+         parabolic peri={DM_PERI} sep={DM_SEP} (r_vir 10+8), t_peri≈104, T={:.0}",
+        n1 + n2,
+        n1,
+        n2,
+        n_steps as f64 * dt,
+    );
+
+    Scenario {
+        state,
+        prep: PrepConfig {
+            palette: vec![DM_HALO1_COLOR, DM_HALO2_COLOR],
+            brightness_per_mass: PEAK_BRIGHTNESS / particle_mass as f32,
+            size: DM_SPLAT_SIZE,
+            density: None,
+        },
+        eps: 0.05, // 0.05·r_s (r_s=1) — matches the NFW stability test's softening
+        dt,
+        n_steps,
+        snapshot_every,
+        seed,
+        width,
+        height,
+        // The diffuse skirt + a few post-merger escapers would blow up the AABB; a
+        // slightly lower percentile than the disk movie crops them and keeps the
+        // remnant filling the frame.
+        frame_percentile: 0.97,
+        info,
+    }
+}
+
+// --- Scenario: disk collision (the original M3 movie) -------------------------
+// A parabolic coplanar-PROGRADE encounter of two rotating warm exponential-disk
+// galaxies (Toomre Q≈1.5), each a low-mass disk in a live Plummer halo → thin curved
+// tidal tails. See the git history for the full physics rationale; this is the
+// original hardcoded scenario, unchanged (same constants + deterministic pipeline ⇒
+// same frames when not in quick mode), now behind the `disk` selector.
 const HALO_M1: f64 = 1.0;
 const HALO_A1: f64 = 1.0;
 const DISK_M1: f64 = 0.15;
 const DISK_RD1: f64 = 0.5;
-// Galaxy 2 (secondary): a lighter disk galaxy.
 const HALO_M2: f64 = 0.7;
 const HALO_A2: f64 = 0.9;
 const DISK_M2: f64 = 0.1;
 const DISK_RD2: f64 = 0.45;
-// Shared disk geometry (thin; truncated a few scale lengths out).
-const DISK_HZ_FRAC: f64 = 0.1; // scale height = 0.1·Rd (thin disk)
-const DISK_RMAX_FRAC: f64 = 4.0; // truncate at 4·Rd
-const DISK_Q: f64 = 1.5; // Toomre warmth — Q>1 suppresses fragmentation, tails intact
-const ECC: f64 = 1.0; // parabolic — the classic tidal-tail case
-const PERI: f64 = 1.5;
-const SEP: f64 = 8.0;
-const EPS: f64 = 0.05;
-const THETA: f64 = 0.5;
-// Halos need enough particles for a smooth stabilizing potential; disks get many
-// for tail detail (disk flux is set by disk MASS, not count, so extra disk
-// particles buy resolution at no brightness cost).
-const NH1: usize = 5000;
-const ND1: usize = 5000;
-const NH2: usize = 3500;
-const ND2: usize = 3500;
-const SEED: u64 = 0x00C0_FFEE;
-
-// --- Time stepping ------------------------------------------------------------
-const DT: f64 = 0.02;
-const N_STEPS: u64 = 1500;
-const SNAPSHOT_EVERY: u64 = 25; // → ~61 frames
-
-// --- Look --------------------------------------------------------------------
-const WIDTH: u32 = 1280;
-const HEIGHT: u32 = 720;
-const FALLOFF: f32 = 6.0;
-const SPLAT_SIZE: f32 = 0.12; // world units
-const PEAK_BRIGHTNESS: f32 = 0.3; // per-DISK-particle peak, so dense cores saturate
-const EXPOSURE: f32 = 1.0;
-const FRAME_PERCENTILE: f32 = 0.98; // crop the top 2% escapers when framing
-const FPS: u32 = 30;
-// Four-species palette: the two DISKS carry full-magnitude two-tone hues (warm /
-// cool) — they are the bright tails — while the two halos are dim tints, a soft
-// background glow. Brightness scales with mass, and halo particles are ~10× more
-// massive than disk particles, so the halo hues are pushed well below the disks'
-// to keep the tails dominant. Order matches the progenitor tags: halo1=0, disk1=1,
-// halo2=2, disk2=3.
+const DISK_HZ_FRAC: f64 = 0.1;
+const DISK_RMAX_FRAC: f64 = 4.0;
+const DISK_Q: f64 = 1.5;
+const DISK_ECC: f64 = 1.0;
+const DISK_PERI: f64 = 1.5;
+const DISK_SEP: f64 = 8.0;
+const DISK_EPS: f64 = 0.05;
+const DISK_SPLAT_SIZE: f32 = 0.12;
 const HALO1_COLOR: [f32; 3] = [0.05, 0.035, 0.025];
 const DISK1_COLOR: [f32; 3] = [1.0, 0.5, 0.25]; // warm
 const HALO2_COLOR: [f32; 3] = [0.025, 0.035, 0.05];
 const DISK2_COLOR: [f32; 3] = [0.35, 0.6, 1.0]; // cool
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out: PathBuf = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("galaxy_movie"));
-    let snap_dir = out.join("snapshots");
-    let exr_dir = out.join("exr");
-    let frame_dir = out.join("frames");
-    for d in [&snap_dir, &exr_dir, &frame_dir] {
-        std::fs::create_dir_all(d)?;
-    }
-    println!("output → {}", out.display());
-
-    // 1. Initial conditions: two rotating disk galaxies on a prograde encounter.
+fn disk_scenario(quick: bool) -> Scenario {
     let galaxy1 = ExponentialDisk::new(
         DISK_M1,
         DISK_RD1,
@@ -113,34 +214,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Plummer::new(G, HALO_M2, HALO_A2),
     )
     .with_toomre_q(DISK_Q);
-    // Default orientation is prograde/prograde (coplanar) — the cleanest-tail
-    // passage. Set `collision.orient1/orient2` for retrograde or inclined disks.
-    let collision = DiskCollision::new(galaxy1, galaxy2, ECC, PERI, SEP);
-    let ic = collision.sample(NH1, ND1, NH2, ND2, SEED);
-    // Brightness is tied to the DISK particle mass so a lone disk particle peaks
-    // near PEAK_BRIGHTNESS and dense disk cores additively saturate to white; the
-    // dim halo hues then keep the more-massive halo particles a faint background.
-    let disk_particle_mass = DISK_M1 / ND1 as f64;
-    println!(
+    let collision = DiskCollision::new(galaxy1, galaxy2, DISK_ECC, DISK_PERI, DISK_SEP);
+
+    // Halos need enough particles for a smooth stabilizing potential; disks get many
+    // for tail detail (disk flux is set by disk MASS, not count). Quick mode drops N.
+    let (nh1, nd1, nh2, nd2) = if quick {
+        (1500, 1500, 1000, 1000)
+    } else {
+        (5000, 5000, 3500, 3500)
+    };
+    let seed = 0x00C0_FFEE;
+    let state = collision.sample(nh1, nd1, nh2, nd2, seed);
+    let disk_particle_mass = DISK_M1 / nd1 as f64;
+
+    let (width, height) = if quick {
+        (QUICK_W, QUICK_H)
+    } else {
+        (FRAME_W, FRAME_H)
+    };
+    let info = format!(
         "IC: {} particles (halo {}+{}, disk {}+{}), disk particle mass {disk_particle_mass:.3e}",
-        ic.len(),
-        NH1,
-        NH2,
-        ND1,
-        ND2,
+        state.len(),
+        nh1,
+        nh2,
+        nd1,
+        nd2,
     );
 
-    // 2. Simulate → snapshots.
-    let mut state = ic.clone();
-    let mut solver = galaxy_solvers::BarnesHut::new(G, EPS, THETA);
+    Scenario {
+        state,
+        prep: PrepConfig {
+            palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
+            brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
+            size: DISK_SPLAT_SIZE,
+            density: None,
+        },
+        eps: DISK_EPS,
+        dt: 0.02,
+        n_steps: 1500,
+        snapshot_every: 25, // → ~61 frames
+        seed,
+        width,
+        height,
+        frame_percentile: 0.98,
+        info,
+    }
+}
+
+/// The scenario-independent pipeline: simulate the IC to snapshots, renderprep every
+/// snapshot to frame-data, frame one stable camera over the whole run, then render +
+/// grade each frame and (optionally) ffmpeg them into a movie.
+fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let snap_dir = out.join("snapshots");
+    let exr_dir = out.join("exr");
+    let frame_dir = out.join("frames");
+    for d in [&snap_dir, &exr_dir, &frame_dir] {
+        std::fs::create_dir_all(d)?;
+    }
+
+    // 1. Simulate → snapshots.
+    let mut state = s.state.clone();
+    let mut solver = galaxy_solvers::BarnesHut::new(G, s.eps, THETA);
     let mut integ = LeapfrogKdk::new();
     let bg = StaticBackground;
     let cfg = SimConfig {
-        dt: DT,
-        n_steps: N_STEPS,
-        snapshot_every: SNAPSHOT_EVERY,
-        softening: EPS,
-        rng_seed: SEED,
+        dt: s.dt,
+        n_steps: s.n_steps,
+        snapshot_every: s.snapshot_every,
+        softening: s.eps,
+        rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
     };
@@ -151,17 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         summary.steps, summary.snapshots_emitted, summary.final_time
     );
 
-    // 3. Renderprep: snapshot → frame-data. Scale brightness so a lone particle
-    //    peaks near PEAK_BRIGHTNESS and dense cores additively saturate to white.
-    let prep = PrepConfig {
-        palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
-        brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
-        size: SPLAT_SIZE,
-        // Density-aware brightening (DensityColoring) is available but left off here
-        // until its visual tuning is eyeballed against a rendered collision frame —
-        // None keeps the movie output bit-for-bit unchanged.
-        density: None,
-    };
+    // 2. Renderprep: snapshot → frame-data.
     let mut snaps: Vec<PathBuf> = std::fs::read_dir(&snap_dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "snap"))
@@ -169,27 +301,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     snaps.sort(); // snapshot_<step:08>.snap → lexicographic == step order
     let frames: Vec<_> = snaps
         .iter()
-        .map(|p| galaxy_io::read_file(p).map(|(_, s)| prepare(&s, &prep)))
+        .map(|p| galaxy_io::read_file(p).map(|(_, st)| prepare(&st, &s.prep)))
         .collect::<Result<Vec<_>, _>>()?;
     println!("prepared {} frames", frames.len());
 
-    // 4. One stable camera over the whole run, then render + grade each frame.
-    //    Centered on the origin (the zero-COM barycenter) and sized to a robust
-    //    percentile radius so a few escapers don't shrink the galaxies to dots.
+    // 3. One stable camera over the whole run (centered on the zero-COM barycenter,
+    //    sized to a robust percentile radius so a few escapers don't shrink the
+    //    galaxies to dots), then render + grade each frame.
     let rcfg = RenderConfig {
-        width: WIDTH,
-        height: HEIGHT,
+        width: s.width,
+        height: s.height,
         falloff: FALLOFF,
     };
-    let radius = framing_radius(&frames, FRAME_PERCENTILE).max(1e-3);
+    let radius = framing_radius(&frames, s.frame_percentile).max(1e-3);
     println!(
         "framing radius (p{:.0}) = {radius:.2}",
-        FRAME_PERCENTILE * 100.0
+        s.frame_percentile * 100.0
     );
     let camera = Camera::face_on(Vec3::splat(-radius), Vec3::splat(radius), rcfg.aspect());
     let gcfg = GradeConfig {
         exposure: EXPOSURE,
-        tonemap: ToneMap::AcesApprox,
+        tonemap: TONEMAP,
     };
     let renderer = Renderer::new()?;
 
@@ -215,7 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frame_dir.display()
     );
 
-    // 5. ffmpeg → movie (optional; leaves PNGs if ffmpeg is absent).
+    // 4. ffmpeg → movie (optional; leaves PNGs if ffmpeg is absent).
     encode_movie(&frame_dir, &out.join("movie.mp4"));
     Ok(())
 }

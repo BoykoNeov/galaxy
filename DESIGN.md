@@ -937,9 +937,32 @@ late-time positions — N-body is chaotic).
       one-mix-step seeding independence; determinism. Each halo's *dynamical* equilibrium is already
       gated by `nfw_truncated_stability.rs`, so no evolve-and-stay-put run here. Method: Toomre &
       Toomre 1972 (parabolic encounter); Kazantzidis et al. 2004 (halo–halo mergers).
-    [next: a cuspy-halo variant of `DiskInHalo` (needs the halo abstracted behind a trait);
-    wiring `NfwCollision` into `xtask` for a dark-matter-merger movie (IC landed; the movie is the
-    separate follow-up, mirroring how `DiskCollision` landed "IC only" before its movie)]
+  - **DM-merger movie (landed) — the M5e visualization payoff.** `NfwCollision` is now
+    wired into `galaxy-xtask` as the `dm` scenario (`cargo run -p galaxy-xtask --release dm`),
+    the dark-matter analogue of the M3 disk-collision movie. Two exponentially-truncated NFW
+    halos (M_vir 1.0 + 0.5, a **2:1 major merger**; r_vir 10 + 8) start on a **parabolic**
+    (Toomre) encounter at COM separation 40 (> r_vir₁+r_vir₂ so they begin on a clean
+    approach) with pericenter 3 (≪ r_vir, a **deep, fully-overlapping** passage). Particle
+    counts split 2:1 (12k + 6k) to give **equal particle mass** across both halos, so a
+    two-tone (warm-primary / cool-secondary) palette weights brightness uniformly and the
+    ρ∝r⁻¹ cusps additively saturate their cores to white. Verified over the full arc (dt=0.02
+    ≈ 0.016·t_dyn, T=320 ≈ 3·t_peri; t_peri≈104 by Barker's equation): two separated cusps →
+    deep pericenter → **bound** recession (post-peri separation ≈15 ≪ the initial 40 — a
+    point-mass parabolic orbit would return to 40; the deficit is orbital energy lost to
+    **dynamical friction** in the overlap) → second infall → coalescence into a **single
+    triaxial remnant** with mixed warm/cool populations and a diffuse stripped-debris halo.
+    This is the correct DM major-merger endpoint — two cuspy blobs merging, **not** thin
+    tidal tails (those need cold *disks*, cf. the `disk` scenario). Structural refactor: the
+    xtask pipeline (sim→prep→render→grade→ffmpeg) is now single-sourced over a `Scenario`
+    struct with `disk`/`dm` selected by the first CLI arg (the original disk movie is
+    unchanged — same constants + deterministic pipeline — now behind `disk` and the default);
+    `GALAXY_MOVIE_QUICK=1` gives a low-N,
+    low-res, same-physics preview for scenario iteration. The orchestrator stays a
+    **test-exempt I/O glue** binary: its pure helpers (`framing_radius`, `union_bounds`) are
+    unit-tested in `xtask/lib.rs` and every physics invariant (total mass, two progenitors,
+    zero-COM, exact rigid placement, internal equilibrium) is already gated in
+    `ic/tests/nfw_collision.rs` + `nfw_truncated_stability.rs`, so re-testing here is redundant.
+    [next: a cuspy-halo variant of `DiskInHalo` (needs the halo abstracted behind a trait)]
 
 ## Validation strategy
 

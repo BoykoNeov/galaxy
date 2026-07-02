@@ -143,6 +143,70 @@ fn realized_mass_profile_matches_truncated_cdf() {
     }
 }
 
+/// The independent oracle for the NFW velocities — the thing the M5b Eddington
+/// DF exists to get right, and which the mass-CDF and recentering tests do not
+/// touch. For an isotropic equilibrium the Jeans equation fixes the radial
+/// dispersion from the density and potential alone:
+///   σ_r²(r) = (1/ρ(r)) ∫_r^∞ ρ(r') G M(<r')/r'² dr',   ⟨v²⟩(r) = 3 σ_r²(r).
+/// The realized ⟨v²⟩ in radial shells (velocities follow the *untruncated* DF,
+/// so untruncated Jeans applies at r < r_vir) must match this closed-form
+/// prediction — a direct check of the rejection sampler's output distribution.
+#[test]
+fn realized_velocity_dispersion_matches_jeans() {
+    let p = Nfw::new(1.0, 1.0, 1.0, 10.0);
+    let n = 120_000;
+    let s = p.sample(n, 0x1EE7);
+
+    // σ_r²(r): log-spaced midpoint quadrature of the Jeans integral out to a
+    // radius where ρ M(<r)/r² is negligible (the integrand ∝ ln r / r⁵).
+    let sigma_r2 = |r: f64| -> f64 {
+        let r_hi = 1e4 * p.scale_radius;
+        let nq = 20_000;
+        let ratio = (r_hi / r).powf(1.0 / nq as f64);
+        let mut acc = 0.0;
+        let mut r0 = r;
+        for _ in 0..nq {
+            let r1 = r0 * ratio;
+            let rm = (r0 * r1).sqrt();
+            acc += p.density(rm) * p.g * p.enclosed_mass(rm) / (rm * rm) * (r1 - r0);
+            r0 = r1;
+        }
+        acc / p.density(r)
+    };
+
+    // Compare in shells well inside r_vir = 10 (velocities are edge-agnostic, but
+    // stay clear of the cusp and the truncation). Expected value is mass-weighted
+    // across the shell so it matches exactly what the realized mean estimates.
+    for &(rlo, rhi) in &[(0.8_f64, 1.2), (1.7, 2.3), (3.5, 4.5)] {
+        let mut sum_v2 = 0.0;
+        let mut cnt = 0usize;
+        for i in 0..s.len() {
+            let r = s.pos[i].length();
+            if r >= rlo && r < rhi {
+                sum_v2 += s.vel[i].length_squared();
+                cnt += 1;
+            }
+        }
+        let realized = sum_v2 / cnt as f64;
+
+        // Mass-weighted ⟨3σ_r²⟩ over the shell: ∫ ρ r² 3σ_r² dr / ∫ ρ r² dr.
+        let (mut num, mut den) = (0.0, 0.0);
+        let sub = 200;
+        for k in 0..sub {
+            let r = rlo + (rhi - rlo) * (k as f64 + 0.5) / sub as f64;
+            let w = p.density(r) * r * r;
+            num += w * 3.0 * sigma_r2(r);
+            den += w;
+        }
+        let expected = num / den;
+
+        assert!(
+            (realized - expected).abs() < 0.06 * expected,
+            "shell [{rlo},{rhi}): realized ⟨v²⟩={realized} vs 3σ_r²(Jeans)={expected} (n={cnt})"
+        );
+    }
+}
+
 #[test]
 fn sample_is_recentered_equal_mass_and_deterministic() {
     let p = Nfw::new(1.0, 1.0, 1.0, 10.0);

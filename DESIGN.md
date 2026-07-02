@@ -662,7 +662,8 @@ late-time positions — N-body is chaotic).
     (~5 CPU↔GPU sync points per force eval). The fuse uploads `bodies` once, keeps every
     intermediate (f32 Morton codes → sorted order → gathered leaves → Karras pointer tree → DFS
     skip-pointer flat form) in GPU storage buffers that flow pass-to-pass, and reads back only
-    the final `accel`: **one upload + one readback, `N−1` fewer sync points**.
+    the final `accel`: **one upload + one readback** — replacing the reference chain's ~5
+    readback/reupload round-trips (one per stage) with a single submit (≈4 fewer sync points).
     - **Reuse over rewrite; only two trivial kernels are new.** Every stage runs the **same f32
       WGSL** as the M4g chain — the `reduce`/`quantize`/`radix_pass`/`build_tree`/`aggregate`/
       `flatten_structure`/traversal kernels are shared verbatim (their `SHADER` consts made
@@ -693,7 +694,7 @@ late-time positions — N-body is chaotic).
       speedup.** M4h keeps state GPU-resident across the **stages of one force evaluation**;
       keeping it resident across **integrator steps** (which changes the
       `accelerations(&State)→acc` interface and touches the stepping loop) stays deferred (see
-      Remaining M4+). It removes `N−1` sync points — the *precondition* for that residency — but
+      Remaining M4+). It removes ~4 CPU↔GPU sync points — the *precondition* for that residency — but
       is **not** a throughput speedup: the single-invocation serial stages (sort, aggregate,
       flatten-structure) are unchanged and stay the bottleneck; their parallel refinements remain
       deferred.

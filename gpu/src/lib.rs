@@ -31,6 +31,14 @@
 //! the GPU by a stackless skip-pointer gather kernel — same f32/determinism story,
 //! now with the tree approximation controlled by θ. It opens the 10⁷ band O(N²) cannot;
 //! a GPU-resident build (Morton/LBVH) and TreePM/PM remain the deferred 10⁸ door.
+//!
+//! ## Testing caveat (Windows / wgpu)
+//! Each test binary here spins up many wgpu devices; running the *whole* crate suite
+//! (`cargo test -p galaxy-gpu`) back-to-back occasionally trips a **nondeterministic**
+//! `STATUS_ACCESS_VIOLATION` in the Vulkan driver on device teardown (observed once,
+//! gone on re-run — the failing binary and run-order both vary). It is a driver
+//! device-churn flake, **not** a solver bug: every binary passes when run on its own
+//! (`cargo test -p galaxy-gpu --test <name>`), which is the reliable way to run them.
 
 pub mod gpu_direct_sum;
 pub mod gpu_lbvh;

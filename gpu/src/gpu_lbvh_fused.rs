@@ -9,7 +9,8 @@
 //! gathered leaves → Karras pointer tree → DFS skip-pointer flat form — stays in GPU storage
 //! buffers that flow directly from one compute pass to the next (wgpu's automatic usage-tracked
 //! barriers order the passes), and only the final `accel` is read back. One upload + one
-//! readback; `N−1` fewer sync points than the reference chain.
+//! readback — replacing the reference chain's ~5 readback/reupload round-trips (one per stage:
+//! morton, sort, tree-build, flatten, traverse) with a single submit (≈4 fewer sync points).
 //!
 //! ## Same forces, same interface — a lossless refactor
 //! Every stage runs the **same f32 WGSL** as the M4g chain: the module-level `SHADER` consts of
@@ -27,8 +28,8 @@
 //! M4h keeps particle state on the GPU across the **stages of one force evaluation**. Keeping
 //! state GPU-resident across **integrator steps** (which would change the
 //! `accelerations(&State)→acc` interface and touch the stepping loop) is a *separate* deferred
-//! item — see DESIGN "Remaining M4+". This is a latency / architecture win (one submit, `N−1`
-//! fewer sync points), the precondition for that residency, **not** a throughput speedup: the
+//! item — see DESIGN "Remaining M4+". This is a latency / architecture win (one submit; ≈4
+//! fewer CPU↔GPU sync points), the precondition for that residency, **not** a throughput speedup: the
 //! single-invocation serial stages (sort, aggregate, flatten-structure) are unchanged and stay
 //! the bottleneck; their parallel refinements remain deferred.
 

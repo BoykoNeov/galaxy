@@ -9,6 +9,7 @@
 pub mod collision;
 pub mod disk;
 pub mod disk_collision;
+pub mod eddington;
 mod encounter;
 pub mod hernquist;
 pub mod orient;

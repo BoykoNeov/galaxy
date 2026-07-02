@@ -231,20 +231,24 @@ fn resident_energy_stays_bounded() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Gate 5 — upload/snapshot is a clean f32-narrowing identity at zero steps.
+// Gate 5 — upload/snapshot is a clean round-trip identity at zero steps.
 // ---------------------------------------------------------------------------------------------
 
-/// With no steps taken, snapshot must return exactly the uploaded state narrowed to f32 — proving
-/// upload and snapshot are inverse transfers with no hidden mutation.
+/// With no steps taken, snapshot must return the uploaded state with no hidden mutation. Because
+/// positions are now carried as a **double-single** (hi+lo f32 pair) — upload splits the f64 input
+/// into `hi + lo`, snapshot sums them back — the position round-trip recovers the input to ~f64
+/// precision (a *tighter* identity than the old f32 narrowing, not a looser one). Velocity is
+/// still a plain-f32 narrowing (DS is position-only), so it round-trips exactly to `narrow(v)`.
 #[test]
-fn zero_steps_round_trips_f32_narrowed_input() {
+fn zero_steps_round_trips_input() {
     let s0 = cluster(2, 300);
     let mut res = resident();
     res.upload(&s0);
     let out = res.snapshot();
 
     for (i, (&p, &v)) in s0.pos.iter().zip(&s0.vel).enumerate() {
-        assert_eq!(out.pos[i], narrow(p), "pos[{i}] not a clean f32 narrowing");
+        let dp = (out.pos[i] - p).length();
+        assert!(dp < 1e-9, "pos[{i}] round-trip error {dp:e} exceeds f64-DS tol");
         assert_eq!(out.vel[i], narrow(v), "vel[{i}] not a clean f32 narrowing");
     }
     assert_eq!(out.mass.len(), s0.mass.len());
@@ -333,5 +337,50 @@ fn resident_time_advances() {
         (res.time() - 17.0 * DT).abs() < 1e-12,
         "time should be 17·dt, got {}",
         res.time()
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 9 — double-single position accumulation tracks the exact drift (M4j).
+// ---------------------------------------------------------------------------------------------
+
+/// The precision payoff: carrying `pos += vel·dt` as a **double-single** (hi+lo f32 pair, with a
+/// compensated two-sum every step) tracks the exact real drift far tighter than a plain-f32
+/// running sum — which loses the small per-step increment into a growing coordinate's ulp (DESIGN
+/// M4i's "updates below ~1e-6 of a coordinate's magnitude are lost"). Isolated with a single
+/// force-free particle: accel ≡ 0 (the n==1 branch clears it), velocity is constant, so this
+/// measures the position accumulator *alone* — no tree, no f32-force noise, fully deterministic.
+///
+/// Large f32-exact coordinates (`x₀ = ±1024/512`) put the per-step increment near a single ulp,
+/// so the f32 loss shows in only K=10⁴ steps (keeping the test's per-step submits cheap) instead
+/// of the ~10⁶ a cluster-scale coordinate would need. Reference is the exact f64 sum
+/// `x₀ + K·fl32(v·dt)` (the device increment, matched bit-for-bit). **Measured:** DS lands at
+/// ~1e-8; a plain-f32 running sum drifts to ~3.5e-1 here — TOL 1e-5 sits deep in the gap,
+/// discriminating both ways (green passes with ~1000× headroom; the old f32 path blows past it).
+#[test]
+fn resident_double_single_position_tracks_exact_drift() {
+    // f32-exact coordinates ⇒ recovered x₀ == x₀ and the reference sum is unambiguous.
+    let x0 = DVec3::new(1024.0, -1024.0, 512.0);
+    let v0 = DVec3::new(1.0, -1.0, 0.5);
+    const K: u64 = 10_000;
+    const TOL: f64 = 1e-5;
+
+    let single = State::from_phase_space(vec![x0], vec![v0], vec![1.0]);
+    let mut res = resident();
+    res.upload(&single);
+    res.step_many(DT, K);
+    let s = res.snapshot();
+
+    // Per-step device increment: fl32(v·dt) in f32, exactly the shader's `vel·dt`.
+    let d = DVec3::new(
+        ((v0.x as f32) * (DT as f32)) as f64,
+        ((v0.y as f32) * (DT as f32)) as f64,
+        ((v0.z as f32) * (DT as f32)) as f64,
+    );
+    let expect = x0 + d * (K as f64);
+    let err = (s.pos[0] - expect).length();
+    assert!(
+        err < TOL,
+        "double-single drift error {err:e} exceeds {TOL:e} (a plain-f32 running sum would)"
     );
 }

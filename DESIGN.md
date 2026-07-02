@@ -66,7 +66,7 @@ galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
 ├─ solvers/      DirectSum (oracle), BarnesHut (workhorse), FlatTree (stackless octree for GPU) (DONE)   [later: ParticleMesh, TreePM]
 ├─ gpu/          GpuDirectSum — O(N²) direct sum; GpuTree — O(N log N) Barnes-Hut (CPU build + GPU stackless traverse); GpuLbvh / GpuLbvhFused — end-to-end GPU-resident Morton LBVH (multi-device reference / single-device fuse) (all f32, wgpu compute) (DONE) [later: cross-step state residency / TreePM / PM]
-├─ ic/           Plummer sphere, Hernquist + NFW cuspy halos (closed-form + numerical-Eddington DFs), exp-disk-in-halo (cold + warm Toomre-Q), two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [later: cosmological ICs]
+├─ ic/           Plummer sphere, Hernquist + NFW cuspy halos (closed-form + numerical-Eddington DFs), exp-disk-in-halo (cold + warm Toomre-Q), two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation + NFW–NFW) (DONE) [later: cosmological ICs]
 ├─ io/           snapshot read/write: Rust-native versioned binary (DONE) [HDF5 behind a `validation` feature: later]
 ├─ sim/          headless engine: solver+integrator+IC+stepping loop → snapshots (DONE) [checkpoint/restart: later]
 ├─ renderprep/   snapshots → frame-data; spatial-tree kNN for local density/dispersion
@@ -907,8 +907,39 @@ late-time positions — N-body is chaotic).
       the numerical truncated potential); DF strictly positive (no clamp); realized truncated
       mass-CDF; realized **Jeans** dispersion (self-consistent ⇒ tight 6%); recentered / equal-mass
       / deterministic; plus the evolve-and-stay-put stability run. Method: Springel & White 1999.
+  - **NFW–NFW collision IC (landed, M5e) — the demoable payoff:** `ic::NfwCollision` puts two
+    exponentially-truncated NFW halos ([`TruncatedNfw`], M5d) on a relative two-body Kepler
+    encounter. An NFW halo is spherical, isotropic and non-rotating, so this is the direct
+    analogue of the Plummer [`Collision`] (two spheres, two progenitors, **no** spin-orbit
+    orientation and **no** multi-species split — unlike the rotating [`DiskCollision`]). It
+    delegates the orbital placement to the shared `encounter` module, so the one set of
+    osculating-elements tests already guards this conic too. Two progenitors (halo1=0, halo2=1),
+    contiguous ids, global zero-COM/zero-momentum frame, galaxy 1's particles first.
+    - **The load-bearing detail: orbit on the FULL mass, not M_vir.** `TruncatedNfw::sample`
+      places particles summing to `total_mass()` (virial + exponential skirt), so the two-body
+      `mu` and the COM split use `total_mass()` — the mass actually present — not the "canonical"
+      `M_vir`. Setting the orbit for `M_vir` would leave the realized velocities wrong for the
+      intended conic (the final recenter would hide the momentum inconsistency but not fix it).
+    - **Why the M5d truncated halo, not the hard-cut M5c `Nfw`.** A collision is exactly the
+      regime the M5c caveat bites: M5c samples velocities from the *untruncated* DF, so its outer
+      halo re-virializes — and the outer halo is the material tidally stripped into the bridges/
+      debris the demo exists to show. M5d's self-consistent (ρ, Ψ) makes those outskirts a genuine
+      equilibrium before the encounter perturbs them.
+    - **Gates (all t=0 — a collision is meant to move):** the shared conic recovered from the
+      **combined** `total_mass()` (bound/parabolic/hyperbolic; eccentricity-vector → +x pericenter;
+      COM split into the zero-momentum frame); assembly (count, total mass = sum of full masses,
+      two-progenitor partition, contiguous unique ids, global zero-COM/zero-momentum frame); each
+      halo keeping its truncated-NFW profile (median radius about its own displaced COM vs the
+      half-mass radius from inverting `enclosed_mass`) and internal dispersion (mean-subtracted
+      ⟨v²⟩ vs an isolated realization — the bulk boost must not leak in); **exact** rigid placement
+      (each halo is internally recentered by `sample` *before* placement, so its realized COM/bulk
+      velocity track the requested orbital state to roundoff, 1e-9 — not merely to sampling noise);
+      one-mix-step seeding independence; determinism. Each halo's *dynamical* equilibrium is already
+      gated by `nfw_truncated_stability.rs`, so no evolve-and-stay-put run here. Method: Toomre &
+      Toomre 1972 (parabolic encounter); Kazantzidis et al. 2004 (halo–halo mergers).
     [next: a cuspy-halo variant of `DiskInHalo` (needs the halo abstracted behind a trait);
-    NFW–NFW collisions (the demoable payoff)]
+    wiring `NfwCollision` into `xtask` for a dark-matter-merger movie (IC landed; the movie is the
+    separate follow-up, mirroring how `DiskCollision` landed "IC only" before its movie)]
 
 ## Validation strategy
 

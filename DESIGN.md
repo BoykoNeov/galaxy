@@ -65,7 +65,7 @@ renderer.
 galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
 ├─ solvers/      DirectSum (oracle), BarnesHut (workhorse), FlatTree (stackless octree for GPU) (DONE)   [later: ParticleMesh, TreePM]
-├─ gpu/          GpuDirectSum — O(N²) direct sum; GpuTree — O(N log N) Barnes-Hut (CPU build + GPU stackless traverse) (both f32, wgpu compute) (DONE) [later: GPU-resident build (Morton/LBVH) / TreePM]
+├─ gpu/          GpuDirectSum — O(N²) direct sum; GpuTree — O(N log N) Barnes-Hut (CPU build + GPU stackless traverse); GpuLbvh / GpuLbvhFused — end-to-end GPU-resident Morton LBVH (multi-device reference / single-device fuse) (all f32, wgpu compute) (DONE) [later: cross-step state residency / TreePM / PM]
 ├─ ic/           Plummer sphere, exp-disk-in-halo (cold + warm Toomre-Q), two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [next: Hernquist/NFW halo] [later: cosmological ICs]
 ├─ io/           snapshot read/write: Rust-native versioned binary (DONE) [HDF5 behind a `validation` feature: later]
 ├─ sim/          headless engine: solver+integrator+IC+stepping loop → snapshots (DONE) [checkpoint/restart: later]
@@ -649,14 +649,64 @@ late-time positions — N-body is chaotic).
       exists, then shows GpuLbvh at θ→0 *still* matches `DirectSum` on exactly those seeds — the
       straddle is thereby exercised **and** survived, not merely present in the code path.
       GPU-gated, fail-loud.
-    - **Scope: reference-grade composition; GPU-resident fuse deferred.** Each stage owns its
-      own wgpu device and the pointer tree / flat form round-trips through host memory between
-      stages (the M4d/M4e/M4f readback pattern), so a `GpuLbvh` holds several devices and
-      re-uploads between stages. The **single-device, GPU-resident fuse** (no host round-trips,
-      state kept on the GPU across steps) is the named scale refinement.
-  - **Remaining M4+:** keeping particle *state* GPU-resident across steps (the GPU-resident fuse
-    above, which changes the `accelerations(&State)→acc` interface) / PM / TreePM / gas (SPH) /
-    cosmology (Friedmann Background + periodic solver + IC pipeline).
+    - **Scope: reference-grade composition; single-device fuse deferred → landed as M4h.** Each
+      stage owns its own wgpu device and the pointer tree / flat form round-trips through host
+      memory between stages (the M4d/M4e/M4f readback pattern), so a `GpuLbvh` holds several
+      devices and re-uploads between stages. The **single-device fuse** (no host round-trips
+      between stages, one submit) is the named scale refinement — **landed as M4h below**;
+      keeping state GPU-resident across *integrator steps* remains deferred (Remaining M4+).
+  - **GpuLbvhFused — the single-device fuse of the whole M4c–M4g pipeline (landed, M4h):**
+    `galaxy_gpu::GpuLbvhFused` runs the entire LBVH build+traverse on **one wgpu device in one
+    submit**, where the M4g `GpuLbvh` is the *reference-grade composition* holding five separate
+    devices and round-tripping the pointer tree / flat form through host memory between stages
+    (~5 CPU↔GPU sync points per force eval). The fuse uploads `bodies` once, keeps every
+    intermediate (f32 Morton codes → sorted order → gathered leaves → Karras pointer tree → DFS
+    skip-pointer flat form) in GPU storage buffers that flow pass-to-pass, and reads back only
+    the final `accel`: **one upload + one readback, `N−1` fewer sync points**.
+    - **Reuse over rewrite; only two trivial kernels are new.** Every stage runs the **same f32
+      WGSL** as the M4g chain — the `reduce`/`quantize`/`radix_pass`/`build_tree`/`aggregate`/
+      `flatten_structure`/traversal kernels are shared verbatim (their `SHADER` consts made
+      `pub(crate)`, one source of truth). The only new code is a `gather`
+      (`sorted_leaf[k] = bodies[order[k]]` — the host's between-stage gather in the reference)
+      and a geometry kernel that writes `center`/`half`/`delta`/`com`/`mass` straight into the
+      **traversal's** buffer packing (deleting the reference's host repack). The complex
+      traversal kernel — the one most likely to hide a bug — is byte-for-byte the M4g kernel.
+    - **Cross-pass dependencies ride wgpu's automatic barriers.** Each stage is its own compute
+      pass in one encoder; the read-after-write hazards (quantize→sort→gather→build→aggregate→
+      flatten→traverse) are ordered by wgpu's usage tracking — the same in-encoder multi-pass
+      dependency the M4c/M4e/M4f stages already relied on, now spanning the whole pipeline.
+      Buffer aliases fall out naturally: morton writes codes into the sort's key buffer A (the
+      four *even* radix passes land the result back in A), and `slot_meta`
+      (`[next, body_start, body_count, unified]`) doubles as the traversal's `node_meta`
+      (w=unified ignored). Only the host-touched buffers (`bodies`/`idx_a`/`parent` uploaded,
+      `counter` cleared, `accel`+`readback`) are stored; the intermediates are retained by the
+      bind groups that reference them (grow rebuilds the set, dropping the old — no leak).
+    - **Faithful-refactor gate: bit-for-bit, not a tolerance.** Because the fuse runs identical
+      f32 kernels on identical inputs on a **given device** (no float `atomicAdd`, no
+      order-dependent reduction), `GpuLbvhFused` reproduces the reference `GpuLbvh` forces
+      **exactly** — measured `max |Δ| == 0` across θ∈{1e-6, 0.5} × N∈{128, 256, 2000} × 8 seeds
+      (both the θ→0 leaf-direct-sum path and the finite-θ monopole-acceptance path, into the
+      straddle regime). That is a *stronger* statement than the same-device determinism gates (a
+      solver vs itself): two different device/pipeline setups on the same adapter agree to the
+      bit. Same-device only; cross-device (FMA/rounding) equality is not claimed.
+    - **Scope: this fuses the *build pipeline*, not cross-step residency — a latency win, not a
+      speedup.** M4h keeps state GPU-resident across the **stages of one force evaluation**;
+      keeping it resident across **integrator steps** (which changes the
+      `accelerations(&State)→acc` interface and touches the stepping loop) stays deferred (see
+      Remaining M4+). It removes `N−1` sync points — the *precondition* for that residency — but
+      is **not** a throughput speedup: the single-invocation serial stages (sort, aggregate,
+      flatten-structure) are unchanged and stay the bottleneck; their parallel refinements remain
+      deferred.
+    - **Gates:** the full M4g physics suite replicated for `GpuLbvhFused` (θ→0 vs the f64
+      `DirectSum` oracle to the f32 floor; finite-θ bounded + grows; tracks CPU `Lbvh` at same θ;
+      momentum flux at θ→0; same-device bit-determinism; empty/single; and the real
+      topology-straddle survival at N=20000) **plus** the bit-for-bit faithful-refactor gate vs
+      the reference `GpuLbvh`. GPU-gated, fail-loud.
+  - **Remaining M4+:** keeping particle *state* GPU-resident across **integrator steps** — M4h
+    fused the build pipeline onto one device but still uploads state and reads back accel each
+    `accelerations` call; true cross-step residency changes the `accelerations(&State)→acc`
+    interface and touches the stepping loop / PM / TreePM / gas (SPH) / cosmology (Friedmann
+    Background + periodic solver + IC pipeline).
 
 ## Validation strategy
 

@@ -10,11 +10,13 @@ pub mod collision;
 pub mod disk;
 pub mod disk_collision;
 mod encounter;
+pub mod hernquist;
 pub mod orient;
 pub mod plummer;
 
 pub use collision::Collision;
 pub use disk::ExponentialDisk;
 pub use disk_collision::DiskCollision;
+pub use hernquist::Hernquist;
 pub use orient::Orientation;
 pub use plummer::Plummer;

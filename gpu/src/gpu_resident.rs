@@ -201,9 +201,23 @@ pub struct GpuResidentLeapfrog {
     n: usize,
     time: f64,
     mass: Vec<f64>,
+    // Count of `queue.submit`s issued over this stepper's life (prime + steps + snapshots). The
+    // batching gate reads this as a before/after delta to prove `step_many` coalesces submits.
+    submits: u64,
 }
 
 impl GpuResidentLeapfrog {
+    /// Max resident KDK steps [`step_many`](Self::step_many) encodes into a **single submit**
+    /// before flushing. Batching drops per-submit overhead (the named M4i throughput follow-up —
+    /// M4i removed the per-step *latency*, this removes the per-step *submit*), but a submit that
+    /// runs too long trips the OS GPU watchdog (Windows TDR / the Vulkan device-loss timeout the
+    /// M4j path is verified on), so the batch is capped rather than unbounded. The cap is a
+    /// **fixed step count**, hence N-blind: per-step GPU cost scales with N, so a large-N sim could
+    /// still approach the watchdog at a cap safe for these small-N gates — sizing it per-N against
+    /// a device timing budget is future work. 64 already collapses the K=10⁴ drift gate from 10⁴
+    /// submits to ~157 (a 64× overhead drop); returns diminish past that, so it stays conservative.
+    pub const MAX_BATCH: u64 = 64;
+
     /// Bring up the resident compute device + every pipeline (the shared [`FusedCore`] build/
     /// traverse plus the new kick/drift/reset kernels). Returns a typed [`GpuError`] on adapter/
     /// device failure.
@@ -298,6 +312,7 @@ impl GpuResidentLeapfrog {
             n: 0,
             time: 0.0,
             mass: Vec::new(),
+            submits: 0,
         })
     }
 
@@ -505,6 +520,7 @@ impl GpuResidentLeapfrog {
             });
         self.encode_force(&mut enc);
         self.core.queue.submit([enc.finish()]);
+        self.submits += 1;
     }
 
     /// Advance one resident KDK step by `dt`: kick½ · drift · (reset+build+traverse into `acc`) ·
@@ -532,6 +548,7 @@ impl GpuResidentLeapfrog {
         // Kick½ with a(xₙ₊₁).
         self.per_particle_pass(&mut enc, "resident-kick-close", &self.kick_pl, &res.kick_bg);
         self.core.queue.submit([enc.finish()]);
+        self.submits += 1;
 
         self.time += dt;
     }
@@ -568,6 +585,7 @@ impl GpuResidentLeapfrog {
             enc.copy_buffer_to_buffer(&res.pos_lo, 0, &res.pos_lo_readback, 0, bytes);
             enc.copy_buffer_to_buffer(&res.vel, 0, &res.vel_readback, 0, bytes);
             self.core.queue.submit([enc.finish()]);
+            self.submits += 1;
 
             // Recombine the double-single: pos = (f64)hi + (f64)lo. Both are f32, so the sum is
             // exact in f64 — this is where the accumulated sub-f32 precision reaches the host.
@@ -615,6 +633,14 @@ impl GpuResidentLeapfrog {
     /// Simulation time after the steps taken so far.
     pub fn time(&self) -> f64 {
         self.time
+    }
+
+    /// Total `queue.submit`s issued over this stepper's life (the prime in [`upload`](Self::upload),
+    /// every [`step`](Self::step)/[`step_many`](Self::step_many) flush, and each
+    /// [`snapshot`](Self::snapshot)). Exposed so the batching gate can assert `step_many` coalesces
+    /// its steps into `⌈steps/MAX_BATCH⌉` submits rather than one-per-step.
+    pub fn submits(&self) -> u64 {
+        self.submits
     }
 
     /// Number of resident particles (0 before the first [`upload`](Self::upload)).

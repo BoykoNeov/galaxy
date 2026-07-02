@@ -403,3 +403,47 @@ fn resident_double_single_position_tracks_exact_drift() {
         "double-single drift error {err:e} exceeds {TOL:e} (a plain-f32 running sum would)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Gate 10 — throughput: step_many coalesces steps into ⌈K/MAX_BATCH⌉ submits (M4k).
+// ---------------------------------------------------------------------------------------------
+
+/// `step_many` must batch its steps into **one encoder/submit per `MAX_BATCH`-step chunk** —
+/// dropping per-submit overhead (the named M4i throughput follow-up: M4i removed the per-step
+/// *latency*, this removes the per-step *submit*) — rather than one submit per step. The submit
+/// count is the *only* thing batching changes that is observable: the trajectory is bit-identical
+/// (batching regroups encoders, it does not reorder the kick·drift·force·kick arithmetic), so
+/// every other gate re-validates correctness under batching for free — this gate pins the count.
+///
+/// Read as a **before/after delta** so it is robust to the prime submit (`upload`) and the
+/// snapshot submit surrounding the measured `step_many`. The cap is bounded to keep any single
+/// submit under the OS GPU watchdog (see [`GpuResidentLeapfrog::MAX_BATCH`]).
+#[test]
+fn step_many_coalesces_into_bounded_submits() {
+    const N: usize = 256;
+    let s0 = cluster(13, N);
+    let mut res = resident();
+    res.upload(&s0);
+
+    // K == MAX_BATCH: the whole run is a single submit.
+    let before = res.submits();
+    res.step_many(DT, GpuResidentLeapfrog::MAX_BATCH);
+    let one_chunk = res.submits() - before;
+    assert_eq!(
+        one_chunk, 1,
+        "MAX_BATCH steps must coalesce into ONE submit, got {one_chunk}"
+    );
+
+    // K > MAX_BATCH: chunked into ⌈K/MAX_BATCH⌉ submits (2·MAX_BATCH + 1 ⇒ 3 chunks).
+    let k = 2 * GpuResidentLeapfrog::MAX_BATCH + 1;
+    let before = res.submits();
+    res.step_many(DT, k);
+    let got = res.submits() - before;
+    let want = k.div_ceil(GpuResidentLeapfrog::MAX_BATCH);
+    assert_eq!(
+        got,
+        want,
+        "expected ⌈{k}/{}⌉ = {want} submits, got {got}",
+        GpuResidentLeapfrog::MAX_BATCH
+    );
+}

@@ -104,7 +104,7 @@ fn df_integrates_to_density() {
     // Radii chosen so Ψ(r) = GM/(r+a) stays clear of the ℰ→GM/a divergence.
     for &r in &[0.5_f64, 1.0, 2.0, 4.0] {
         let psi = -p.potential(r); // relative potential Ψ = GM/(r+a) > 0
-        // Midpoint rule over ℰ ∈ (0, Ψ); integrand vanishes at both ends.
+                                   // Midpoint rule over ℰ ∈ (0, Ψ); integrand vanishes at both ends.
         let n = 20_000;
         let de = psi / n as f64;
         let mut acc = 0.0;
@@ -125,7 +125,7 @@ fn df_integrates_to_density() {
 fn df_is_nonnegative_and_vanishes_off_support() {
     let p = Hernquist::new(1.0, 1.0, 1.0);
     let psi_max = -p.potential(0.0); // GM/a, the deepest binding energy
-    // Zero (or numerically non-positive contribution) outside the support.
+                                     // Zero (or numerically non-positive contribution) outside the support.
     assert_eq!(p.df(0.0), 0.0, "f(0) should be 0");
     assert_eq!(p.df(-0.3), 0.0, "f(ℰ<0) should be 0");
     // Strictly positive and finite on the interior of the support.

@@ -12,6 +12,7 @@
 //!   - Plummer: f(ℰ) ∝ ℰ^(7/2) exactly, so the machinery's output divided by
 //!     ℰ^(7/2) must be constant — an independent check of the SHAPE across the
 //!     whole energy range.
+//!
 //! Once it reproduces both, it is trustworthy for NFW, which has no closed form.
 
 use galaxy_ic::eddington::{EddingtonDf, SphericalModel};

@@ -89,26 +89,21 @@ fn half_mass_radius(t: &TruncatedNfw) -> f64 {
     0.5 * (lo + hi)
 }
 
-/// Mean-subtracted internal ⟨|v|²⟩ of a (sub-)state, about its own mass-weighted
-/// mean velocity — the internal kinetic temperature with any bulk drift removed.
-fn internal_mean_v2(s: &State) -> f64 {
-    let vbar = s.vel.iter().fold(DVec3::ZERO, |a, v| a + *v) / s.len() as f64;
-    s.vel
-        .iter()
-        .map(|v| (*v - vbar).length_squared())
-        .sum::<f64>()
-        / s.len() as f64
+/// Mass-weighted mean velocity of a (sub-)state.
+fn mean_velocity(s: &State) -> DVec3 {
+    s.vel.iter().fold(DVec3::ZERO, |a, v| a + *v) / s.len() as f64
 }
 
 /// Canonical asymmetric encounter: two *different* truncated-NFW halos (so the COM
-/// split and orbital placement are genuinely asymmetric), started well outside both
+/// split and orbital placement are genuinely asymmetric), started outside both
 /// virial radii on a parabolic (Toomre) approach. Both use the positivity-safe
 /// r_d = 0.3 r_vir of the M5d sampling test.
 fn fiducial() -> NfwCollision {
     let g1 = TruncatedNfw::new(Nfw::new(1.0, 1.0, 1.0, 10.0), 3.0); // r_vir = 10, r_d = 3
     let g2 = TruncatedNfw::new(Nfw::new(1.0, 0.6, 0.8, 10.0), 2.4); // r_vir = 8,  r_d = 2.4
-                                                                    // Parabolic, pericenter 3, started at separation 30 (> r_vir1 + r_vir2 = 18, so
-                                                                    // the two halos begin cleanly separated — a sensible fly-by demo).
+                                                                    // Parabolic, pericenter 3, started at separation 30, outside the two virial
+                                                                    // radii (r_vir1 + r_vir2 = 18) — a sensible fly-by demo. (The negligible-mass
+                                                                    // exponential skirts formally extend further and do interpenetrate at t=0.)
     NfwCollision::new(g1, g2, 1.0, 3.0, 30.0)
 }
 
@@ -269,38 +264,57 @@ fn progenitors_and_ids_partition_cleanly() {
 }
 
 #[test]
-fn each_galaxy_keeps_its_profile_and_internal_kinematics() {
+fn each_galaxy_keeps_its_truncated_nfw_profile_about_its_own_com() {
     let (c, s) = sample_default();
 
-    for (prog, model, ref_seed) in [
-        (Progenitor(0), c.galaxy1, 0xA1A1_u64),
-        (Progenitor(1), c.galaxy2, 0xB2B2_u64),
-    ] {
+    // For BOTH halos: the rigid placement preserves internal structure, so the median
+    // radius about the halo's own (displaced) COM matches the analytic half-mass
+    // radius — an independent oracle from inverting M(<r), never a realization.
+    for (prog, model) in [(Progenitor(0), c.galaxy1), (Progenitor(1), c.galaxy2)] {
         let gal = extract_galaxy(&s, prog);
-
-        // (a) Positions: the rigid placement preserves internal structure, so the
-        // median radius about the galaxy's own (displaced) COM matches the analytic
-        // half-mass radius (an independent oracle from inverting M(<r)).
         let median = median_radius_about_com(&gal);
         let rh = half_mass_radius(&model);
         assert!(
             (median - rh).abs() < 0.05 * rh,
             "progenitor {prog:?}: median radius {median} vs r_h {rh}"
         );
-
-        // (b) Velocities: the bulk orbital boost must not leak into the internal
-        // dispersion. The mean-subtracted internal ⟨v²⟩ must match that of an
-        // independently-seeded isolated realization of the same model (statistical
-        // agreement — a leaked bulk velocity would inflate it by ~|v_bulk|²).
-        let internal_v2 = internal_mean_v2(&gal);
-        let iso = model.sample(gal.len(), ref_seed);
-        let iso_v2 = internal_mean_v2(&iso);
-        assert!(
-            (internal_v2 - iso_v2).abs() < 0.06 * iso_v2,
-            "progenitor {prog:?}: internal ⟨v²⟩ {internal_v2} vs isolated {iso_v2} \
-             (bulk velocity leaked in?)"
-        );
     }
+}
+
+#[test]
+fn placement_is_an_exact_rigid_transform_of_the_body_frame_draw() {
+    // Galaxy 1 draws from the *raw* `SEED`, so `galaxy1.sample(N1, SEED)` reproduces
+    // its pre-placement body-frame draw bit-for-bit (the sampler is deterministic).
+    // Placement only *adds a uniform vector* to that draw — the halo's COM boost
+    // (r1, v1) plus the collision's single global recenter — so subtracting galaxy
+    // 1's own mean must recover the body-frame draw to roundoff. This is the exact
+    // rigid-placement identity: it pins that no per-particle boost, index scramble,
+    // non-uniform scaling, or order corruption crept in. (A mean-subtracted *statistic*
+    // like the internal dispersion cannot see this — it is invariant to the uniform
+    // boost, the very thing we must check is uniform.)
+    let (c, s) = sample_default();
+    let gal1 = extract_galaxy(&s, Progenitor(0));
+    let iso = c.galaxy1.sample(N1, SEED); // identical body-frame draw
+    assert_eq!(gal1.len(), N1);
+
+    // Subtract each set's own COM / mean velocity, then compare particle-for-particle
+    // (extraction preserves order, and both sequences are the same underlying draw).
+    let (pbar_g, vbar_g) = (diagnostics::center_of_mass(&gal1), mean_velocity(&gal1));
+    let (pbar_i, vbar_i) = (diagnostics::center_of_mass(&iso), mean_velocity(&iso));
+    let mut max_dp = 0.0_f64;
+    let mut max_dv = 0.0_f64;
+    for i in 0..N1 {
+        max_dp = max_dp.max(((gal1.pos[i] - pbar_g) - (iso.pos[i] - pbar_i)).length());
+        max_dv = max_dv.max(((gal1.vel[i] - vbar_g) - (iso.vel[i] - vbar_i)).length());
+    }
+    assert!(
+        max_dp < 1e-9,
+        "positions not an exact rigid transform of the body-frame draw: max Δ={max_dp}"
+    );
+    assert!(
+        max_dv < 1e-9,
+        "velocities not an exact rigid transform of the body-frame draw: max Δ={max_dv}"
+    );
 }
 
 #[test]

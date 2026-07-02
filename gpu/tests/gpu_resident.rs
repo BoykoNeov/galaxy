@@ -135,8 +135,10 @@ fn resident_matches_roundtrip_bit_for_bit() {
 fn resident_tracks_host_driven_leapfrog_within_f32_tol() {
     const N: usize = 512;
     const K: u64 = 30;
-    // Positions are O(1); f32 KDK vs f64 KDK over 30 steps stays well under this.
-    const TOL: f64 = 2e-3;
+    // Measured f32-GPU-KDK vs f64-host-KDK over 30 steps: dp≈5e-7, dv≈1.5e-5 (velocity is the
+    // larger, as the kick accumulates the f32 force each half-step). 1e-4 keeps ~7× headroom yet
+    // still discriminates — a real KDK divergence would blow past it.
+    const TOL: f64 = 1e-4;
     let s0 = cluster(3, N);
 
     // Reference: authoritative f64 KDK driving the fused f32 force solver.

@@ -875,8 +875,40 @@ late-time positions — N-body is chaotic).
     machinery exercised on a model with no analytic DF); the stability run then confirms the
     *assembled* truncated IC holds together (r_h stable under DirectSum + BarnesHut), with
     tolerances budgeting the untruncated-DF edge re-virialization. Method + truncation follow
-    Kazantzidis et al. 2004. [next: exponentially-truncated NFW (Springel & White 1999);
-    a cuspy-halo variant of `DiskInHalo`; NFW–NFW collisions]
+    Kazantzidis et al. 2004.
+  - **Exponentially-truncated NFW — self-consistent (landed, M5d):** `ic::TruncatedNfw`, the
+    Springel & White (1999) smooth truncation of the M5c halo: NFW inside r_vir, continued beyond
+    it by ρ(r) = ρ_NFW(r_vir)·(r/r_vir)^ε·exp(−(r−r_vir)/r_d). The **decay length r_d is the free
+    knob**; the exponent ε is *fixed by continuity of the logarithmic slope* at r_vir —
+    ε = r_vir/r_d − (r_s+3r_vir)/(r_s+r_vir) — so both ρ and dρ/dr are continuous there (gated) and
+    the total mass is now **finite** (a modest skirt beyond M_vir). This is the **self-consistent
+    (Path A)** upgrade over M5c: velocities come from the Eddington DF of the **truncated** (ρ, Ψ)
+    pair, not the untruncated potential, so positions and velocities share one potential and the
+    M5c "outer halo re-virializes because the DF is untruncated" caveat is **gone** (the stability
+    run holds the 90% Lagrangian radius to a *tighter* band than M5c, 0.18 vs 0.25). Why smooth-cut
+    at all: a hard edge has no well-behaved equilibrium DF; a smooth one does.
+    - **The numerical potential is the new machinery.** The truncated potential has no closed form
+      (the outer skirt integral is incomplete-gamma-like), so Ψ(r) = G M(<r)/r + 4πG ∫_r^∞ ρ s ds is
+      semi-analytic: **closed-form for r ≤ r_vir** (NFW mass + the closed ∫ρ_NFW s ds + a *constant*
+      skirt tail whose r-derivative vanishes), numerical only in the outer skirt. The skirt
+      quadrature uses a **fixed** Simpson panel count (not r-dependent) so its error is *smooth in
+      the integration limit* — critical, because Eddington takes dρ/dΨ by finite difference and a
+      node-stepping (non-smooth) error would be noise-amplified into a **negative, silently-clamped
+      DF**. A dedicated gate asserts f(ℰ) > 0 strictly *without* hitting the ≥0 clamp (a known
+      failure mode: too-sharp an r_d drives f negative; r_d = 0.3 r_vir is positivity-safe).
+    - **Counterintuitive but correct:** the truncated central potential is *shallower* than the
+      untruncated NFW (a gated Path-A fingerprint) — Ψ(0) = 4πG∫₀^∞ ρ s ds is a *convergent*
+      integral even for NFW, and the exp skirt carries **less** ∫ρ s ds than the r⁻³ tail it
+      replaces (equal slope at r_vir, then steepening as −1/r_d). The skirt still *adds* mass versus
+      the M5c hard cut; the two facts weight radius differently (∫ρ s² vs ∫ρ s).
+    - **Validation ladder (all closed-form / hand-integral oracles):** ε = slope-continuity value;
+      ρ and log-slope continuous at r_vir; skirt matches its closed form; dM/dr = 4πr²ρ across both
+      regions; finite total mass; **Eddington recovers the truncated density** (the M5b machinery on
+      the numerical truncated potential); DF strictly positive (no clamp); realized truncated
+      mass-CDF; realized **Jeans** dispersion (self-consistent ⇒ tight 6%); recentered / equal-mass
+      / deterministic; plus the evolve-and-stay-put stability run. Method: Springel & White 1999.
+    [next: a cuspy-halo variant of `DiskInHalo` (needs the halo abstracted behind a trait);
+    NFW–NFW collisions (the demoable payoff)]
 
 ## Validation strategy
 

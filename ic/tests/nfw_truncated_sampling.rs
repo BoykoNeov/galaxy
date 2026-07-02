@@ -142,7 +142,10 @@ fn eddington_df_recovers_truncated_density() {
     // potential is numerical (no closed form), so this exercises the M5b machinery
     // on a self-consistently truncated potential.
     let psi_max = t.relative_potential(0.0);
-    assert!(psi_max.is_finite() && psi_max > 0.0, "Ψ(0) must be finite > 0");
+    assert!(
+        psi_max.is_finite() && psi_max > 0.0,
+        "Ψ(0) must be finite > 0"
+    );
     let df = EddingtonDf::build(&t, psi_max, 1e-3, 1e4);
     // ρ(r) = 4π ∫₀^Ψ f(ℰ) √(2(Ψ−ℰ)) dℰ at radii well inside r_vir, using the
     // TRUNCATED Ψ(r). Self-consistency of the (ρ, Ψ, f) triple.
@@ -241,19 +244,49 @@ fn realized_velocity_dispersion_matches_jeans() {
     let n = 120_000;
     let s = t.sample(n, 0x1EE7);
 
+    // The truncated enclosed_mass is a quadrature (unlike NFW's closed form), so
+    // calling it inside the Jeans integral is prohibitively slow. Precompute M(<r)
+    // and ρ(r) once on a fine log grid and interpolate — the oracle is unchanged,
+    // just evaluated from a table instead of re-integrating per point.
+    let r_hi = t.base.virial_radius() + 80.0 * t.decay_length;
+    let ntab = 4000usize;
+    let r_lo = 0.02_f64;
+    let step = (r_hi / r_lo).powf(1.0 / ntab as f64);
+    let mut rt = Vec::with_capacity(ntab + 1);
+    let mut mt = Vec::with_capacity(ntab + 1);
+    let mut rhot = Vec::with_capacity(ntab + 1);
+    let mut rr = r_lo;
+    for _ in 0..=ntab {
+        rt.push(rr);
+        mt.push(t.enclosed_mass(rr));
+        rhot.push(t.density(rr));
+        rr *= step;
+    }
+    let interp = |ys: &[f64], x: f64| -> f64 {
+        if x <= rt[0] {
+            return ys[0];
+        }
+        let last = rt.len() - 1;
+        if x >= rt[last] {
+            return ys[last];
+        }
+        let j = rt.partition_point(|&v| v < x);
+        let w = (x - rt[j - 1]) / (rt[j] - rt[j - 1]);
+        ys[j - 1] + w * (ys[j] - ys[j - 1])
+    };
+
     let sigma_r2 = |r: f64| -> f64 {
-        // Integrate to well past the skirt (integrand → 0 there).
-        let r_hi = t.base.virial_radius() + 80.0 * t.decay_length;
-        let nq = 20_000;
+        let nq = 4000;
         let ratio = (r_hi / r).powf(1.0 / nq as f64);
         let mut acc = 0.0;
         let mut r0 = r;
         for _ in 0..nq {
             let r1 = r0 * ratio;
             let rm = (r0 * r1).sqrt();
-            acc += t.density(rm) * t.base.g * t.enclosed_mass(rm) / (rm * rm) * (r1 - r0);
+            acc += interp(&rhot, rm) * t.base.g * interp(&mt, rm) / (rm * rm) * (r1 - r0);
             r0 = r1;
         }
+        // Exact density for the 1/ρ(r) prefactor (r is inside r_vir → closed form).
         acc / t.density(r)
     };
 

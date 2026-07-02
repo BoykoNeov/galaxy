@@ -26,7 +26,11 @@ struct Measured {
     max_r90_dev: f64,
 }
 
-fn evolve_and_measure(model: &TruncatedNfw, mut s: State, solver: &mut dyn ForceSolver) -> Measured {
+fn evolve_and_measure(
+    model: &TruncatedNfw,
+    mut s: State,
+    solver: &mut dyn ForceSolver,
+) -> Measured {
     let mut integ = LeapfrogKdk::new();
     let bg = StaticBackground;
 
@@ -79,8 +83,16 @@ const SEED: u64 = 0x4F00;
 const EPS_FRAC: f64 = 0.05;
 
 fn assert_in_equilibrium(m: &Measured) {
-    assert!(m.max_e_err < 2e-3, "energy not conserved: {:e}", m.max_e_err);
-    assert!(m.rh_drift < 0.10, "half-mass radius drifting: {}", m.rh_drift);
+    assert!(
+        m.max_e_err < 2e-3,
+        "energy not conserved: {:e}",
+        m.max_e_err
+    );
+    assert!(
+        m.rh_drift < 0.10,
+        "half-mass radius drifting: {}",
+        m.rh_drift
+    );
     assert!(
         m.rh_band < 0.15,
         "half-mass radius oscillation too large: {}",

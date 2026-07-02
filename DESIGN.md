@@ -66,7 +66,7 @@ galaxy/                     (cargo workspace)
 ├─ core/         types, State (SoA), snapshot schema, ForceSolver/Integrator/Background traits — pure, no I/O
 ├─ solvers/      DirectSum (oracle), BarnesHut (workhorse), FlatTree (stackless octree for GPU) (DONE)   [later: ParticleMesh, TreePM]
 ├─ gpu/          GpuDirectSum — O(N²) direct sum; GpuTree — O(N log N) Barnes-Hut (CPU build + GPU stackless traverse); GpuLbvh / GpuLbvhFused — end-to-end GPU-resident Morton LBVH (multi-device reference / single-device fuse) (all f32, wgpu compute) (DONE) [later: cross-step state residency / TreePM / PM]
-├─ ic/           Plummer sphere, exp-disk-in-halo (cold + warm Toomre-Q), two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [next: Hernquist/NFW halo] [later: cosmological ICs]
+├─ ic/           Plummer sphere, Hernquist + NFW cuspy halos (closed-form + numerical-Eddington DFs), exp-disk-in-halo (cold + warm Toomre-Q), two-galaxy Kepler collision (Plummer + disk-disk w/ spin-orbit orientation) (DONE) [later: cosmological ICs]
 ├─ io/           snapshot read/write: Rust-native versioned binary (DONE) [HDF5 behind a `validation` feature: later]
 ├─ sim/          headless engine: solver+integrator+IC+stepping loop → snapshots (DONE) [checkpoint/restart: later]
 ├─ renderprep/   snapshots → frame-data; spatial-tree kNN for local density/dispersion
@@ -836,6 +836,47 @@ late-time positions — N-body is chaotic).
   - **Remaining M4+:** the still-untouched **PM / TreePM / gas (SPH) / cosmology** (Friedmann
     Background + periodic solver + IC pipeline). M4i/M4j/M4k keep the *leapfrog + LBVH* path
     resident and throughput-tuned; extending residency to those solvers/integrators is future work.
+
+- **M5** — **cuspy halo ICs (Hernquist + NFW)**, the analytic stand-ins for CDM halos/bulges
+  that the cored Plummer sphere cannot represent (both have a central ρ ∝ r⁻¹ **cusp**). Built
+  as a three-rung TDD **validation ladder** — each rung's oracle is the rung below, so NFW ends
+  up honest despite having no closed-form answer to check against. Lives in `ic/` (pure).
+  - **Hernquist analytic model (landed, M5a):** `ic::Hernquist`, the finite-mass twin of Plummer
+    with a **closed-form isotropic DF** f(ℰ) (Hernquist 1990 eq. 17 / Binney & Tremaine §4.3
+    eq. 4.51, in physical units — the explicit M and G factors matter). Mirrors the Plummer
+    sampler (invert M(<r) for positions, rejection-sample speeds) with two profile-forced
+    departures: (i) the q=v/v_esc substitution does NOT make the speed PDF radius-independent
+    for Hernquist, so the rejection ceiling is found **per radius** by a grid scan; (ii) the
+    r⁻⁴ tail has a **divergent first moment** ⟨r⟩, so the finite-N COM is dominated by the
+    farthest particle and recentering drags the cusp off origin — fixed by **truncating at
+    r_max = 300a** (sampling X uniform on [0, M(<r_max)/M) is exact; keeps 99.34 % of the mass).
+    The DF's normalization is pinned with no external constant by the **density-recovery
+    integral** ρ(r) = 4π ∫₀^Ψ f(ℰ)√(2(Ψ−ℰ)) dℰ; a **stability run** (sample → evolve ~12 t_dyn
+    under DirectSum + BarnesHut, r_h stays put) is the only check of the velocity *shape* (a
+    mis-scaled DF passes a single-snapshot virial check). Structure judged at r_h ≫ ε since the
+    cusp is unresolved by Plummer softening.
+  - **Numerical Eddington-inversion DF (landed, M5b):** `ic::eddington::EddingtonDf`, the reusable
+    isotropic-DF builder (B&T eq. 4.46b) that recovers f(ℰ) from ρ and Ψ **alone** — the tool
+    that gives NFW (no closed-form DF) an honest equilibrium instead of a local-Maxwellian
+    approximation. Numerics chosen for stability: tabulate dρ/dΨ on a log-spaced radius grid
+    (analytic-quality central differences, no per-point root inversion); kill the 1/√(ℰ−Ψ)
+    endpoint singularity with Ψ = ℰ − u² → the smooth I(ℰ) = 2∫₀^√ℰ (dρ/dΨ)(ℰ−u²) du (Simpson);
+    f(ℰ) = (1/√8 π²) dI/dℰ by central difference, clamped ≥ 0 and interpolated. **Validated with
+    no oracle of its own** against the two models whose f(ℰ) IS closed-form: it reproduces
+    `Hernquist::df` (itself validated in M5a, independent of Eddington) to < 3 % — pinning shape
+    AND normalization — and Plummer's f(ℰ) ∝ ℰ^(7/2) shape to < 3 %.
+  - **NFW truncated halo (landed, M5c):** `ic::Nfw`, the near-universal CDM halo (ρ ∝ r⁻¹ cusp,
+    r⁻³ envelope ⇒ **divergent total mass**, **no closed-form DF**) — the payoff of M5b.
+    Parameterized by (M_vir, r_s, concentration c): r_vir = c·r_s, M_s = M_vir/[ln(1+c)−c/(1+c)].
+    Positions bisect the mass profile **truncated at r_vir** (truncation keeps ⟨r⟩ finite so the
+    COM is well-conditioned); velocities come from the M5b Eddington DF of the **untruncated**
+    potential (standard practice — truncation perturbs only the outermost shells). The DF-shape
+    validation is delegated to M5b + an **Eddington-recovers-NFW-density** integral (the M5b
+    machinery exercised on a model with no analytic DF); the stability run then confirms the
+    *assembled* truncated IC holds together (r_h stable under DirectSum + BarnesHut), with
+    tolerances budgeting the untruncated-DF edge re-virialization. Method + truncation follow
+    Kazantzidis et al. 2004. [next: exponentially-truncated NFW (Springel & White 1999);
+    a cuspy-halo variant of `DiskInHalo`; NFW–NFW collisions]
 
 ## Validation strategy
 

@@ -180,8 +180,10 @@ fn density_preserves_order_and_count() {
     };
     let data = prepare(&state, &cfg);
     assert_eq!(data.len(), state.len());
+    // Order preserved: column i is the f32 projection of state particle i. Compare
+    // against the projection (not the exact f64 — the clump coords aren't f32-exact).
     for i in 0..state.len() {
-        assert_eq!(data.pos[i].as_dvec3(), state.pos[i]);
+        assert_eq!(data.pos[i], state.pos[i].as_vec3());
     }
 }
 

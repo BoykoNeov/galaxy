@@ -157,6 +157,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
         brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
         size: SPLAT_SIZE,
+        // Density-aware brightening (DensityColoring) is available but left off here
+        // until its visual tuning is eyeballed against a rendered collision frame —
+        // None keeps the movie output bit-for-bit unchanged.
+        density: None,
     };
     let mut snaps: Vec<PathBuf> = std::fs::read_dir(&snap_dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))

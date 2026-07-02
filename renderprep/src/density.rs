@@ -58,7 +58,31 @@ pub struct DensityColoring {
 /// panics: with `N ≤ k` (or `k == 0`) there is no k-th neighbour, so every density
 /// is `0.0` — a sentinel the boost maps to "no brightening".
 pub fn knn_density(positions: &[DVec3], k: usize, softening: f64) -> Vec<f64> {
-    todo!("k-th NN number density (self-excluded, softened); reference O(N^2)")
+    let n = positions.len();
+    // A k-th neighbour needs k *other* particles; with N ≤ k (or k == 0) there is
+    // none, so the density is the defined 0.0 sentinel (the boost reads it as "no
+    // neighbourhood" → no brightening).
+    if k == 0 || n <= k {
+        return vec![0.0; n];
+    }
+    // ρ = k / ((4/3)π d³) = k · (3 / 4π) / d³ — fold the constant once.
+    let coeff = k as f64 * 3.0 / (4.0 * PI);
+    (0..n)
+        .map(|i| {
+            let pi = positions[i];
+            // Squared distances to every *other* particle (self excluded).
+            let mut d2: Vec<f64> = (0..n)
+                .filter(|&j| j != i)
+                .map(|j| pi.distance_squared(positions[j]))
+                .collect();
+            // Only the k-th order statistic is needed — partial select, not a full
+            // sort. `d2` has n-1 ≥ k entries, so index k-1 is in range. `total_cmp`
+            // gives a total order (distances are finite non-negative, no NaN).
+            let (_, kth, _) = d2.select_nth_unstable_by(k - 1, |a, b| a.total_cmp(b));
+            let d_k = kth.sqrt().max(softening); // floor before cubing
+            coeff / (d_k * d_k * d_k)
+        })
+        .collect()
 }
 
 /// Per-particle brightness multiplier from local density — **mean-referenced and
@@ -75,5 +99,28 @@ pub fn knn_density(positions: &[DVec3], k: usize, softening: f64) -> Vec<f64> {
 /// tails keep full brightness while cores and bridges glow. Returns all-`1.0`
 /// (identity) when `strength == 0` or no density is positive.
 pub fn density_boost(density: &[f64], strength: f32) -> Vec<f32> {
-    todo!("non-dimming mean-referenced brightness boost")
+    if strength == 0.0 {
+        return vec![1.0; density.len()];
+    }
+    // Reference density: the mean over the *positive* estimates. A 0.0 is a "no
+    // neighbourhood" sentinel (degenerate / boundary), not a real void, so it is
+    // excluded from the reference and receives boost 1 below.
+    let (sum, count) = density
+        .iter()
+        .filter(|&&d| d > 0.0)
+        .fold((0.0, 0usize), |(s, c), &d| (s + d, c + 1));
+    if count == 0 {
+        return vec![1.0; density.len()];
+    }
+    let rho_ref = sum / count as f64;
+    density
+        .iter()
+        .map(|&d| {
+            // 1 + strength·(1 − ρ_ref / max(d, ρ_ref)): exactly 1 for d ≤ ρ_ref
+            // (including the d = 0 sentinel), rising monotonically toward 1+strength
+            // as d → ∞. Bounded, and never below 1 — the boost never dims.
+            let frac = 1.0 - rho_ref / d.max(rho_ref);
+            1.0 + strength * frac as f32
+        })
+        .collect()
 }

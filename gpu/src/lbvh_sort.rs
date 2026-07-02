@@ -38,16 +38,18 @@ use bytemuck::{Pod, Zeroable};
 use crate::GpuError;
 
 /// Bits consumed per radix pass. 8 → a 256-bucket histogram (a `vec<u32,256>` workgroup
-/// array, 1 KiB, well under the shared-memory floor).
-const RADIX_BITS: u32 = 8;
+/// array, 1 KiB, well under the shared-memory floor). `pub(crate)` so the M4h fuse computes
+/// the same per-pass shift.
+pub(crate) const RADIX_BITS: u32 = 8;
 /// Passes to cover a `u32` key. 4 × 8 = 32 bits ≥ the 30-bit Morton range (the top passes
-/// are all-zero digits for in-range codes — correct, just cheap).
-const NUM_PASSES: u32 = 4;
+/// are all-zero digits for in-range codes — correct, just cheap). `pub(crate)` for the fuse.
+pub(crate) const NUM_PASSES: u32 = 4;
 
 /// One radix pass as a single-invocation stable counting sort. `src_*` → `dst_*`, digit =
 /// `(key >> params.shift) & 0xff`. Histogram (order-independent), exclusive scan, then a
-/// stable serial scatter in ascending source index.
-const SHADER: &str = r#"
+/// stable serial scatter in ascending source index. `pub(crate)` so the M4h fuse runs the
+/// same `radix_pass` kernel.
+pub(crate) const SHADER: &str = r#"
 struct Params { n: u32, shift: u32, pad0: u32, pad1: u32 };
 
 @group(0) @binding(0) var<uniform>             params: Params;

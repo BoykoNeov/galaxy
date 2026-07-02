@@ -42,7 +42,10 @@ const WORKGROUP_SIZE: u32 = 256;
 /// The `(1+1e-9)` pad folds to `1.0` in f32 (below the ulp at 1.0); harmless — the top-edge
 /// particle is caught by the `min(1023)` clamp instead of the pad's nudge, a ≤1-lane effect
 /// the reference-agreement gate tolerates.
-const SHADER: &str = r#"
+///
+/// `pub(crate)` so the M4h [`crate::GpuLbvhFused`] can compile the *same* `reduce`/`quantize`
+/// kernels onto its single fused device (one source of truth → the fuse runs identical code).
+pub(crate) const SHADER: &str = r#"
 struct Params { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 struct BBox { lo: vec4<f32>, hi: vec4<f32> };
 

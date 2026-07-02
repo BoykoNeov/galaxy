@@ -87,8 +87,9 @@ struct Params {
 
 /// Karras tree-build (parallel) + atomic-flag bottom-up aggregation (single invocation).
 /// One module, two entry points sharing the bind group — codes/`children`/`parent` for
-/// the build; `leaf`/`node_*`/`counter` for the aggregation.
-const SHADER: &str = r#"
+/// the build; `leaf`/`node_*`/`counter` for the aggregation. `pub(crate)` so the M4h fuse
+/// runs the same `build_tree`/`aggregate` kernels.
+pub(crate) const SHADER: &str = r#"
 const NO_PARENT: u32 = 0xffffffffu;
 
 struct Params { n: u32, pad0: u32, pad1: u32, pad2: u32 };

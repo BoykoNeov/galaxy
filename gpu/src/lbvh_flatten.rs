@@ -103,8 +103,10 @@ struct Params {
 /// slot/skip-pointer assignment (top-down). Emits `slot_meta` = `[next, body_start, body_count,
 /// unified_index]` per DFS slot plus the `leaf_bodies` permutation. `size`/`stack` are
 /// scratch (`stack` doubles as the per-internal visit flag in pass A, then the explicit DFS
-/// stack in pass B).
-const STRUCTURE_SHADER: &str = r#"
+/// stack in pass B). `pub(crate)` so the M4h fuse runs the same `flatten_structure` kernel
+/// (the fuse writes its own geometry kernel in the traversal's packing, so `GEOMETRY_SHADER`
+/// stays private).
+pub(crate) const STRUCTURE_SHADER: &str = r#"
 const NO_PARENT: u32 = 0xffffffffu;
 
 struct Params { n: u32, pad0: u32, pad1: u32, pad2: u32 };

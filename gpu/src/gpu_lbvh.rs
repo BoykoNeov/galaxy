@@ -54,7 +54,11 @@ const WORKGROUP_SIZE: u32 = 64;
 /// else opened to its first child (`node + 1`). A correct flatten makes `node` strictly
 /// increase, so the walk terminates in ≤ `n_nodes` steps with no stack. Mirrors the CPU
 /// [`galaxy_solvers::LbvhFlat::accel`] walk exactly.
-const SHADER: &str = r#"
+///
+/// `pub(crate)` so the M4h [`crate::GpuLbvhFused`] reuses this **exact** traversal kernel
+/// (the most complex in the chain) verbatim on its single fused device — the reuse is what
+/// makes the "fused reproduces the reference forces" gate credible.
+pub(crate) const SHADER: &str = r#"
 struct Params {
     n: u32,
     n_nodes: u32,

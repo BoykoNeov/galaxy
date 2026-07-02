@@ -14,8 +14,10 @@
 //! The schema mirrors `galaxy-io`'s versioned little-endian style and is the
 //! decoupling contract, so it is versioned and changes deliberately.
 
+pub mod density;
 pub mod frame;
 pub mod prepare;
 
+pub use density::{density_boost, knn_density, DensityColoring};
 pub use frame::{FrameData, FrameError, FrameHeader};
 pub use prepare::{prepare, PrepConfig};

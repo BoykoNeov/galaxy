@@ -1,11 +1,17 @@
-//! Snapshot → frame-data mapping. MVP is a **pure map** (no spatial tree): color
-//! by progenitor, brightness by mass. Local density / velocity-dispersion coloring
-//! (which needs a spatial kNN tree) is a deferred later pass — progenitor coloring
-//! is the iconic tidal-tail money shot and needs no neighbourhood queries.
+//! Snapshot → frame-data mapping. The base map is a **pure map** (no spatial tree):
+//! color by progenitor, brightness by mass. On top of that, an **optional**
+//! density-aware pass ([`DensityColoring`]) brightens dense neighbourhoods (cores,
+//! tidal bridges) via a k-NN estimate while leaving the diffuse tails at full
+//! brightness — off by default, so the base map stays a bit-for-bit pure map.
+//! Velocity-dispersion coloring (same k-NN neighbourhood, `σ_v` over the neighbour
+//! set) is the next deferred refinement.
 
 use galaxy_core::State;
 
+use crate::density::{density_boost, knn_density};
 use crate::frame::FrameData;
+
+pub use crate::density::DensityColoring;
 
 /// Configuration for the snapshot → frame-data map.
 #[derive(Clone, Debug, PartialEq)]
@@ -17,6 +23,10 @@ pub struct PrepConfig {
     pub brightness_per_mass: f32,
     /// Splat radius assigned to every particle (constant for the MVP).
     pub size: f32,
+    /// Optional density-aware brightness modulation. `None` (the default) keeps the
+    /// pure progenitor/mass map bit-for-bit; `Some(..)` brightens dense regions via
+    /// a k-NN density estimate (never dims — see [`DensityColoring`]).
+    pub density: Option<DensityColoring>,
 }
 
 impl Default for PrepConfig {
@@ -26,6 +36,7 @@ impl Default for PrepConfig {
             palette: vec![[1.0, 0.45, 0.2], [0.3, 0.55, 1.0]],
             brightness_per_mass: 1.0,
             size: 1.0,
+            density: None,
         }
     }
 }
@@ -45,6 +56,16 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
         pos.push(state.pos[i].as_vec3()); // f64 -> f32 projection for the GPU
         color.push(palette_color(config, state.progenitor[i].0));
         brightness.push(config.brightness_per_mass * state.mass[i] as f32);
+    }
+
+    // Optional density-aware pass: brighten dense neighbourhoods (never dim). Off by
+    // default, so the base map above is delivered bit-for-bit when `density == None`.
+    if let Some(dc) = &config.density {
+        let density = knn_density(&state.pos, dc.k, dc.softening);
+        let boost = density_boost(&density, dc.strength);
+        for (b, &g) in brightness.iter_mut().zip(&boost) {
+            *b *= g;
+        }
     }
 
     FrameData {

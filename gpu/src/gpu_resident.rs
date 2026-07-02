@@ -16,15 +16,18 @@
 //! also drop per-submit overhead) is the named follow-up — residency and batching are distinct,
 //! and one-submit-per-step is already fully resident.
 //!
-//! ## The precision cost is real and documented
+//! ## Position precision: double-single accumulation (M4j)
 //! The host-driven path ([`galaxy_core::LeapfrogKdk`] + a solver) keeps **authoritative
-//! positions in f64** and re-narrows to f32 only to feed the GPU force kernel each step. The
-//! resident path accumulates `pos += vel*dt` **in f32 across every step**, because WGSL has no
-//! portable `f64`. Position updates below ~1e-6 of a coordinate's magnitude are lost, so energy
-//! drifts more than the f64 leapfrog's clean bounded oscillation. This is acceptable for the
-//! render money-shot (the renderer is f32 anyway) and mirrors the existing f32-force / f64-energy
-//! inconsistency; **double-single (float-float) position accumulation is the deferred precision
-//! follow-up.**
+//! positions in f64** and re-narrows to f32 only to feed the GPU force kernel each step. WGSL has
+//! no portable `f64`, so the resident path instead carries positions as a **double-single**
+//! (`hi + lo`, an unevaluated pair of f32s ≈ 46-bit mantissa): the [drift kernel](DRIFT_SHADER)
+//! accumulates `pos += vel*dt` with a compensated two-sum, so the small per-step increment is no
+//! longer lost into the growing coordinate's f32 ulp. `hi` is `bodies.xyz` — the force pipeline
+//! still reads only that f32, so build/traverse and their gates are untouched; the force *itself*
+//! stays f32 (mirroring the existing f32-force / f64-energy note). `upload` splits the f64 input
+//! into `hi + lo` and `snapshot` sums them back, so the full f64 precision reaches the host. This
+//! is the M4i precision follow-up DESIGN deferred; velocity remains plain f32 (DS is
+//! position-only). **Batching K steps into one submit** is the still-open throughput follow-up.
 //!
 //! ## Not a `ForceSolver`
 //! The [`galaxy_core::ForceSolver`] interface is host-state-in / accel-out — fundamentally
@@ -85,39 +88,95 @@ fn kick(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Leapfrog drift: `pos.xyz += vel.xyz * dt`, preserving `bodies.w` (= mass). `bodies` is the
-/// traversal's own position buffer, so this advances the state the force pipeline reads next.
+/// Leapfrog drift with **double-single** (float-float) position accumulation: `pos += vel*dt`
+/// carried as an unevaluated `hi + lo` f32 pair, so the small per-step increment is not lost into
+/// the growing coordinate's ulp (the f32-accumulation precision cost DESIGN M4i deferred). `hi`
+/// lives in `bodies.xyz` (also the force pipeline's input — forces read only the f32 `hi`, so
+/// build/traverse are untouched); `lo` lives in the resident `pos_lo.xyz`. `bodies.w` (= mass) is
+/// preserved.
+///
+/// Each step folds the single-f32 increment `d = vel*dt` into `(hi, lo)` with a compensated add:
+/// Knuth `two_sum(hi, d) → (s, err)` recovers the rounding error `hi + d` loses, `err += lo` folds
+/// in the carried low part, then `quick_two_sum(s, err) → (hi', lo')` renormalizes so `|lo'| ≤
+/// ½ulp(hi')`. That normalization is load-bearing: it makes the f64 snapshot↔upload round-trip a
+/// bit-exact identity, which is what keeps the M4i faithful/residency gate exact.
+///
+/// ## Defeating f32 reassociation (the `ax`/bitcast barriers)
+/// Both error-free transforms rely on IEEE non-associativity, and consumer-GPU f32 compilers
+/// reassociate by default — which collapses the compensation to *exactly zero* (measured on the
+/// Vulkan test adapter: without barriers the DS result is bit-identical to a plain-f32 running
+/// sum). Two folds do the damage: `two_sum`'s `s - hi → d` (value-dependent) and `s - (s - hi) →
+/// hi` **and** `quick_two_sum`'s `(s + e) - s → e` (both value-*independent* identities that hold
+/// for any operand). `ax(x) = bitcast<f32>(bitcast<u32>(x))` is a value-preserving round-trip that
+/// is opaque to the FP optimizer, forcing the true IEEE-rounded intermediate. `s`, `bb` and
+/// `hi_new` must **all** be laundered — laundering only `s` leaves the value-independent folds
+/// intact and the error term still vanishes. `d` is also isolated in its own `let` so no `a*b+c`
+/// remains to contract into an fma. **Caveat:** GPU emulated-double is driver-dependent; the M4j
+/// gate proves this on the test adapter, not universally.
 const DRIFT_SHADER: &str = r#"
-struct Params { n: u32, dt: f32, half_dt: f32, pad: u32 };
+struct Params { n: u32, dt: f32, half_dt: f32, barrier: u32 };
 @group(0) @binding(0) var<uniform>             params: Params;
-@group(0) @binding(1) var<storage, read_write> bodies: array<vec4<f32>>; // xyz=pos, w=mass
+@group(0) @binding(1) var<storage, read_write> bodies: array<vec4<f32>>; // xyz=pos hi, w=mass
 @group(0) @binding(2) var<storage, read>       vel:    array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> pos_lo: array<vec4<f32>>; // xyz=pos lo
+
+// Value-preserving optimization barrier: XOR the bits with `params.barrier`, a uniform the host
+// pins to 0. Because it is a runtime uniform (not a compile-time constant), the compiler cannot
+// prove the XOR is identity, so it cannot fold `bitcast(bitcast(x) ^ barrier)` back to `x` — this
+// forces the real IEEE-rounded value and blocks the additive reassociation that would otherwise
+// collapse the two-sum. (A plain `bitcast<f32>(bitcast<u32>(x))` round-trip was *not* enough:
+// naga folds it away, and the DS result stayed bit-identical to a plain-f32 sum on the Vulkan
+// adapter.) `barrier` occupies the params slot the kick/drift/reset uniform already carried as pad.
+fn ax(v: vec3<f32>, barrier: u32) -> vec3<f32> {
+    return bitcast<vec3<f32>>(bitcast<vec3<u32>>(v) ^ vec3<u32>(barrier));
+}
 
 @compute @workgroup_size(256)
 fn drift(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= params.n) { return; }
+    let m = params.barrier;
     let b = bodies[i];
-    bodies[i] = vec4<f32>(b.xyz + vel[i].xyz * params.dt, b.w);
+    let hi = b.xyz;
+    let lo = pos_lo[i].xyz;
+    let d = vel[i].xyz * params.dt;            // isolated f32 increment (no fma to contract)
+    // Knuth two_sum(hi, d) -> (s, err): err is the exact rounding error of hi + d. s and bb are
+    // laundered so neither `s - hi` nor `s - bb` reassociates to a closed form.
+    let s = ax(hi + d, m);
+    let bb = ax(s - hi, m);
+    let err = (hi - (s - bb)) + (d - bb);
+    // Fold the carried low part, then renormalize via quick_two_sum(s, e) (|s| >= |e|). hi_new is
+    // laundered so `hi_new - s` does not reassociate to `e`.
+    let e = err + lo;
+    let hi_new = ax(s + e, m);
+    let lo_new = e - (hi_new - s);
+    bodies[i] = vec4<f32>(hi_new, b.w);
+    pos_lo[i] = vec4<f32>(lo_new, 0.0);
 }
 "#;
 
 /// Uniform for the kick/drift/reset kernels: particle count + this step's `dt` / `half_dt`.
-/// `reset` reads only `.n`; `kick` reads `.half_dt`; `drift` reads `.dt`.
+/// `reset` reads only `.n`; `kick` reads `.half_dt`; `drift` reads `.dt` and `.barrier`. `barrier`
+/// is pinned to 0 and used only by drift's double-single `ax` optimization barrier (an XOR mask
+/// the compiler can't fold because it's a runtime uniform); it reuses the old padding slot.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct StepParams {
     n: u32,
     dt: f32,
     half_dt: f32,
-    _pad: u32,
+    barrier: u32,
 }
 
-/// Resident-owned resources (the resident velocity buffer + the readback buffers + the
-/// kick/drift/reset bind groups). Rebuilt when [`FusedCore`] grows.
+/// Resident-owned resources (the resident velocity + double-single position low-part buffers, the
+/// readback buffers, and the kick/drift/reset bind groups). Rebuilt when [`FusedCore`] grows. The
+/// position *high* part is [`FusedCore`]'s `bodies` (shared with the force pipeline); `pos_lo` is
+/// resident-only and holds the low half of each coordinate's `hi + lo` double-single.
 struct ResidentResources {
     vel: wgpu::Buffer,
+    pos_lo: wgpu::Buffer,
     pos_readback: wgpu::Buffer,
+    pos_lo_readback: wgpu::Buffer,
     vel_readback: wgpu::Buffer,
     reset_bg: wgpu::BindGroup,
     kick_bg: wgpu::BindGroup,
@@ -186,13 +245,14 @@ impl GpuResidentLeapfrog {
                 storage_entry(2, true),
             ],
         );
-        // drift: 0 uniform, 1 bodies(rw), 2 vel(r)
+        // drift: 0 uniform, 1 bodies/pos-hi(rw), 2 vel(r), 3 pos_lo(rw)
         let drift_bgl = bgl(
             "resident-drift-bgl",
             &[
                 uniform_entry(0),
                 storage_entry(1, false),
                 storage_entry(2, true),
+                storage_entry(3, false),
             ],
         );
 
@@ -258,12 +318,17 @@ impl GpuResidentLeapfrog {
         let csrc = wgpu::BufferUsages::COPY_SRC;
         let mapread = wgpu::BufferUsages::MAP_READ;
 
-        let vel = dev.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("resident-vel"),
-            size: f4(cap),
-            usage: store | cdst | csrc,
-            mapped_at_creation: false,
-        });
+        let make_store = |label: &str| {
+            dev.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: f4(cap),
+                usage: store | cdst | csrc,
+                mapped_at_creation: false,
+            })
+        };
+        let vel = make_store("resident-vel");
+        // Double-single low part: seeded on upload, mutated by drift, read back on snapshot.
+        let pos_lo = make_store("resident-pos-lo");
         let make_rb = |label: &str| {
             dev.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -273,6 +338,7 @@ impl GpuResidentLeapfrog {
             })
         };
         let pos_readback = make_rb("resident-pos-readback");
+        let pos_lo_readback = make_rb("resident-pos-lo-readback");
         let vel_readback = make_rb("resident-vel-readback");
 
         let core_res = self.core.res.as_ref().expect("core capacity ensured first");
@@ -309,12 +375,15 @@ impl GpuResidentLeapfrog {
                 bg_entry(0, &self.step_params_buf),
                 bg_entry(1, &core_res.bodies),
                 bg_entry(2, &vel),
+                bg_entry(3, &pos_lo),
             ],
         );
 
         self.res = Some(ResidentResources {
             vel,
+            pos_lo,
             pos_readback,
+            pos_lo_readback,
             vel_readback,
             reset_bg,
             kick_bg,
@@ -333,7 +402,7 @@ impl GpuResidentLeapfrog {
                 n: self.n as u32,
                 dt: dt as f32,
                 half_dt: (0.5 * dt) as f32,
-                _pad: 0,
+                barrier: 0, // pinned; the drift barrier XORs by this, so it must stay 0
             }),
         );
     }
@@ -388,13 +457,25 @@ impl GpuResidentLeapfrog {
         self.core.write_uniforms(n);
         self.write_step_params(0.0);
 
-        // Upload positions (bodies: xyz=pos, w=mass) and velocities.
-        let bodies: Vec<[f32; 4]> = (0..n)
-            .map(|i| {
-                let p = state.pos[i];
-                [p.x as f32, p.y as f32, p.z as f32, state.mass[i] as f32]
-            })
-            .collect();
+        // Split each f64 position into a double-single `hi + lo` pair: `hi` (bodies.xyz, the force
+        // pipeline's f32 input) is the narrowed coordinate, `lo` (pos_lo.xyz) the f64 residual
+        // it dropped. Seeding the residual (not zero) captures ~46 bits of the f64 input and makes
+        // snapshot↔upload a lossless round-trip — the M4i faithful gate stays exact. `lo` is
+        // normalized by construction (|residual| ≤ ½ulp(hi)).
+        let split = |x: f64| {
+            let hi = x as f32;
+            (hi, (x - hi as f64) as f32)
+        };
+        let mut bodies = Vec::with_capacity(n);
+        let mut pos_los = Vec::with_capacity(n);
+        for i in 0..n {
+            let p = state.pos[i];
+            let (hx, lx) = split(p.x);
+            let (hy, ly) = split(p.y);
+            let (hz, lz) = split(p.z);
+            bodies.push([hx, hy, hz, state.mass[i] as f32]);
+            pos_los.push([lx, ly, lz, 0.0]);
+        }
         let vels: Vec<[f32; 4]> = (0..n)
             .map(|i| {
                 let v = state.vel[i];
@@ -407,6 +488,9 @@ impl GpuResidentLeapfrog {
             self.core
                 .queue
                 .write_buffer(&core_res.bodies, 0, bytemuck::cast_slice(&bodies));
+            self.core
+                .queue
+                .write_buffer(&res.pos_lo, 0, bytemuck::cast_slice(&pos_los));
             self.core
                 .queue
                 .write_buffer(&res.vel, 0, bytemuck::cast_slice(&vels));
@@ -481,10 +565,15 @@ impl GpuResidentLeapfrog {
                         label: Some("resident-snapshot-encoder"),
                     });
             enc.copy_buffer_to_buffer(&core_res.bodies, 0, &res.pos_readback, 0, bytes);
+            enc.copy_buffer_to_buffer(&res.pos_lo, 0, &res.pos_lo_readback, 0, bytes);
             enc.copy_buffer_to_buffer(&res.vel, 0, &res.vel_readback, 0, bytes);
             self.core.queue.submit([enc.finish()]);
 
-            let pos = self.read_vec3(&res.pos_readback, bytes);
+            // Recombine the double-single: pos = (f64)hi + (f64)lo. Both are f32, so the sum is
+            // exact in f64 — this is where the accumulated sub-f32 precision reaches the host.
+            let hi = self.read_vec3(&res.pos_readback, bytes);
+            let lo = self.read_vec3(&res.pos_lo_readback, bytes);
+            let pos = hi.iter().zip(&lo).map(|(&h, &l)| h + l).collect();
             let vel = self.read_vec3(&res.vel_readback, bytes);
             (pos, vel)
         };

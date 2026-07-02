@@ -1,12 +1,14 @@
-//! M4i gates for [`GpuResidentLeapfrog`]: GPU-resident leapfrog stepping.
+//! M4i/M4j gates for [`GpuResidentLeapfrog`]: GPU-resident leapfrog stepping with double-single
+//! position accumulation.
 //!
 //! ## The two load-bearing gates
-//! 1. **Faithful / residency — bit-for-bit.** The *same* stepper type run two ways must agree
-//!    exactly: `resident` (upload → K steps → snapshot) vs `roundtrip` (loop: upload → 1 step →
-//!    snapshot). Because f32→f64→f32 round-tripping through snapshot/upload is a lossless
-//!    identity, the re-uploaded path feeds bit-identical f32 each step, so any divergence *is* a
-//!    residency bug — a stale intermediate, a missing cross-step barrier, or an un-re-primed acc.
-//!    This is M4h's faithful-refactor claim lifted to the step loop; it needs no new reference.
+//! 1. **Faithful / residency.** The *same* stepper type run two ways must agree: `resident`
+//!    (upload → K steps → snapshot) vs `roundtrip` (loop: upload → 1 step → snapshot), so a stale
+//!    intermediate, a missing cross-step barrier, or an un-re-primed acc shows up as divergence.
+//!    M4i asserted this *bit-for-bit* (snapshot/upload was a lossless f32 identity); M4j's
+//!    double-single positions retire that premise (the `lo` limb diverges at f64-eps scale through
+//!    the tie non-uniqueness of the single-f64 channel), so it now bounds position drift far below
+//!    an f32 ulp — see the gate for the mechanism and sizing.
 //! 2. **Physics — f32 tolerance.** Vs the host-driven reference `LeapfrogKdk + GpuLbvhFused`,
 //!    which holds the *force kernel identical* so the only variable is f32-GPU-KDK vs f64-host-KDK
 //!    (the tightest discriminator). Momentum conservation + bounded energy ride on top.
@@ -85,17 +87,30 @@ fn resident() -> GpuResidentLeapfrog {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Gate 1 — faithful / residency: bit-for-bit.
+// Gate 1 — faithful / residency: matches a per-step host round-trip.
 // ---------------------------------------------------------------------------------------------
 
-/// Keeping state GPU-resident across K steps must produce **exactly** the same trajectory as
-/// round-tripping it through the host between every step. Exact f64 equality: the round-trip is a
-/// lossless f32 identity, so anything but equality is a residency bug (stale buffer / missing
-/// barrier / un-re-primed acc).
+/// Keeping state GPU-resident across K steps must reproduce the trajectory of round-tripping it
+/// through the host between every step — the residency correctness gate (a stale buffer, missing
+/// barrier, or un-re-primed acc perturbs `hi` by ≥1 f32-ulp ≈ 1e-7, freezes/garbles state, or
+/// breaks determinism, all far above the tolerance below).
+///
+/// **Why not bit-for-bit any more (M4j).** M4i could assert *exact* equality because snapshot↔
+/// upload was a lossless f32 identity. Double-single positions retire that premise: at a tie
+/// (`|lo| = ½ulp(hi)`) the single-f64 snapshot channel can't preserve *which* `(hi, lo)` split
+/// produced the value, so the resident path (carrying `lo` through K two-sums) and the round-trip
+/// path (recombine→resplit each step) take different arithmetic routes in the **`lo` limb** and
+/// diverge at f64-epsilon scale. Measured here: dp ≈ 1.8e-15, dv = 0. The tolerance is sized from
+/// the mechanism — worst case ≈ `K·ulp(lo)` ≈ 20·7e-15 ≈ 1.4e-13 at this coordinate scale — with
+/// ~7× headroom (project precedent) and still ~5 orders below an f32 ulp, so it discriminates
+/// every real residency bug. Velocity round-trips exactly (`hi` never diverges when forces agree);
+/// it is *theoretically* subject to the same tie effect, so a future N/K/seed change that nudges
+/// it off exact equality is expected, not a bug.
 #[test]
 fn resident_matches_roundtrip_bit_for_bit() {
     const N: usize = 512;
     const K: u64 = 20;
+    const TOL: f64 = 1e-12;
     let s0 = cluster(7, N);
 
     // Resident: one upload, K steps on device, one snapshot.
@@ -113,9 +128,10 @@ fn resident_matches_roundtrip_bit_for_bit() {
         s = rt.snapshot();
     }
 
-    assert_eq!(
-        out_res.pos, s.pos,
-        "resident vs round-trip positions must be bit-for-bit"
+    let dp = max_abs_diff(&out_res.pos, &s.pos);
+    assert!(
+        dp < TOL,
+        "resident vs round-trip positions diverged by {dp:e} (> {TOL:e}) — residency bug"
     );
     assert_eq!(
         out_res.vel, s.vel,
@@ -248,7 +264,10 @@ fn zero_steps_round_trips_input() {
 
     for (i, (&p, &v)) in s0.pos.iter().zip(&s0.vel).enumerate() {
         let dp = (out.pos[i] - p).length();
-        assert!(dp < 1e-9, "pos[{i}] round-trip error {dp:e} exceeds f64-DS tol");
+        assert!(
+            dp < 1e-9,
+            "pos[{i}] round-trip error {dp:e} exceeds f64-DS tol"
+        );
         assert_eq!(out.vel[i], narrow(v), "vel[{i}] not a clean f32 narrowing");
     }
     assert_eq!(out.mass.len(), s0.mass.len());

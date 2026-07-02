@@ -771,10 +771,41 @@ late-time positions — N-body is chaotic).
       (where the tree forces are exact antisymmetric direct sums), bounded energy over a long run,
       zero-step f32-narrowing identity, empty/single (a lone particle drifts ballistically),
       same-device determinism, and time bookkeeping. GPU-gated, fail-loud.
-  - **Remaining M4+:** batching K resident steps into one submit and **double-single** position
-    accumulation (the M4i follow-ups above); and the still-untouched **PM / TreePM / gas (SPH) /
-    cosmology** (Friedmann Background + periodic solver + IC pipeline). M4i keeps the *leapfrog +
-    LBVH* path resident; extending residency to those solvers/integrators is future work.
+  - **Double-single position accumulation (landed, M4j):** the M4i precision follow-up. WGSL has no
+    portable `f64`, so resident positions are now carried as a **double-single** (`hi + lo`, an
+    unevaluated f32 pair ≈ 46-bit mantissa): the drift kernel accumulates `pos += vel*dt` with a
+    compensated Knuth two-sum + quick-two-sum renormalize, so the small per-step increment is no
+    longer swallowed by the growing coordinate's f32 ulp. `hi` is `bodies.xyz` — the force pipeline
+    still reads only that f32, so build/traverse (and their gates) are untouched and the *force*
+    stays f32; `lo` is a resident-only buffer. `upload` splits the f64 input into `hi + lo` and
+    `snapshot` sums them back, so the accumulated precision reaches the host. Velocity stays plain
+    f32 (DS is position-only, matching this item's scope).
+    - **The reassociation trap (and the fix).** The two error-free transforms rely on IEEE
+      non-associativity, which consumer-GPU f32 compilers break by default: `(hi+d)−hi → d` and
+      `(s+e)−s → e` fold the compensation to *exactly zero* (measured — without a barrier the DS
+      result was bit-identical to a plain-f32 running sum). A plain `bitcast<f32>(bitcast<u32>(x))`
+      launder was **not** enough (naga folds it). The working barrier XORs the bits with a **runtime
+      uniform pinned to 0**: the compiler can't prove it's identity, so it can't fold the round-trip
+      — forcing the true IEEE-rounded intermediate. **Verified on the Vulkan CI adapter; DX12 was
+      not exercisable on the test machine (it fell back to Vulkan). GPU emulated-double is
+      driver-dependent** — the gate proves it on the CI adapter, not universally (this mirrors the
+      existing f32-force / f64-energy caveat; production large-world systems origin-rebase for
+      exactly this reason).
+    - **Gate cost: M4i's exact faithful gate relaxes to a tolerance.** M4i asserted resident-vs-
+      round-trip *bit-for-bit* because snapshot↔upload was a lossless f32 identity. DS retires that
+      premise: at a tie (`|lo| = ½ulp(hi)`) the single-f64 snapshot channel can't preserve which
+      `(hi, lo)` split produced the value, so the resident path (carrying `lo` across steps) and the
+      round-trip path (recombine→resplit each step) diverge in the **`lo` limb** at f64-epsilon scale
+      (measured dp ≈ 1.8e-15, dv = 0). The gate now bounds position drift `< 1e-12` (sized ≈ `K·
+      ulp(lo)` with headroom, ~5 orders below an f32 ulp, so every real residency bug still trips it)
+      and keeps velocity exact. **New gate:** a force-free single particle drifts K=10⁴ steps and the
+      DS accumulator tracks the exact f64 sum `x₀ + K·fl32(v·dt)` within 1e-5 (a plain-f32 running
+      sum drifts to ~3.5e-1). GPU-gated, fail-loud.
+  - **Remaining M4+:** batching K resident steps into one submit (the remaining M4i follow-up:
+    latency was removed in M4i, this drops per-submit overhead too); and the still-untouched
+    **PM / TreePM / gas (SPH) / cosmology** (Friedmann Background + periodic solver + IC pipeline).
+    M4i/M4j keep the *leapfrog + LBVH* path resident; extending residency to those
+    solvers/integrators is future work.
 
 ## Validation strategy
 

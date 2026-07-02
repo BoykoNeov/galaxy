@@ -211,9 +211,40 @@ late-time positions — N-body is chaotic).
     out; count + AABB bounds are authoritative from the data on write. The `prepare`
     stage is the MVP **pure map** (no spatial tree): progenitor indexes a color palette
     (wraps modulo; empty→white), brightness = `brightness_per_mass · mass`, constant
-    splat size, f64→f32 position projection, order preserved. Local density /
-    velocity-dispersion coloring (needs a kNN tree) stays deferred — progenitor color is
-    the money shot. Round-trip + robustness + map tests are always-on.
+    splat size, f64→f32 position projection, order preserved. This base map is the
+    money shot; an **optional** density-aware pass now layers on top (**M3.6** below).
+    Round-trip + robustness + map tests are always-on.
+  - **Density-aware coloring (landed, M3.6) — the deferred kNN pass on top of the base
+    map:** `galaxy_renderprep::density` adds a local **number-density** estimate and a
+    brightness modulation driven by it, off by default (`PrepConfig.density: None` is the
+    base map, bit-for-bit). `knn_density(pos, k, softening)` is the k-th nearest-neighbour
+    density ρ_i = k / ((4/3)π d_{k,i}³), self excluded, brute-force **O(N²)** — the
+    *reference oracle*, exactly as `DirectSum`/`reference_sort` are for their fast paths; a
+    grid/tree acceleration is the named follow-up, to be gated bit-for-bit against it.
+    - **Softening guards the frame against NaN.** The k-th NN distance is floored at
+      `softening` **before** cubing, so collision cores / coincident particles yield a
+      finite large density instead of `+∞ → NaN` that would poison a whole frame. `N ≤ k`
+      (or `k == 0`) has no k-th neighbour → a defined `0.0` sentinel, not a panic.
+    - **The mapping is deliberately *non-dimming*.** `density_boost` is mean-referenced,
+      `boost_i = 1 + strength·(1 − ρ_ref/max(ρ_i, ρ_ref))`, bounded in `[1, 1+strength]`,
+      monotone, and exactly `1` for underdense particles. This is the load-bearing design
+      call: the halo dominates the density field, so a naive "denser→brighter,
+      sparser→dimmer" power law would **darken the diffuse tidal tails** — the very feature
+      the render exists to show. The non-dimming boost brightens cores/bridges and leaves
+      the tails at full brightness.
+    - **Gates:** exact hand oracles (two-particle pair distance; 1-D lattice k-th NN =
+      ⌈k/2⌉·s; self-exclusion; coincident→finite via softening; inverse-cube scaling law;
+      degenerate/empty/`k=0`→0; permutation-equivariance; determinism) for the estimator;
+      hand values + non-dimming + bounded + monotone + identity-at-`strength=0`/all-zero
+      for the boost; and end-to-end `prepare` gates (`strength=0` ≡ `density: None`; a
+      dense octahedral clump brightened while sparse particles stay at base; order/count
+      preserved; tiny `N≤k` state does not panic). All always-on (CPU, no GPU).
+    - **Scope: estimator + mapping land and are invariant-gated; the *visual* payoff is
+      not yet asserted.** Unit tests gate the density math, not "the movie shows tidal
+      structure." `xtask` therefore leaves `density: None` until the mapping is tuned
+      against a rendered collision frame (eyeballed), and **velocity-dispersion coloring**
+      (σ_v over the same kNN neighbourhood — needs neighbour *indices*, not just d_k) stays
+      the next deferred refinement.
   - **camera plane (verified, drives the renderer):** the collision IC places the
     Kepler orbit **in the x–y plane** (`ic/collision.rs`: pericenter along +x, `r_rel`
     and `v_rel` have z=0), so the orbital-plane normal is **+Z** and a face-on camera

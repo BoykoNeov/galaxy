@@ -813,10 +813,26 @@ late-time positions — N-body is chaotic).
     **unfused** across the step boundary (`kick½(a)·kick½(a)` ≠ f32-fused `kick(a·dt)`). The cap is
     a TDR/watchdog guard, **not** a throughput target: even 64 collapses the K=10⁴ drift gate from
     10⁴ submits to ~157. It is a fixed step count, hence **N-blind** — per-step GPU cost scales with
-    N, so a large-N sim could still approach the watchdog at a cap safe for the small-N gates;
-    sizing it per-N against a device timing budget is future work. **Gate:** `step_many` issues
-    exactly `⌈K/MAX_BATCH⌉` submits (a before/after `submits()` delta); the pre-existing nine gates
-    re-validate the trajectory under batching for free. GPU-gated, fail-loud.
+    N, so *in principle* a large-N sim could approach the watchdog at a cap safe for the small-N
+    gates; whether that actually bites was measured in **M4l** (it does not, to ≥1M). **Gate:**
+    `step_many` issues exactly `⌈K/MAX_BATCH⌉` submits (a before/after `submits()` delta); the
+    pre-existing nine gates re-validate the trajectory under batching for free. GPU-gated, fail-loud.
+  - **`MAX_BATCH` timing measurement — fixed cap is enough (M4l):** M4k left the per-N question
+    open. Rather than guess a cost model, the `bench_step_cost` timing bench *measured* per-step
+    resident-KDK wall-clock across N (RTX 5090 / Vulkan). The resident step turns out to be
+    **overhead-bound** — its ~10 serial LBVH dispatches (reduce/quantize/sort/build/aggregate/
+    flatten/traverse + the KDK kernels) dominate, not N-scaling compute — so per-step cost stays
+    essentially flat (~0.1–0.4 ms, noise-dominated, no monotone N-trend) while N grows 2048×
+    (512→1 048 576). A full 64-step submit is ≤ ~25 ms even at 1M particles, **≥20× under** a
+    conservative 500 ms watchdog budget (¼ of the ~2 s TDR).
+    So the fixed `MAX_BATCH = 64` is measured-safe to **≥1M**, and per-N *adaptive* sizing was
+    **dropped as unnecessary**: at any N_ref honest to this data the cap never leaves 64 in the
+    practical range, and an `n·log n` guard beyond it would over-shrink the batch ~10× against the
+    measured (wildly sub-`n·log n`) growth — a disproven model, not a safeguard. Deferred until a
+    real **10⁷–10⁸ crossover measurement** can set a knee from data. Caveat: the bench IC is a
+    diffuse cluster; a concentrated distribution stresses traversal more, but the ≥10× headroom
+    absorbs a 3–5× worse case. Deliverable is the ignored bench itself (the evidence), not new
+    always-on gates — the existing M4k submit gate is unchanged.
   - **Remaining M4+:** the still-untouched **PM / TreePM / gas (SPH) / cosmology** (Friedmann
     Background + periodic solver + IC pipeline). M4i/M4j/M4k keep the *leapfrog + LBVH* path
     resident and throughput-tuned; extending residency to those solvers/integrators is future work.

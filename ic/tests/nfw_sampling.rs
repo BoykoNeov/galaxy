@@ -122,10 +122,15 @@ fn realized_mass_profile_matches_truncated_cdf() {
     let s = p.sample(n, 0x5EED);
     let r = sorted_radii(&s);
     let r_vir = p.virial_radius();
-    // All particles lie within r_vir; the CDF is normalized to M_vir = M(<r_vir).
+    // Positions are sampled within r_vir, but recentering rigidly shifts the
+    // whole cloud by the finite COM offset (a random walk of scale √(⟨r²⟩/N) ≈
+    // 0.02 r_vir here), so radii measured about the COM can just exceed r_vir.
+    // The point is that truncation caps the extent near r_vir — not that it
+    // grossly overshoots — so allow a small margin for the shift.
     assert!(
-        *r.last().unwrap() <= r_vir + 1e-9,
-        "a particle escaped the virial radius"
+        *r.last().unwrap() <= 1.02 * r_vir,
+        "max radius {} grossly exceeds r_vir {r_vir}",
+        r.last().unwrap()
     );
     for &rr in &[1.0_f64, 2.0, 5.0, 8.0] {
         let frac = r.partition_point(|&x| x <= rr) as f64 / n as f64;
@@ -152,7 +157,10 @@ fn sample_is_recentered_equal_mass_and_deterministic() {
         "net momentum not zeroed"
     );
     let mtot: f64 = s.mass.iter().sum();
-    assert!((mtot - p.virial_mass).abs() < 1e-12, "masses don't sum to M_vir");
+    assert!(
+        (mtot - p.virial_mass).abs() < 1e-12,
+        "masses don't sum to M_vir"
+    );
     let m_each = p.virial_mass / n as f64;
     assert!(
         s.mass.iter().all(|&m| (m - m_each).abs() < 1e-15),

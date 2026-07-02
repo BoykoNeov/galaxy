@@ -20,6 +20,10 @@
 
 use galaxy_core::{DVec3, State};
 
+use std::f64::consts::PI;
+
+use crate::eddington::EddingtonDf;
+
 /// An NFW halo parameterized by G, virial mass, scale radius, and concentration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Nfw {
@@ -50,49 +54,124 @@ impl Nfw {
 
     /// The dimensionless mass function m(c) = ln(1+c) − c/(1+c); M(<r) = M_s·m(x).
     pub fn mass_function(&self) -> f64 {
-        todo!()
+        let c = self.concentration;
+        (1.0 + c).ln() - c / (1.0 + c)
     }
 
     /// Characteristic mass M_s = 4π ρ_s r_s³ = M_vir / m(c).
     pub fn characteristic_mass(&self) -> f64 {
-        todo!()
+        self.virial_mass / self.mass_function()
     }
 
     /// Characteristic density ρ_s = M_s / (4π r_s³).
     pub fn characteristic_density(&self) -> f64 {
-        todo!()
+        self.characteristic_mass() / (4.0 * PI * self.scale_radius.powi(3))
     }
 
     /// Virial radius r_vir = c · r_s.
     pub fn virial_radius(&self) -> f64 {
-        todo!()
+        self.concentration * self.scale_radius
     }
 
     /// Mass density ρ(r) = ρ_s / (x (1+x)²), x = r/r_s.
-    pub fn density(&self, _r: f64) -> f64 {
-        todo!()
+    pub fn density(&self, r: f64) -> f64 {
+        let x = r / self.scale_radius;
+        self.characteristic_density() / (x * (1.0 + x) * (1.0 + x))
     }
 
     /// Cumulative mass M(<r) = M_s [ln(1+x) − x/(1+x)] (untruncated).
-    pub fn enclosed_mass(&self, _r: f64) -> f64 {
-        todo!()
+    pub fn enclosed_mass(&self, r: f64) -> f64 {
+        let x = r / self.scale_radius;
+        self.characteristic_mass() * ((1.0 + x).ln() - x / (1.0 + x))
     }
 
     /// Gravitational potential Φ(r) = −G M_s ln(1+x)/r, with Φ(0) = −G M_s/r_s.
-    pub fn potential(&self, _r: f64) -> f64 {
-        todo!()
+    pub fn potential(&self, r: f64) -> f64 {
+        let gms = self.g * self.characteristic_mass();
+        if r == 0.0 {
+            // ln(1+x)/x → 1 as x → 0, so Φ(0) = −G M_s / r_s.
+            return -gms / self.scale_radius;
+        }
+        let x = r / self.scale_radius;
+        -gms * (1.0 + x).ln() / r
     }
 
     /// Structural dynamical time t_dyn = √(r_s³ / (G M_s)) (the inner scale).
     pub fn dynamical_time(&self) -> f64 {
-        todo!()
+        let rs = self.scale_radius;
+        (rs * rs * rs / (self.g * self.characteristic_mass())).sqrt()
     }
 
     /// Draw `n` equal-mass particles: positions from the mass profile truncated
     /// at r_vir, velocities from the numerically Eddington-inverted DF of the
     /// untruncated potential. Recentered to zero COM and zero net momentum.
-    pub fn sample(&self, _n: usize, _seed: u64) -> State {
-        todo!()
+    pub fn sample(&self, n: usize, seed: u64) -> State {
+        let mut rng = SplitMix64::new(seed);
+        let rs = self.scale_radius;
+        let r_vir = self.virial_radius();
+        let m_each = self.virial_mass / n as f64;
+
+        // Build the isotropic DF of the UNTRUNCATED halo once (no randomness, so
+        // sampling stays deterministic). The wide radius bracket drives Ψ → 0 for
+        // the outer edge of the Eddington integral; r_min resolves the cusp.
+        let psi_max = -self.potential(0.0); // Ψ(0) = G M_s / r_s
+        let df = EddingtonDf::build(self, psi_max, 1e-3 * rs, 1e4 * rs);
+
+        let mut pos = Vec::with_capacity(n);
+        let mut vel = Vec::with_capacity(n);
+
+        for _ in 0..n {
+            // Position: invert the truncated CDF M(<r)/M_vir = X on r ∈ [0, r_vir]
+            // by bisection (M(<r) is monotonic). X ∈ [0,1) ⇒ r ∈ [0, r_vir).
+            let target = rng.next_f64() * self.virial_mass;
+            let mut lo = 0.0;
+            let mut hi = r_vir;
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if self.enclosed_mass(mid) < target {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let r = 0.5 * (lo + hi);
+            pos.push(random_direction(&mut rng) * r);
+
+            // Speed: rejection-sample v ∈ [0, v_esc] from p(v) ∝ v² f(Ψ − v²/2),
+            // with a per-radius rejection ceiling found by scanning the PDF.
+            let psi = -self.potential(r);
+            let v_esc = (2.0 * psi).sqrt();
+            let speed_pdf = |v: f64| -> f64 { v * v * df.f(psi - 0.5 * v * v) };
+            const GRID: usize = 256;
+            let mut ceil = 0.0_f64;
+            for k in 1..GRID {
+                ceil = ceil.max(speed_pdf(v_esc * k as f64 / GRID as f64));
+            }
+            ceil *= 1.5;
+
+            let v = loop {
+                let v = v_esc * rng.next_f64();
+                let height = ceil * rng.next_f64();
+                if height < speed_pdf(v) {
+                    break v;
+                }
+            };
+            vel.push(random_direction(&mut rng) * v);
+        }
+
+        // Recenter to zero COM and zero net momentum. Truncation at r_vir keeps
+        // ⟨r⟩ finite, so the COM is well-conditioned (unlike an untruncated tail).
+        let inv_n = 1.0 / n as f64;
+        let mean_pos = pos.iter().fold(DVec3::ZERO, |acc, &p| acc + p) * inv_n;
+        let mean_vel = vel.iter().fold(DVec3::ZERO, |acc, &v| acc + v) * inv_n;
+        for p in &mut pos {
+            *p -= mean_pos;
+        }
+        for v in &mut vel {
+            *v -= mean_vel;
+        }
+
+        State::from_phase_space(pos, vel, vec![m_each; n])
     }
 }
 
@@ -106,7 +185,6 @@ impl crate::eddington::SphericalModel for Nfw {
 }
 
 /// A unit vector drawn isotropically on the sphere (uniform in cosθ and φ).
-#[allow(dead_code)]
 fn random_direction(rng: &mut SplitMix64) -> DVec3 {
     use std::f64::consts::TAU;
     let cos_theta = 2.0 * rng.next_f64() - 1.0;
@@ -121,7 +199,6 @@ struct SplitMix64 {
 }
 
 impl SplitMix64 {
-    #[allow(dead_code)]
     fn new(seed: u64) -> Self {
         Self { state: seed }
     }
@@ -134,7 +211,6 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
 
-    #[allow(dead_code)]
     fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }

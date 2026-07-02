@@ -451,3 +451,94 @@ fn step_many_coalesces_into_bounded_submits() {
         GpuResidentLeapfrog::MAX_BATCH
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Timing bench (M4l): does a *fixed* MAX_BATCH stay under the GPU watchdog as N grows?
+// ---------------------------------------------------------------------------------------------
+
+/// Measures per-step resident-KDK wall-clock across a sweep of particle counts and reports whether
+/// a full [`MAX_BATCH`](GpuResidentLeapfrog::MAX_BATCH)-step submit stays under a watchdog-safe
+/// budget (a conservative fraction of the ~2 s Windows TDR / Vulkan device-loss timeout). This is
+/// the measurement that settled the M4i "N-blind cap" concern: whether per-step cost rises with N
+/// fast enough that a *fixed* 64-step batch could ever race the watchdog.
+///
+/// **Result (RTX 5090 / Vulkan, this box).** The resident step is **overhead-bound** — its ~10
+/// serial LBVH dispatches dominate, not N-scaling compute — so per-step cost stays essentially flat
+/// (~0.1–0.4 ms, noise-dominated with no monotone N-trend) while N grows 2048× (512→1 048 576). A
+/// full 64-step submit is ≤ ~25 ms even at 1M particles, ≥20× under the 500 ms budget. So fixed
+/// `MAX_BATCH = 64` is measured-safe to ≥1M and per-N adaptive sizing is unnecessary in the
+/// practical regime; it is deferred until a real 10⁷–10⁸ crossover measurement can set the knee
+/// from data rather than an `n·log n` guess.
+///
+/// **Caveat.** The IC here is a diffuse [`cluster`]; a more concentrated distribution stresses
+/// traversal more (deeper tree, more work per body), but with ≥10× headroom to 1M even a 3–5×
+/// worse distribution stays safe.
+///
+/// Ignored (timing, machine-dependent). Run with
+/// `cargo test -p galaxy-gpu --release --test gpu_resident -- --ignored --nocapture bench_step_cost`.
+/// Note: on this box the run may print a wgpu "timed out … last successful submission" panic on
+/// **device teardown** (the documented full-suite GPU flake) *after* all rows and the summary —
+/// the measured data above the panic is valid.
+#[test]
+#[ignore = "timing benchmark; run explicitly with --release --ignored --nocapture"]
+fn bench_step_cost() {
+    use std::time::Instant;
+
+    // Watchdog budget per submit: a conservative fraction of the ~2 s TDR so a full batch never
+    // races the timeout even with driver/OS jitter and larger-than-measured N.
+    const TDR_SECS: f64 = 2.0;
+    const SAFETY: f64 = 4.0; // 4× margin ⇒ ~0.5 s target per submit
+    let budget_secs = TDR_SECS / SAFETY;
+
+    // One device for the whole sweep (ascending N only grows the resident buffers): creating a
+    // fresh adapter/device per N provokes the known full-suite GPU flake (a submission timeout
+    // after ~half a dozen device creations), and reusing one device measures steady state cleanly.
+    let mut res = resident();
+    // Per-step wall-clock: best-of-3 to damp scheduler/driver noise, after one warmup submit
+    // (pipeline/shader warmup, first-touch allocation) so the timing reflects steady state.
+    let per_step_secs = |res: &mut GpuResidentLeapfrog, n: usize| -> f64 {
+        let s0 = cluster(0xB0A7, n);
+        res.upload(&s0);
+        const K: u64 = 32;
+        res.step_many(DT, K); // warmup
+        let mut best = f64::INFINITY;
+        for _ in 0..3 {
+            let t = Instant::now();
+            res.step_many(DT, K);
+            best = best.min(t.elapsed().as_secs_f64() / K as f64);
+        }
+        best
+    };
+
+    println!(
+        "watchdog budget/submit = {budget_secs:.3} s ({TDR_SECS} s TDR / {SAFETY}× safety), \
+         MAX_BATCH = {}",
+        GpuResidentLeapfrog::MAX_BATCH
+    );
+    let mut safe_ceiling = 0usize;
+    for &n in &[
+        512usize, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144, 524_288,
+        1_048_576,
+    ] {
+        let t = per_step_secs(&mut res, n);
+        let full_batch = GpuResidentLeapfrog::MAX_BATCH as f64 * t;
+        let fits = full_batch <= budget_secs;
+        if fits {
+            safe_ceiling = n;
+        }
+        println!(
+            "N={n:>8}  per-step {:8.4} ms   full MAX_BATCH submit {:8.3} ms   {}",
+            t * 1e3,
+            full_batch * 1e3,
+            if fits { "OK " } else { "OVER" },
+        );
+    }
+    println!(
+        "fixed MAX_BATCH = {} is watchdog-safe up to N ≈ {safe_ceiling} on this device",
+        GpuResidentLeapfrog::MAX_BATCH
+    );
+
+    // Drain the queue to completion before the device drops, so teardown doesn't wait on (and time
+    // out over) the last batched submit — a `snapshot` polls the device idle.
+    let _ = res.snapshot();
+}

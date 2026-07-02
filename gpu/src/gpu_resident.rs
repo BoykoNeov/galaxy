@@ -213,11 +213,18 @@ impl GpuResidentLeapfrog {
     /// before flushing. Batching drops per-submit overhead (the named M4i throughput follow-up —
     /// M4i removed the per-step *latency*, this removes the per-step *submit*), but a submit that
     /// runs too long trips the OS GPU watchdog (Windows TDR / the Vulkan device-loss timeout the
-    /// M4j path is verified on), so the batch is capped rather than unbounded. The cap is a
-    /// **fixed step count**, hence N-blind: per-step GPU cost scales with N, so a large-N sim could
-    /// still approach the watchdog at a cap safe for these small-N gates — sizing it per-N against
-    /// a device timing budget is future work. 64 already collapses the K=10⁴ drift gate from 10⁴
-    /// submits to ~157 (a 64× overhead drop); returns diminish past that, so it stays conservative.
+    /// M4j path is verified on), so the batch is capped rather than unbounded. 64 already collapses
+    /// the K=10⁴ drift gate from 10⁴ submits to ~157 (a 64× overhead drop); returns diminish past
+    /// that, so it stays conservative.
+    ///
+    /// **Fixed, not per-N (M4l).** M4i flagged that a *fixed* cap is N-blind — per-step GPU cost
+    /// rises with N, so in principle a large-N sim could approach the watchdog at a cap safe for the
+    /// small-N gates. The `bench_step_cost` timing bench measured this (RTX 5090 / Vulkan): the
+    /// resident step is **overhead-bound** (its ~10 serial LBVH dispatches dominate, not N-scaling
+    /// compute), so a full 64-step submit stays ≥10× under the watchdog budget through 1M particles.
+    /// Fixed 64 is therefore measured-safe to ≥1M; per-N adaptive sizing is deferred until a real
+    /// 10⁷–10⁸ crossover measurement, where the *measured* crossover — not an `n·log n` guess — sets
+    /// the knee.
     pub const MAX_BATCH: u64 = 64;
 
     /// Bring up the resident compute device + every pipeline (the shared [`FusedCore`] build/

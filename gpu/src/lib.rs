@@ -43,6 +43,7 @@
 pub mod gpu_direct_sum;
 pub mod gpu_lbvh;
 pub mod gpu_lbvh_fused;
+pub mod gpu_resident;
 pub mod gpu_tree;
 pub mod lbvh_flatten;
 pub mod lbvh_morton;
@@ -52,6 +53,7 @@ pub mod lbvh_tree;
 pub use gpu_direct_sum::GpuDirectSum;
 pub use gpu_lbvh::GpuLbvh;
 pub use gpu_lbvh_fused::GpuLbvhFused;
+pub use gpu_resident::GpuResidentLeapfrog;
 pub use gpu_tree::GpuTree;
 pub use lbvh_flatten::{GpuLbvhFlat, GpuLbvhFlattener};
 pub use lbvh_morton::{GpuMorton, GpuMortonBuilder};

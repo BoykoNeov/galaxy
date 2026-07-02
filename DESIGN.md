@@ -734,11 +734,47 @@ late-time positions — N-body is chaotic).
       momentum flux at θ→0; same-device bit-determinism; empty/single; and the real
       topology-straddle survival at N=20000) **plus** the bit-for-bit faithful-refactor gate vs
       the reference `GpuLbvh`. GPU-gated, fail-loud.
-  - **Remaining M4+:** keeping particle *state* GPU-resident across **integrator steps** — M4h
-    fused the build pipeline onto one device but still uploads state and reads back accel each
-    `accelerations` call; true cross-step residency changes the `accelerations(&State)→acc`
-    interface and touches the stepping loop / PM / TreePM / gas (SPH) / cosmology (Friedmann
-    Background + periodic solver + IC pipeline).
+  - **GpuResidentLeapfrog — cross-step state residency (landed, M4i):** `galaxy_gpu::GpuResidentLeapfrog`
+    is the payoff M4h unlocked: it keeps `pos`/`vel`/`mass`/`acc` in GPU storage buffers **across
+    integrator steps**, runs the leapfrog KDK kick/drift on the device, and reads nothing back
+    until an explicit `snapshot`. M4h still uploaded state and read back accel *every*
+    `accelerations` call (one CPU↔GPU round-trip per force eval); M4i removes that per-step
+    round-trip entirely. Lifecycle is `upload → step* → snapshot`, **not** `ForceSolver` — the
+    `accelerations(&State)→acc` interface is host-state-in / accel-out, fundamentally incompatible
+    with residency, so this is its own type (exactly as this Remaining-M4+ item anticipated).
+    - **Reuse over rewrite: the shared `FusedCore`.** The whole M4c–M4g build+traverse pipeline
+      (device, pipelines, layouts, lazily-sized buffers, the pass sequence) was factored out of
+      `GpuLbvhFused` into a `pub(crate) FusedCore` that **both** the fused solver and the resident
+      stepper drive — same f32 WGSL, one source of truth. The refactor is gated: the full M4h
+      suite (incl. the bit-for-bit `GpuLbvhFused`-vs-`GpuLbvh` gate) still passes unchanged. The
+      only *new* code is a `vel` buffer, three trivial kernels (`kick`: `v+=a·½dt`; `drift`:
+      `x+=v·dt`; `reset`: re-seed `idx_a` iota + `parent`=`NO_PARENT` on the GPU each force eval,
+      the on-device equivalent of the fused solver's per-call host writes), and a no-readback step
+      encoder. `bodies` (xyz=pos, w=mass) — already the traversal input — **doubles as the resident
+      position buffer**, so drift mutates the state the force pipeline reads in place.
+    - **The precision cost is real and documented.** The host path keeps *authoritative* positions
+      in **f64** and re-narrows each step; the resident path accumulates `pos += vel·dt` in **f32
+      across every step** (no portable `f64` in WGSL). So energy drifts more than the f64 leapfrog's
+      clean bounded oscillation — acceptable for the f32 render money-shot, and mirroring the
+      existing f32-force / f64-energy note. **Double-single (float-float) position accumulation is
+      the deferred precision follow-up.** This is a **latency/architecture win** (per-step sync
+      points removed), **not** a throughput speedup: the serial M4h stages (sort, aggregate,
+      flatten) are unchanged, and each `step` is still one submit — **batching K steps into one
+      encoder** (dropping per-submit overhead too) is the named follow-up, distinct from residency.
+    - **Gates (the two load-bearing ones + invariants).** (1) *Faithful/residency — bit-for-bit:*
+      the same stepper run resident (`upload → K steps → snapshot`) vs round-tripped (per step:
+      `upload → step → snapshot`) agrees **exactly**, since f32↔f64 snapshot/upload is a lossless
+      identity — this is M4h's faithful-refactor claim lifted to the step loop, and any divergence
+      *is* a residency bug (stale buffer / missing barrier / stale acc). (2) *Physics — f32 tol:*
+      tracks the host-driven `LeapfrogKdk + GpuLbvhFused` reference (which holds the force kernel
+      identical, so only f32-GPU-KDK vs f64-host-KDK varies). Plus momentum conservation at θ→0
+      (where the tree forces are exact antisymmetric direct sums), bounded energy over a long run,
+      zero-step f32-narrowing identity, empty/single (a lone particle drifts ballistically),
+      same-device determinism, and time bookkeeping. GPU-gated, fail-loud.
+  - **Remaining M4+:** batching K resident steps into one submit and **double-single** position
+    accumulation (the M4i follow-ups above); and the still-untouched **PM / TreePM / gas (SPH) /
+    cosmology** (Friedmann Background + periodic solver + IC pipeline). M4i keeps the *leapfrog +
+    LBVH* path resident; extending residency to those solvers/integrators is future work.
 
 ## Validation strategy
 

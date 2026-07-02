@@ -52,7 +52,12 @@ fn narrow(v: DVec3) -> DVec3 {
 fn max_abs_diff(a: &[DVec3], b: &[DVec3]) -> f64 {
     a.iter()
         .zip(b)
-        .map(|(u, v)| (u.x - v.x).abs().max((u.y - v.y).abs()).max((u.z - v.z).abs()))
+        .map(|(u, v)| {
+            (u.x - v.x)
+                .abs()
+                .max((u.y - v.y).abs())
+                .max((u.z - v.z).abs())
+        })
         .fold(0.0_f64, f64::max)
 }
 
@@ -108,8 +113,14 @@ fn resident_matches_roundtrip_bit_for_bit() {
         s = rt.snapshot();
     }
 
-    assert_eq!(out_res.pos, s.pos, "resident vs round-trip positions must be bit-for-bit");
-    assert_eq!(out_res.vel, s.vel, "resident vs round-trip velocities must be bit-for-bit");
+    assert_eq!(
+        out_res.pos, s.pos,
+        "resident vs round-trip positions must be bit-for-bit"
+    );
+    assert_eq!(
+        out_res.vel, s.vel,
+        "resident vs round-trip velocities must be bit-for-bit"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -145,16 +156,24 @@ fn resident_tracks_host_driven_leapfrog_within_f32_tol() {
 
     let dp = max_abs_diff(&s_ref.pos, &s_res.pos);
     let dv = max_abs_diff(&s_ref.vel, &s_res.vel);
-    assert!(dp < TOL, "position drift vs host leapfrog {dp:e} exceeds {TOL:e}");
-    assert!(dv < TOL, "velocity drift vs host leapfrog {dv:e} exceeds {TOL:e}");
+    assert!(
+        dp < TOL,
+        "position drift vs host leapfrog {dp:e} exceeds {TOL:e}"
+    );
+    assert!(
+        dv < TOL,
+        "velocity drift vs host leapfrog {dv:e} exceeds {TOL:e}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
 // Gate 3 — invariant: total momentum is conserved (gravity is internal).
 // ---------------------------------------------------------------------------------------------
 
-/// Internal gravitational forces conserve total linear momentum. Over the run Σ mᵢ vᵢ must stay
-/// put to an f32-consistent relative tolerance.
+/// Internal gravitational forces conserve total linear momentum. Tested at **θ→0**: only there
+/// are the tree forces exact direct sums, so Fᵢⱼ = −Fⱼᵢ to the f32 floor and Σ mᵢ vᵢ stays put.
+/// (At finite θ the monopole acceptance breaks Newton's third law at O(θ²) — the same reason the
+/// M4h momentum gate uses θ→0 — so a finite-θ momentum test would measure BH error, not a bug.)
 #[test]
 fn resident_conserves_total_momentum() {
     const N: usize = 512;
@@ -162,7 +181,7 @@ fn resident_conserves_total_momentum() {
     let s0 = cluster(11, N);
     let p0 = momentum(&s0);
 
-    let mut res = resident();
+    let mut res = GpuResidentLeapfrog::new(G, EPS, 1e-6).expect("wgpu adapter required");
     res.upload(&s0);
     res.step_many(DT, K);
     let s = res.snapshot();
@@ -176,7 +195,10 @@ fn resident_conserves_total_momentum() {
         .sum::<f64>()
         .max(1e-300);
     let rel = (p1 - p0).length() / scale;
-    assert!(rel < 1e-4, "total momentum drifted by {rel:e} (should be ~0)");
+    assert!(
+        rel < 1e-4,
+        "total momentum drifted by {rel:e} (should be ~0)"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -200,7 +222,10 @@ fn resident_energy_stays_bounded() {
     let e1 = total_energy(&s, &probe);
 
     let rel = ((e1 - e0) / e0.abs().max(1e-300)).abs();
-    assert!(rel < 5e-2, "energy drifted by {rel:e} over {K} steps — not bounded");
+    assert!(
+        rel < 5e-2,
+        "energy drifted by {rel:e} over {K} steps — not bounded"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -253,7 +278,10 @@ fn resident_handles_empty_and_single() {
         "free particle should drift ballistically, got {:?}",
         s.pos[0]
     );
-    assert!(max_abs_diff(&s.vel, &[narrow(v0)]) < 1e-6, "free particle velocity must not change");
+    assert!(
+        max_abs_diff(&s.vel, &[narrow(v0)]) < 1e-6,
+        "free particle velocity must not change"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -278,8 +306,14 @@ fn resident_stepping_is_deterministic() {
     b.step_many(DT, K);
     let sb = b.snapshot();
 
-    assert_eq!(sa.pos, sb.pos, "resident stepping must be bit-deterministic (pos)");
-    assert_eq!(sa.vel, sb.vel, "resident stepping must be bit-deterministic (vel)");
+    assert_eq!(
+        sa.pos, sb.pos,
+        "resident stepping must be bit-deterministic (pos)"
+    );
+    assert_eq!(
+        sa.vel, sb.vel,
+        "resident stepping must be bit-deterministic (vel)"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -293,5 +327,9 @@ fn resident_time_advances() {
     let mut res = resident();
     res.upload(&s0);
     res.step_many(DT, 17);
-    assert!((res.time() - 17.0 * DT).abs() < 1e-12, "time should be 17·dt, got {}", res.time());
+    assert!(
+        (res.time() - 17.0 * DT).abs() < 1e-12,
+        "time should be 17·dt, got {}",
+        res.time()
+    );
 }

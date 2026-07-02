@@ -173,7 +173,7 @@ pub(crate) struct FusedCore {
 }
 
 /// A read-only or read-write storage binding entry.
-fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+pub(crate) fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -187,7 +187,7 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
 }
 
 /// A uniform binding entry.
-fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+pub(crate) fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -473,11 +473,12 @@ impl FusedCore {
         let u1 = |count: usize| (count * std::mem::size_of::<u32>()) as u64;
 
         // bodies: seeded, read by morton/gather/traverse (COPY_DST so a wrapper can upload; the
-        // resident stepper mutates it in place with its drift kernel). lanes: morton scratch.
-        // key_a/idx_a seeded (idx via a wrapper); result of the 4-pass sort lands back in A.
-        // parent: NO_PARENT-seeded, then build_tree overwrites non-root slots. counter: cleared
-        // each call. accel: written by traverse, COPY_SRC for readback.
-        let bodies = make("fused-bodies", f4(n), store | cdst);
+        // resident stepper mutates it in place with its drift kernel, and reads it back on
+        // snapshot — hence COPY_SRC). lanes: morton scratch. key_a/idx_a seeded (idx via a
+        // wrapper); result of the 4-pass sort lands back in A. parent: NO_PARENT-seeded, then
+        // build_tree overwrites non-root slots. counter: cleared each call. accel: written by
+        // traverse, COPY_SRC for readback.
+        let bodies = make("fused-bodies", f4(n), store | cdst | csrc);
         let bbox = make("fused-bbox", 32, store);
         let lanes = make("fused-lanes", u4(n), store);
         let key_a = make("fused-key-a", u1(n), store);
@@ -486,7 +487,9 @@ impl FusedCore {
         let idx_b = make("fused-idx-b", u1(n), store);
         let sorted_leaf = make("fused-sorted-leaf", f4(n), store);
         let leaf_bodies = make("fused-leaf-bodies", u1(n), store);
-        let accel = make("fused-accel", f4(n), store | csrc);
+        // accel: written by traverse, COPY_SRC for readback, COPY_DST so the resident stepper can
+        // `clear_buffer` it for the force-free single-particle case (fused never clears it).
+        let accel = make("fused-accel", f4(n), store | csrc | cdst);
         let readback = make("fused-readback", f4(n), cdst | wgpu::BufferUsages::MAP_READ);
 
         let children = make("fused-children", u1(2 * (n - 1)), store);
@@ -697,13 +700,25 @@ impl FusedCore {
         let wide = |count: usize| (count as u32).div_ceil(WG_WIDE);
         // Morton: single-workgroup bbox reduction, then per-particle quantize (→ codes in key_a).
         pass(enc, "fused-reduce", &self.reduce_pl, &res.morton_bg, 1);
-        pass(enc, "fused-quantize", &self.quantize_pl, &res.morton_bg, wide(n));
+        pass(
+            enc,
+            "fused-quantize",
+            &self.quantize_pl,
+            &res.morton_bg,
+            wide(n),
+        );
         // Sort: NUM_PASSES single-invocation radix passes (ping-pong; result back in key_a/idx_a).
         for p in 0..NUM_PASSES as usize {
             pass(enc, "fused-radix", &self.radix_pl, &res.sort_bgs[p], 1);
         }
         // Gather sorted leaves, build the Karras tree, aggregate (after zeroing the visit counter).
-        pass(enc, "fused-gather", &self.gather_pl, &res.gather_bg, wide(n));
+        pass(
+            enc,
+            "fused-gather",
+            &self.gather_pl,
+            &res.gather_bg,
+            wide(n),
+        );
         pass(
             enc,
             "fused-build",
@@ -714,8 +729,20 @@ impl FusedCore {
         enc.clear_buffer(&res.counter, 0, None);
         pass(enc, "fused-aggregate", &self.aggregate_pl, &res.tree_bg, 1);
         // Flatten: single-invocation DFS structure, then parallel geometry (→ traversal packing).
-        pass(enc, "fused-structure", &self.structure_pl, &res.struct_bg, 1);
-        pass(enc, "fused-geometry", &self.geometry_pl, &res.geom_bg, wide(total));
+        pass(
+            enc,
+            "fused-structure",
+            &self.structure_pl,
+            &res.struct_bg,
+            1,
+        );
+        pass(
+            enc,
+            "fused-geometry",
+            &self.geometry_pl,
+            &res.geom_bg,
+            wide(total),
+        );
         // Traverse: one invocation per target writes accel[i] once.
         pass(
             enc,

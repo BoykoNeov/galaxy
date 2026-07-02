@@ -40,6 +40,7 @@
 //! device-churn flake, **not** a solver bug: every binary passes when run on its own
 //! (`cargo test -p galaxy-gpu --test <name>`), which is the reliable way to run them.
 
+pub(crate) mod fused_core;
 pub mod gpu_direct_sum;
 pub mod gpu_lbvh;
 pub mod gpu_lbvh_fused;

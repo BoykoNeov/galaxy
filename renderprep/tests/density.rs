@@ -66,7 +66,10 @@ fn coincident_particles_are_finite_via_softening() {
     let pos = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.0, 0.0, 0.0)];
     let d = knn_density(&pos, 1, 0.5);
     let expect = rho(1, 0.5); // 6/π
-    assert!(d[0].is_finite() && d[1].is_finite(), "softening must bound ρ");
+    assert!(
+        d[0].is_finite() && d[1].is_finite(),
+        "softening must bound ρ"
+    );
     close(d[0], expect, 1e-12);
     close(d[1], expect, 1e-12);
 }
@@ -104,7 +107,11 @@ fn fewer_than_k_plus_one_particles_yields_zero() {
     assert_eq!(knn_density(&[], 3, 1e-6), Vec::<f64>::new());
     assert_eq!(knn_density(&[DVec3::ZERO], 1, 1e-6), vec![0.0]);
     // k == 0 has no meaningful neighbour either.
-    let three = [DVec3::ZERO, DVec3::new(1.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0)];
+    let three = [
+        DVec3::ZERO,
+        DVec3::new(1.0, 0.0, 0.0),
+        DVec3::new(2.0, 0.0, 0.0),
+    ];
     assert_eq!(knn_density(&three, 0, 1e-6), vec![0.0, 0.0, 0.0]);
 }
 
@@ -130,7 +137,13 @@ fn density_is_permutation_equivariant() {
 #[test]
 fn density_is_deterministic() {
     let pos: Vec<DVec3> = (0..20)
-        .map(|i| DVec3::new((i as f64 * 0.7).sin(), (i as f64 * 1.1).cos(), i as f64 * 0.05))
+        .map(|i| {
+            DVec3::new(
+                (i as f64 * 0.7).sin(),
+                (i as f64 * 1.1).cos(),
+                i as f64 * 0.05,
+            )
+        })
         .collect();
     assert_eq!(knn_density(&pos, 4, 1e-6), knn_density(&pos, 4, 1e-6));
 }
@@ -154,7 +167,11 @@ fn boost_never_dims_underdense_particles() {
     let b = density_boost(&[0.5, 1.0, 4.0], 0.5);
     assert_eq!(b[0], 1.0);
     assert_eq!(b[1], 1.0);
-    assert!(b[2] > 1.0, "the overdense one should be boosted, got {}", b[2]);
+    assert!(
+        b[2] > 1.0,
+        "the overdense one should be boosted, got {}",
+        b[2]
+    );
 }
 
 #[test]
@@ -164,11 +181,19 @@ fn boost_is_bounded_and_monotone() {
     let b = density_boost(&density, strength);
     // Bounded in [1, 1 + strength].
     for g in &b {
-        assert!(*g >= 1.0 && *g <= 1.0 + strength + 1e-6, "out of range: {g}");
+        assert!(
+            *g >= 1.0 && *g <= 1.0 + strength + 1e-6,
+            "out of range: {g}"
+        );
     }
     // Ascending density ⇒ non-decreasing boost.
     for w in b.windows(2) {
-        assert!(w[1] >= w[0] - 1e-6, "boost not monotone: {} then {}", w[0], w[1]);
+        assert!(
+            w[1] >= w[0] - 1e-6,
+            "boost not monotone: {} then {}",
+            w[0],
+            w[1]
+        );
     }
 }
 

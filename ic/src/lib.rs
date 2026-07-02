@@ -13,6 +13,7 @@ pub mod eddington;
 mod encounter;
 pub mod hernquist;
 pub mod nfw;
+pub mod nfw_truncated;
 pub mod orient;
 pub mod plummer;
 
@@ -21,5 +22,6 @@ pub use disk::ExponentialDisk;
 pub use disk_collision::DiskCollision;
 pub use hernquist::Hernquist;
 pub use nfw::Nfw;
+pub use nfw_truncated::TruncatedNfw;
 pub use orient::Orientation;
 pub use plummer::Plummer;

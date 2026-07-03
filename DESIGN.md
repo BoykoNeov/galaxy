@@ -1390,7 +1390,12 @@ late-time positions — N-body is chaotic).
     scene-scale-free: `distance_frac`/`near_frac` are fractions of the final
     snapshot's framing radius (the dolly targets the remnant), anchored in
     main.rs. The `dolly` preset is the cuspy realization bit-for-bit, flown
-    from 5× the framed radius down to 0.35× — inside the remnant — at 55° tilt.
+    from 5× the framed radius down to 0.8× — into the remnant's halo field —
+    at 55° tilt. (End distance was 0.35× at landing; retuned by A/B re-render
+    of the retained QUICK snapshots at 0.35/0.5/0.65/0.8 — 0.35 is great in
+    motion but the parked closing stills are a wall of out-of-focus splats;
+    0.8 keeps both nuclei and the star field resolved with the soft
+    foreground still selling the depth.)
   - Notes for future GPU work: `target` is a WGSL reserved keyword; the shared
     uniform needs `VERTEX_FRAGMENT` visibility; one unreproduced subpixel-gate
     failure during a concurrent clippy build (8 clean re-runs — suspected GPU

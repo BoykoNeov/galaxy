@@ -1381,11 +1381,11 @@ mod tests {
                 "fov at 180° (tan pole)",
             ),
             (
-                dolly.replace("near_frac = 0.02", "near_frac = 0.5"),
+                dolly.replace("near_frac = 0.02", "near_frac = 0.9"),
                 "near plane at/past the closest approach",
             ),
             (
-                dolly.replace("distance_frac = [5.0, 0.35]", "distance_frac = [5.0, 0.0]"),
+                dolly.replace("distance_frac = [5.0, 0.8]", "distance_frac = [5.0, 0.0]"),
                 "non-positive dolly distance",
             ),
             (dolly.replace("fov_deg = 55.0", ""), "dolly missing fov"),

@@ -3,8 +3,8 @@
 # toward/through the merger remnant. The camera approaches from a 3/4 view
 # along a fixed direction with constant fov (a camera move, not a zoom):
 # distances are fractions of the final framing radius, easing from well
-# outside the scene to deep inside the remnant, where foreground stars sweep
-# past and cull at the near plane.
+# outside the scene into the remnant's halo field, where foreground stars
+# sweep past and cull at the near plane.
 
 name = "dolly"
 seed = 0x0CA5_D15C
@@ -75,13 +75,17 @@ inner = [1.0, 0.3, 0.45]
 outer = [0.4, 0.9, 0.9]
 
 # The M6g choreography: a slow dolly from 5× the final framing radius down to
-# 0.35× — inside the remnant — from a fixed 3/4 view (55° tilt shows the tails
-# in depth as parallax takes over). fov 55° reads "long lens" at the start and
-# fills with the remnant at the end; near plane close so fly-past stars stay
-# visible until the last moment.
+# 0.8× — into the remnant's halo field — from a fixed 3/4 view (55° tilt shows
+# the tails in depth as parallax takes over). fov 55° reads "long lens" at the
+# start and fills with the remnant at the end; near plane close so fly-past
+# stars stay visible until the last moment. End distance tuned by A/B re-render
+# of retained QUICK snapshots (0.35 / 0.5 / 0.65 / 0.8): 0.35 dives so deep the
+# closing stills are a wall of out-of-focus splats (great in motion, unreadable
+# parked); 0.8 keeps both nuclei and the star field resolved while the soft
+# foreground still sells the depth.
 [rig]
 kind = "dolly"
 direction_deg = [-60.0, 55.0]
-distance_frac = [5.0, 0.35]
+distance_frac = [5.0, 0.8]
 fov_deg = 55.0
 near_frac = 0.02

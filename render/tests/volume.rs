@@ -287,12 +287,11 @@ fn march_uniform_slab_radiance_analytic() {
     );
     let tau = SLAB_KAPPA * SLAB_RHO; // L = 1
     let base = look.emissivity / look.opacity * (1.0 - (-tau).exp());
-    for k in 0..3 {
+    for (k, &ck) in c.iter().enumerate() {
         let want = base * look.color[k];
         assert!(
-            (c[k] - want).abs() / want < 5e-3,
-            "channel {k} radiance {} vs analytic {want}",
-            c[k]
+            (ck - want).abs() / want < 5e-3,
+            "channel {k} radiance {ck} vs analytic {want}"
         );
     }
     let want_t = (-tau).exp();
@@ -326,12 +325,11 @@ fn march_emission_only_kappa_zero_exact() {
         f32::NEG_INFINITY,
     );
     assert_eq!(t, 1.0, "κ = 0 must leave transmittance exactly 1");
-    for k in 0..3 {
+    for (k, &ck) in c.iter().enumerate() {
         let want = look.emissivity * SLAB_RHO * 1.0 * look.color[k];
         assert!(
-            (c[k] - want).abs() / want < 1e-5,
-            "channel {k} emission {} vs exact {want}",
-            c[k]
+            (ck - want).abs() / want < 1e-5,
+            "channel {k} emission {ck} vs exact {want}"
         );
     }
 }
@@ -371,11 +369,10 @@ fn march_high_tau_early_exit_bounded() {
         "τ = 15 march must end below the exit threshold, got T = {t}"
     );
     let want = look.emissivity / look.opacity * (1.0 - (-15.0f32).exp());
-    for k in 0..3 {
+    for (k, &ck) in c.iter().enumerate() {
         assert!(
-            (c[k] - want).abs() / want < 1.5e-2,
-            "channel {k} saturated radiance {} vs analytic {want}",
-            c[k]
+            (ck - want).abs() / want < 1.5e-2,
+            "channel {k} saturated radiance {ck} vs analytic {want}"
         );
     }
 }
@@ -411,8 +408,16 @@ fn march_mix_endpoints_bit_exact() {
             f32::NEG_INFINITY,
         )
     };
-    assert_eq!(run(&a, &b, 0.0), run(&a, &a, 0.0), "u = 0 must ignore grid1");
-    assert_eq!(run(&a, &b, 1.0), run(&b, &b, 1.0), "u = 1 must ignore grid0");
+    assert_eq!(
+        run(&a, &b, 0.0),
+        run(&a, &a, 0.0),
+        "u = 0 must ignore grid1"
+    );
+    assert_eq!(
+        run(&a, &b, 1.0),
+        run(&b, &b, 1.0),
+        "u = 1 must ignore grid0"
+    );
 }
 
 /// Doubling the emissivity doubles every radiance channel EXACTLY (scaling by

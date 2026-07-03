@@ -13,7 +13,10 @@ fn main() {
     .expect("no wgpu adapter");
 
     let info = adapter.get_info();
-    println!("adapter: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+    println!(
+        "adapter: {} ({:?}, {:?})",
+        info.name, info.backend, info.device_type
+    );
     let f = adapter.features();
     for feat in [
         wgpu::Features::FLOAT32_BLENDABLE,

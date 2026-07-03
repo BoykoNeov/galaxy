@@ -102,7 +102,56 @@ pub struct GasFrame<'a> {
 /// dominates the quadrature error, coarse enough that a full-frame march stays
 /// trivial GPU work.
 pub fn step_size(grid0: &GasGrid, grid1: &GasGrid) -> f32 {
-    todo!("M7e: ½·min cell edge over both grids")
+    let min_edge = |g: &GasGrid| {
+        let c = g.cell_size();
+        c.x.min(c.y).min(c.z)
+    };
+    (0.5 * min_edge(grid0).min(min_edge(grid1))) as f32
+}
+
+/// The march domain: the union AABB of both endpoint grids (each grid's own
+/// sample function zeroes outside its own bounds, so the union over-covers
+/// harmlessly and one clip serves both).
+fn union_bounds(gas: &GasFrame) -> (Vec3, Vec3) {
+    (
+        gas.grid0.bounds_min.min(gas.grid1.bounds_min),
+        gas.grid0.bounds_max.max(gas.grid1.bounds_max),
+    )
+}
+
+/// Slab-clip the ray `origin + t·dir` against `[bmin, bmax]`: `Some((t0, t1))`
+/// for a non-empty chord, `None` for a miss. Axes where `|dir| < 1e-12` are
+/// resolved by an inside test instead of dividing (no 0·∞ NaNs). Mirrored
+/// operation-for-operation by the WGSL `clip_aabb` (same ±1e30 sentinels).
+fn clip_aabb(origin: Vec3, dir: Vec3, bmin: Vec3, bmax: Vec3) -> Option<(f32, f32)> {
+    let mut t0 = -1e30_f32;
+    let mut t1 = 1e30_f32;
+    for a in 0..3 {
+        if dir[a].abs() < 1e-12 {
+            if origin[a] < bmin[a] || origin[a] > bmax[a] {
+                return None;
+            }
+        } else {
+            let ta = (bmin[a] - origin[a]) / dir[a];
+            let tb = (bmax[a] - origin[a]) / dir[a];
+            t0 = t0.max(ta.min(tb));
+            t1 = t1.min(ta.max(tb));
+        }
+    }
+    (t0 < t1).then_some((t0, t1))
+}
+
+/// The mixed density the march samples: exactly [`sample_mix`], the renderprep
+/// CPU reference for the shader's two-texture blend.
+fn density_at(gas: &GasFrame, p: Vec3) -> f32 {
+    sample_mix(gas.grid0, gas.grid1, gas.mix, p)
+}
+
+/// Step count and effective step for a chord `[t0, t1]`: `n` equal steps of
+/// the nominal size rounded up, capped at [`MAX_STEPS`].
+fn steps(t0: f32, t1: f32, ds_nominal: f32) -> (u32, f32) {
+    let n = (((t1 - t0) / ds_nominal).ceil() as u32).clamp(1, MAX_STEPS);
+    (n, (t1 - t0) / n as f32)
 }
 
 /// The camera ray through the CENTER of pixel `(px, py)` of a `width × height`
@@ -116,7 +165,17 @@ pub fn step_size(grid0: &GasGrid, grid1: &GasGrid) -> f32 {
 /// `y` UP (row 0 is NDC y = +1) — exactly the splat vertex path's mapping, so
 /// gas and stars agree per pixel. Pinned by hand oracles at corner pixels.
 pub fn ray_for_pixel(camera: &Camera, width: u32, height: u32, px: u32, py: u32) -> (Vec3, Vec3) {
-    todo!("M7e: per-pixel ray generation, ortho + perspective")
+    let ndc_x = (px as f32 + 0.5) / (width as f32 / 2.0) - 1.0;
+    let ndc_y = 1.0 - (py as f32 + 0.5) / (height as f32 / 2.0);
+    let lateral =
+        camera.right * (ndc_x * camera.half_extent.x) + camera.up * (ndc_y * camera.half_extent.y);
+    match camera.projection {
+        Projection::Orthographic => (camera.target + lateral, camera.forward),
+        Projection::Perspective { distance, .. } => {
+            let eye = camera.target - camera.forward * distance;
+            (eye, (camera.target + lateral - eye).normalize())
+        }
+    }
 }
 
 /// CPU reference for the gas fragment march along one ray (module-doc march
@@ -126,7 +185,33 @@ pub fn ray_for_pixel(camera: &Camera, width: u32, height: u32, px: u32, py: u32)
 /// the eye), orthographic passes `f32::NEG_INFINITY` (the full chord). A ray
 /// that misses both grids returns `([0,0,0], 1.0)`.
 pub fn march_gas(gas: &GasFrame, origin: Vec3, dir: Vec3, t_min: f32) -> ([f32; 3], f32) {
-    todo!("M7e: CPU mirror of the fragment-shader gas march")
+    let (bmin, bmax) = union_bounds(gas);
+    let Some((t0_raw, t1)) = clip_aabb(origin, dir, bmin, bmax) else {
+        return ([0.0; 3], 1.0);
+    };
+    let t0 = t0_raw.max(t_min);
+    if t0 >= t1 {
+        return ([0.0; 3], 1.0);
+    }
+    let (n, ds) = steps(t0, t1, step_size(gas.grid0, gas.grid1));
+
+    let mut t = 1.0_f32;
+    let mut c = [0.0_f32; 3];
+    for i in 0..n {
+        let s = t0 + (i as f32 + 0.5) * ds;
+        let rho = density_at(gas, origin + dir * s);
+        // Emit THEN attenuate (module-doc quadrature rule), the exact operation
+        // order of the WGSL march.
+        let e = t * gas.look.emissivity * rho * ds;
+        c[0] += e * gas.look.color[0];
+        c[1] += e * gas.look.color[1];
+        c[2] += e * gas.look.color[2];
+        t *= (-(gas.look.opacity * rho * ds)).exp();
+        if t < EXIT_TRANSMITTANCE {
+            break;
+        }
+    }
+    (c, t)
 }
 
 /// CPU reference for the transmittance compute prepass: `T = exp(−τ)` with
@@ -135,7 +220,39 @@ pub fn march_gas(gas: &GasFrame, origin: Vec3, dir: Vec3, t_min: f32) -> ([f32; 
 /// clipped against the union grid AABB, same step rule as [`march_gas`].
 /// A star with no gas in front returns exactly `1.0`.
 pub fn star_transmittance(gas: &GasFrame, camera: &Camera, star: Vec3) -> f32 {
-    todo!("M7e: CPU mirror of the per-star transmittance prepass")
+    let (dir, t_max) = match camera.projection {
+        Projection::Orthographic => (-camera.forward, f32::INFINITY),
+        Projection::Perspective { distance, .. } => {
+            let eye = camera.target - camera.forward * distance;
+            let d = eye - star;
+            let dist = d.length();
+            if dist == 0.0 {
+                return 1.0; // star at the eye: zero path, unattenuated
+            }
+            (d / dist, dist)
+        }
+    };
+    let (bmin, bmax) = union_bounds(gas);
+    let Some((t0_raw, t1_raw)) = clip_aabb(star, dir, bmin, bmax) else {
+        return 1.0;
+    };
+    // Only gas IN FRONT of the star (toward the camera, and no farther than
+    // the eye) attenuates it.
+    let t0 = t0_raw.max(0.0);
+    let t1 = t1_raw.min(t_max);
+    if t0 >= t1 {
+        return 1.0;
+    }
+    let (n, ds) = steps(t0, t1, step_size(gas.grid0, gas.grid1));
+
+    // Pure optical depth: sum τ, exponentiate once (no emission, no early
+    // exit) — the exact operation order of the WGSL compute prepass.
+    let mut tau = 0.0_f32;
+    for i in 0..n {
+        let s = t0 + (i as f32 + 0.5) * ds;
+        tau += gas.look.opacity * density_at(gas, star + dir * s) * ds;
+    }
+    (-tau).exp()
 }
 
 /// Render the gas pass alone on the CPU: [`ray_for_pixel`] + [`march_gas`] per
@@ -144,5 +261,21 @@ pub fn star_transmittance(gas: &GasFrame, camera: &Camera, star: Vec3) -> f32 {
 /// cleared target. This is the oracle image for the GPU ≡ CPU gates (small
 /// resolutions only; it is a reference, not a fast path).
 pub fn render_gas_cpu(gas: &GasFrame, camera: &Camera, width: u32, height: u32) -> HdrImage {
-    todo!("M7e: CPU reference image of the gas pass")
+    let t_min = match camera.projection {
+        Projection::Orthographic => f32::NEG_INFINITY, // the full chord
+        Projection::Perspective { .. } => 0.0,         // nothing behind the eye
+    };
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for py in 0..height {
+        for px in 0..width {
+            let (origin, dir) = ray_for_pixel(camera, width, height, px, py);
+            let (c, t) = march_gas(gas, origin, dir, t_min);
+            pixels.push([c[0], c[1], c[2], 1.0 - t]);
+        }
+    }
+    HdrImage {
+        width,
+        height,
+        pixels,
+    }
 }

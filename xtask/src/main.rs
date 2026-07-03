@@ -23,6 +23,12 @@
 //!     grid, round-trips frame-data v2 (gas block) through disk, and grades a
 //!     3-panel column-density contact sheet — the dust-lane preview without a
 //!     raymarcher; no sim, no GPU.
+//!   * `volume-demo [out_dir] [--n N] [--stars N] [--res R] [--seed S]
+//!     [--incline DEG] [--kappa K] [--emissivity J] [--exposure E]` (M7e)
+//!     renders the volumetric composite on static synthetic data: raymarched
+//!     gas (emission + absorption) over a star field with per-star
+//!     transmittance, plus the attenuation-off A/B twin and a stars-only
+//!     reference — no sim.
 //!   * Set `GALAXY_MOVIE_QUICK=1` for a fast low-N, low-res preview (same physical
 //!     time and dt, so the trajectory is faithful — only particle count, frame size,
 //!     and frame cadence are reduced). Use it to sanity-check a scenario before a
@@ -128,6 +134,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // trip frame-data v2, and grade a column-density contact sheet — no sim.
     if args.first().map(String::as_str) == Some("gas-demo") {
         return gas_demo(&args[1..]);
+    }
+
+    // `volume-demo` is the M7e demo: the volumetric composite (raymarched gas +
+    // per-star attenuation) on static synthetic data — no sim.
+    if args.first().map(String::as_str) == Some("volume-demo") {
+        return volume_demo(&args[1..]);
     }
 
     let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
@@ -478,37 +490,39 @@ fn gas_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// An inclined exponential gas disk with sech² vertical structure — STATIC
-/// synthetic positions only (no dynamics: M7b/M7c land the physics). Radii by
-/// inverse-CDF bisection of Σ ∝ e^(−R/Rd) truncated at 5 Rd; z by the exact
-/// sech² inverse CDF z = z₀·atanh(2u−1); then the whole disk is rotated about
-/// x so the projections show the dust-lane geometry. Deterministic in `seed`
-/// (splitmix64, one stream).
-fn synthetic_gas_disk(n: usize, seed: u64, incline: f64) -> State {
+/// A splitmix64 → uniform-[0,1) stream (the synthetic-demo PRNG).
+fn splitmix_stream(seed: u64) -> impl FnMut() -> f64 {
     let mut s = seed;
-    let mut rand = move || -> f64 {
+    move || -> f64 {
         s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = s;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z = z ^ (z >> 31);
         (z >> 11) as f64 / (1u64 << 53) as f64
-    };
+    }
+}
 
-    let rd = 1.0;
-    let rmax = 5.0 * rd;
-    let z0 = 0.12 * rd;
+/// Positions of an inclined exponential disk (scale radius 1, truncated at 5)
+/// with sech² vertical structure of scale height `z0`: radii by inverse-CDF
+/// bisection of Σ ∝ e^(−R), z by the exact sech² inverse CDF z₀·atanh(2u−1),
+/// the whole disk rotated about x by `incline`. Deterministic in `seed`; the
+/// draw order (radius, azimuth, height) is fixed — the gas-demo look rides on
+/// it. Shared by the M7d gas disk and the M7e star field.
+fn synthetic_disk_positions(n: usize, seed: u64, incline: f64, z0: f64) -> Vec<galaxy_core::DVec3> {
+    let mut rand = splitmix_stream(seed);
+    let rmax = 5.0;
     // Exponential-disk enclosed-mass CDF, normalized to the truncation radius.
     let cdf = |x: f64| 1.0 - (1.0 + x) * (-x).exp();
-    let norm = cdf(rmax / rd);
+    let norm = cdf(rmax);
     let (sin_i, cos_i) = incline.sin_cos();
 
     let mut pos = Vec::with_capacity(n);
     for _ in 0..n {
         // Invert the radial CDF by bisection (monotone, deterministic).
         let target = rand() * norm;
-        let (mut lo, mut hi) = (0.0, rmax / rd);
-        while hi - lo > 1e-12 * (rmax / rd) {
+        let (mut lo, mut hi) = (0.0, rmax);
+        while hi - lo > 1e-12 * rmax {
             let mid = 0.5 * (lo + hi);
             if cdf(mid) < target {
                 lo = mid;
@@ -516,7 +530,7 @@ fn synthetic_gas_disk(n: usize, seed: u64, incline: f64) -> State {
                 hi = mid;
             }
         }
-        let r = 0.5 * (lo + hi) * rd;
+        let r = 0.5 * (lo + hi);
         let phi = rand() * std::f64::consts::TAU;
         let u = rand().clamp(1e-9, 1.0 - 1e-9);
         let z = z0 * (2.0 * u - 1.0).atanh();
@@ -528,7 +542,14 @@ fn synthetic_gas_disk(n: usize, seed: u64, incline: f64) -> State {
             y * sin_i + z * cos_i,
         ));
     }
+    pos
+}
 
+/// An inclined exponential gas disk with sech² vertical structure — STATIC
+/// synthetic positions only (no dynamics: M7b/M7c land the physics).
+/// Deterministic in `seed` (splitmix64, one stream).
+fn synthetic_gas_disk(n: usize, seed: u64, incline: f64) -> State {
+    let pos = synthetic_disk_positions(n, seed, incline, 0.12);
     State {
         vel: vec![galaxy_core::DVec3::ZERO; n],
         mass: vec![1.0 / n as f64; n],
@@ -539,6 +560,209 @@ fn synthetic_gas_disk(n: usize, seed: u64, incline: f64) -> State {
         a: 1.0,
         pos,
     }
+}
+
+/// A synthetic stellar scene sharing the gas disk's geometry (M7e demo): a
+/// stellar disk 2.5× thicker than the gas (the lane cuts through the bright
+/// body, the classic edge-on look) colored warm-core → blue-outskirts by
+/// radius, plus a warm Plummer bulge for the dust lane to silhouette against.
+/// Deterministic in `seed`; look values are demo-only (eyeballed, not gated).
+fn synthetic_star_frame(n: usize, seed: u64, incline: f64) -> FrameData {
+    let n_disk = n * 3 / 4;
+    let n_bulge = n - n_disk;
+
+    let mut pos: Vec<Vec3> = synthetic_disk_positions(n_disk, seed ^ 0x5354_4152, incline, 0.30)
+        .into_iter()
+        .map(|p| p.as_vec3())
+        .collect();
+    let mut color = Vec::with_capacity(n);
+    let mut size = vec![0.02_f32; n_disk];
+    let mut brightness = vec![1.0_f32; n_disk];
+    for p in &pos {
+        // Warm inner disk → blue outskirts (a young-population gradient).
+        let t = (p.length() / 4.0).clamp(0.0, 1.0);
+        let lerp = |a: f32, b: f32| (1.0 - t) * a + t * b;
+        color.push([lerp(1.0, 0.62), lerp(0.88, 0.74), lerp(0.70, 1.0)]);
+    }
+
+    // Plummer bulge (a = 0.35, truncated at 5a): M(<r)/M = r³/(r²+a²)^{3/2},
+    // inverted in closed form r = a/√(m^{-2/3} − 1).
+    let mut rand = splitmix_stream(seed ^ 0x4255_4C47);
+    let a = 0.35_f64;
+    let m_trunc = 125.0 / 26.0_f64.powf(1.5); // enclosed mass fraction at 5a
+    for _ in 0..n_bulge {
+        let m = (rand() * m_trunc).clamp(1e-9, 1.0 - 1e-9);
+        let r = a / (m.powf(-2.0 / 3.0) - 1.0).sqrt();
+        let z = 2.0 * rand() - 1.0;
+        let phi = rand() * std::f64::consts::TAU;
+        let s = (1.0 - z * z).sqrt();
+        pos.push(galaxy_core::DVec3::new(r * s * phi.cos(), r * s * phi.sin(), r * z).as_vec3());
+        color.push([1.0, 0.86, 0.64]);
+        size.push(0.022);
+        brightness.push(1.3);
+    }
+
+    FrameData {
+        pos,
+        color,
+        size,
+        brightness,
+    }
+}
+
+/// The M7e demo (per the view-first amendment in docs/plans/deep-orbiting-
+/// sunbeam.md): the volumetric composite on STATIC synthetic data — no gas
+/// dynamics exists yet (M7b/M7c follow), so the dust-lane geometry is the
+/// inclined sech² disk from `gas-demo` over a synthetic star field:
+///
+///   1. Synthetic gas disk → `deposit_gas` (timed — the per-snapshot prep cost).
+///   2. Synthetic stellar disk + bulge in the same geometry ([`synthetic_star_frame`]).
+///   3. Three renders through the volumetric path (timed): the full composite
+///      (gas emission + absorption + per-star attenuation), the same with
+///      κ = 0 (attenuation OFF — the A/B pair for DESIGN), and stars-only.
+///   4. EXR → PNG via the existing grade path (bloom applies to the composite
+///      for free — the D9 selling point).
+///
+/// Usage: `volume-demo [out_dir] [--n N] [--stars N] [--res R] [--seed S]
+///         [--incline DEG] [--kappa K] [--emissivity J] [--exposure E]`.
+fn volume_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use galaxy_render::{GasFrame, GasLook};
+    use galaxy_renderprep::{deposit_gas, GasGridConfig};
+    use std::time::Instant;
+
+    const USAGE: &str = "usage: volume-demo [out_dir] [--n N] [--stars N] [--res R] [--seed S] \
+                         [--incline DEG] [--kappa K] [--emissivity J] [--exposure E]";
+    let mut out: Option<PathBuf> = None;
+    let mut n: usize = 60_000;
+    let mut n_stars: usize = 90_000;
+    let mut res: u32 = 128;
+    let mut seed: u64 = 42;
+    let mut incline_deg: f64 = 78.0;
+    let mut kappa: f32 = 6.0;
+    let mut emissivity: f32 = 0.05;
+    let mut exposure: f32 = 1.0;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let mut num = |flag: &str| -> Result<String, String> {
+            it.next().cloned().ok_or(format!("{flag} needs a value"))
+        };
+        let bad = |flag: &str| format!("{flag} must be a number");
+        match arg.as_str() {
+            "--n" => n = num("--n")?.parse().map_err(|_| bad("--n"))?,
+            "--stars" => n_stars = num("--stars")?.parse().map_err(|_| bad("--stars"))?,
+            "--res" => res = num("--res")?.parse().map_err(|_| bad("--res"))?,
+            "--seed" => seed = num("--seed")?.parse().map_err(|_| bad("--seed"))?,
+            "--incline" => incline_deg = num("--incline")?.parse().map_err(|_| bad("--incline"))?,
+            "--kappa" => kappa = num("--kappa")?.parse().map_err(|_| bad("--kappa"))?,
+            "--emissivity" => {
+                emissivity = num("--emissivity")?
+                    .parse()
+                    .map_err(|_| bad("--emissivity"))?
+            }
+            "--exposure" => exposure = num("--exposure")?.parse().map_err(|_| bad("--exposure"))?,
+            other if out.is_none() => out = Some(PathBuf::from(other)),
+            other => return Err(format!("unexpected argument `{other}`\n{USAGE}").into()),
+        }
+    }
+    let out = out.unwrap_or_else(|| std::env::temp_dir().join("galaxy_volume_demo"));
+    std::fs::create_dir_all(&out)?;
+
+    // 1. Gas: the M7d synthetic disk, voxelized.
+    let state = synthetic_gas_disk(n, seed, incline_deg.to_radians());
+    let t0 = Instant::now();
+    let grid = deposit_gas(
+        &state,
+        &GasGridConfig {
+            dims: [res; 3],
+            ..Default::default()
+        },
+    )
+    .expect("all particles are gas");
+    println!(
+        "gas: {n} particles, incline {incline_deg}° → {res}³ grid in {:.1} ms",
+        ms(t0.elapsed())
+    );
+
+    // 2. Stars: disk + bulge in the same geometry.
+    let stars = synthetic_star_frame(n_stars, seed, incline_deg.to_radians());
+    println!("stars: {} splats (disk + bulge)", stars.len());
+
+    // 3. Render the A/B(/reference) set.
+    let rcfg = RenderConfig {
+        width: 1920,
+        height: 1080,
+        falloff: FALLOFF,
+        ..RenderConfig::default()
+    };
+    let (bmin, bmax) = stars.bounds();
+    let camera = Camera::frame_bounds(
+        bmin,
+        bmax,
+        Vec3::NEG_Z,
+        Vec3::Y,
+        DEFAULT_MARGIN,
+        rcfg.aspect(),
+    );
+    let renderer = Renderer::new()?;
+    let gcfg = GradeConfig {
+        exposure,
+        tonemap: TONEMAP,
+        bloom: Some(BloomConfig {
+            strength: BLOOM_STRENGTH,
+            levels: DEFAULT_BLOOM_LEVELS,
+            radius: DEFAULT_BLOOM_RADIUS,
+        }),
+    };
+    let gas_color = [0.55_f32, 0.62, 0.95];
+    let emit = |name: &str, gas: Option<&GasFrame>| -> Result<(), Box<dyn std::error::Error>> {
+        let t0 = Instant::now();
+        let img = renderer.render_frame_with_gas(&stars, gas, &camera, &rcfg)?;
+        let dt = t0.elapsed();
+        let exr = out.join(format!("{name}.exr"));
+        let png = out.join(format!("{name}.png"));
+        write_exr(&exr, &img)?;
+        grade_file(&exr, &png, &gcfg)?;
+        let flux = img.total_flux();
+        println!(
+            "{name}: {:.1} ms render, flux [{:.0}, {:.0}, {:.0}] → {}",
+            ms(dt),
+            flux[0],
+            flux[1],
+            flux[2],
+            png.display()
+        );
+        Ok(())
+    };
+
+    emit(
+        "composite",
+        Some(&GasFrame {
+            grid0: &grid,
+            grid1: &grid,
+            mix: 0.0,
+            look: GasLook {
+                color: gas_color,
+                emissivity,
+                opacity: kappa,
+            },
+        }),
+    )?;
+    emit(
+        "no_absorption",
+        Some(&GasFrame {
+            grid0: &grid,
+            grid1: &grid,
+            mix: 0.0,
+            look: GasLook {
+                color: gas_color,
+                emissivity,
+                opacity: 0.0,
+            },
+        }),
+    )?;
+    emit("stars_only", None)?;
+    println!("A/B pair: composite.png (attenuation ON) vs no_absorption.png (κ = 0)");
+    Ok(())
 }
 
 /// Integrate the grid along each axis into three column-density panels

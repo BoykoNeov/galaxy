@@ -1479,6 +1479,73 @@ late-time positions — N-body is chaotic).
   - [next: SPH forces (pressure + Monaghan viscosity), `GravitySph` composite,
     CFL sentinel, isothermal shock tube vs the analytic Riemann solution
     (M7b).]
+- **Renderprep voxelization + frame-data v2 (landed, M7d — view-first
+  reorder, ahead of M7b/c).** Gas becomes a single-channel ρ voxel grid, the
+  raymarcher's input (M7e) and the frame file's new optional payload.
+  - **`renderprep::gasgrid` (D8):** `GasGrid { dims, bounds, data }` —
+    f32 cells, x-fastest (the wgpu 3D-texture upload layout), values at CELL
+    CENTERS. Deposition is the SPH density estimate at cell centers,
+    ρ(x_c) = Σ m_j·W(|x_c − x_j|, h_j), with the shared `solvers::sph` kernel
+    (correct band-limit; NOT CIC) and h re-derived per snapshot by the shared
+    adaptive-h routine (D2: h never stored). renderprep gains the
+    `galaxy-solvers` dep — the one new edge the plan budgeted.
+  - **Deposition is scatter-by-plane, still bit-exact:** each z-plane walks
+    particles in ASCENDING index, adding each kernel over the cell box its
+    support covers. Per cell that is the same association order as a gather —
+    the terms a global gather would add beyond a particle's own support are
+    exact `+0.0`s — so parallel ≡ serial holds bit-exactly while doing only
+    O(support volume) work per particle. The naive per-cell gather at the
+    global 2·h_max radius went quadratic on adaptive-h fields (h_max is a
+    far-outskirts value): 13.7 s → 0.34 s for 40k @ 128³.
+  - **Bounds are camera-independent:** a cube on the gas centroid, half-edge =
+    percentile radius (default 0.99) + the full kernel support 2·h_max, so
+    every in-percentile particle deposits its whole kernel inside the box.
+  - **Adaptive-h perf fix (solvers):** bracket seeds now come from LOCAL bin
+    occupancy (`HashGrid::bin_len`, O(1)) with a [seed/2, 2·seed] bracket and
+    a median-seed query grid; the old global-spacing seed made dense-center
+    particles gather ~10³–10⁴-candidate balls (~40× on the demo disk). Seeds
+    only position the bracket — converged h is position-determined to the
+    gated tolerance, so this is perf, not physics.
+  - **Frame-data v2:** flags word (u32) after the header + optional gas block
+    (dims 3×u32, bounds 2×3×f32, cells f32) after the star columns;
+    `FRAME_VERSION = 2`, `MIN_READ_VERSION = 1` — v1 streams read with no gas
+    (byte-level v1 fixture in the tests), stars-only v2 ≡ v1 semantics,
+    unknown flag bits / zero-or-overflowing dims / truncation are typed
+    errors. The grid carries ρ ONLY: gas color/emissivity/κ are renderer
+    uniforms, so the look iterates at re-render cost, not re-prep.
+  - **Species routing:** `prepare` drops `Species::Gas` from the splat list by
+    default (`gas_as_splats: bool` keeps it, the debug mode). The filter runs
+    AFTER all attribute math — k-NN passes see all particles (gas is mass) —
+    so stellar rows are bit-identical either way, and gas-free states never
+    take the filter (pre-M7d map bit-compatible, all M6 goldens untouched).
+    `interp::subframe` pairs filtered frames with the span's collisionless
+    indices. Frozen colors / rho0 stay indexed by STATE row (computed before
+    routing), gated.
+  - **Trilinear `GasGrid::sample` + `sample_mix`:** the CPU reference for the
+    M7e shader (clamp-to-edge, zero outside bounds, two-product lerp ⇒
+    bit-exact at representable cell centers and at mix endpoints u = 0/1).
+    Subframes will bind BOTH endpoint grids and mix in-shader (M6c endpoint
+    argument verbatim); nothing gas-related is lerped on the CPU.
+  - Gates: single particle at a cell center ⇒ grid ≡ sampled kernel exactly;
+    grid mass integral recovers deposited mass to 1% (midpoint quadrature at
+    cell ≈ h/5, argued); uniform slab interior flat at m/s³ to 2% (the M7a
+    lattice bound); mass linearity exact; parallel ≡ serial bit-exact;
+    deterministic; percentile-containment; gas selection ignores
+    collisionless rows; single/coincident edges; v1 fixture + v2 with/without
+    gas round-trips; routing = pure filter of the debug map; filtered
+    subframe endpoint-exact.
+  - Demo (`xtask gas-demo`): static synthetic sech² exponential disk
+    (Species::Gas, 40k, 60° incline — no dynamics; the view-first amendment),
+    deposit + timing + mass-capture printout (100.4%), frame v2 disk
+    round-trip asserted bit-exact, and a 3-panel column-density contact sheet
+    (∫ρ along z | y | x: 2:1 ellipse / near-round / razor-thin inclined
+    streak) through the existing EXR → grade path. Retained under
+    `M:\claud_projects\temp\m7d_gasdemo\`.
+  - run_movie wiring (deposit per snapshot endpoint, pass grids to render) is
+    deferred to M7e, where the renderer grows the gas passes and can actually
+    consume them.
+  - [next: M7e — volumetric raymarch + per-star transmittance prepass; the
+    gas-off ≡ M6g golden gate is the load-bearing regression.]
 
 ## Validation strategy
 

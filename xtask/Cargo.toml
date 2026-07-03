@@ -13,3 +13,7 @@ galaxy-renderprep = { path = "../renderprep" }
 galaxy-render = { path = "../render" }
 galaxy-grade = { path = "../grade" }
 glam = { workspace = true }
+# The scenario.toml front-end (M6f) — an xtask-only dependency by design: the
+# engine crates stay serde-free.
+serde = { workspace = true }
+toml = { workspace = true }

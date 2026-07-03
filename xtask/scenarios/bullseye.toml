@@ -1,0 +1,89 @@
+# The Toomre zoo: BULLSEYE / ring galaxy (the Cartwheel geometry). A compact
+# intruder punches through the target disk's center along its spin axis: the
+# target disk is tilted edge-on to the orbital plane with its spin pointing
+# along +y (inclination 90, argument 180) — exactly the direction the relative
+# orbit crosses pericenter — and the passage is near-central (peri = 0.3 Rd,
+# slightly off-center along the node line, like the real Cartwheel). The impulse
+# kicks disk stars inward; their epicyclic rebound piles up as an EXPANDING RING
+# density wave. Warm Plummer-halo disks (the stable M3 family) keep it cheap.
+
+name = "bullseye"
+seed = 0x0B11_5EE
+
+[model]
+kind = "disk-plummer"
+
+[model.galaxy1]
+# The target: the M3 warm disk, tilted so its spin axis lies along the passage.
+disk_mass = 0.15
+scale_length = 0.5
+hz_frac = 0.1
+rmax_frac = 4.0
+toomre_q = 1.5
+halo = { mass = 1.0, scale = 1.0 }
+inclination_deg = 90.0 # spin axis into the orbital plane...
+argument_deg = 180.0   # ...pointing along +y — the pericenter passage direction
+
+[model.galaxy2]
+# The intruder: a compact bullet — dense small halo, token disk (it gets shredded).
+disk_mass = 0.02
+scale_length = 0.2
+hz_frac = 0.1
+rmax_frac = 3.0
+toomre_q = 1.5
+halo = { mass = 0.4, scale = 0.25 }
+
+[model.counts.full]
+halo1 = 5000
+disk1 = 6000 # the ring is drawn in the target disk — that's where the particles go
+halo2 = 2500
+disk2 = 1000
+
+[model.counts.quick]
+halo1 = 1500
+disk1 = 2000
+halo2 = 800
+disk2 = 400
+
+[orbit]
+eccentricity = 1.0
+pericenter = 0.15 # 0.3 Rd — a near-central punch (impact ~t=5.5 from sep 6)
+separation = 6.0
+
+[sim]
+dt = 0.02
+n_steps = 1500 # T=30: impact ~t=5.5, then ~25 time units of ring expansion
+snapshot_every = 25
+eps = 0.05
+
+[look]
+splat_size = 0.12
+# The intruder escapes to large radius after the punch — don't let the framing
+# chase it; keep the ring the subject.
+frame_percentile = 0.7
+palette = [[0.05, 0.035, 0.025], [1.0, 0.5, 0.25], [0.025, 0.035, 0.05], [0.35, 0.6, 1.0]]
+sf_progenitors = [1, 3] # the compressed ring wave is exactly what the SF proxy lights up
+
+[[look.ramps]]
+inner = [0.05, 0.035, 0.025]
+outer = [0.05, 0.035, 0.025]
+
+[[look.ramps]]
+inner = [1.0, 0.35, 0.1]
+outer = [0.55, 0.75, 1.0]
+
+[[look.ramps]]
+inner = [0.025, 0.035, 0.05]
+outer = [0.025, 0.035, 0.05]
+
+[[look.ramps]]
+inner = [1.0, 0.3, 0.45]
+outer = [0.4, 0.9, 0.9]
+
+# The ring lives in the x-z plane (spin +y): face-on to the ring is the camera at
+# tilt 90 / azimuth 90 (view axis +y). Approach obliquely, settle ring-face-on.
+[rig]
+kind = "orbit-tilt"
+azimuth_deg = [55.0, 90.0]
+tilt_deg = [65.0, 90.0]
+window = 6

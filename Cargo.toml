@@ -11,4 +11,6 @@ edition = "2021"
 glam = "0.30"
 proptest = "1"
 rayon = "1"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+toml = "0.8"

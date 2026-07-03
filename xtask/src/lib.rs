@@ -1,11 +1,40 @@
 //! `galaxy-xtask`: the pipeline orchestrator (scenario → sim → renderprep → render
 //! → grade → ffmpeg). The binary is the glue; this lib holds the pure, testable bits.
 
+pub mod spec;
+
 use std::path::PathBuf;
 
 use galaxy_grade::{BloomConfig, GradeConfig, ToneMap};
 use galaxy_renderprep::FrameData;
 use glam::Vec3;
+
+// --- Shared physics / look constants (every scenario) --------------------------
+// Scenario-independent pipeline constants; the per-scenario knobs live in the
+// `scenario.toml` presets (see `spec`). Tuning provenance: DESIGN.md M3.6/M6a–M6e.
+
+/// Gravitational constant of the N-body unit system (G = 1).
+pub const G: f64 = 1.0;
+/// Per-particle peak brightness, so dense cores additively saturate.
+pub const PEAK_BRIGHTNESS: f32 = 0.3;
+/// kNN neighbour count for every density-driven feature (M3.6/M6a tuning).
+pub const DENSITY_K: usize = 32;
+/// Density brightness-boost strength (M6a tuning).
+pub const DENSITY_STRENGTH: f32 = 3.0;
+/// Size-by-density clamp: smallest splat as a fraction of the base size (M6e).
+pub const SIZE_MIN_FRAC: f32 = 0.6;
+/// Size-by-density clamp: largest splat as a fraction of the base size (M6e).
+pub const SIZE_MAX_FRAC: f32 = 1.6;
+/// Hermite in-between frames per snapshot interval (M6c).
+pub const SUBFRAMES: u32 = 8;
+/// Full-resolution frame size.
+pub const FRAME_W: u32 = 1280;
+/// Full-resolution frame size.
+pub const FRAME_H: u32 = 720;
+/// `GALAXY_MOVIE_QUICK=1` preview frame size.
+pub const QUICK_W: u32 = 640;
+/// `GALAXY_MOVIE_QUICK=1` preview frame size.
+pub const QUICK_H: u32 = 360;
 
 /// Default asinh softening knob β for `regrade --tonemap asinh` when `--beta` is not
 /// given. A tuning constant, eyeballed against the rendered collision frames (M6a).
@@ -33,12 +62,22 @@ pub enum ColorModeArg {
     Dispersion,
 }
 
+/// Which scenario a movie invocation selected: a checked-in preset by canonical
+/// name, or a user-supplied `scenario.toml` path (M6f front-end).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScenarioArg {
+    /// A named preset from [`spec::PRESETS`] (aliases resolved to canonical).
+    Preset(String),
+    /// A path to a custom `scenario.toml` (any first positional ending `.toml`).
+    Path(PathBuf),
+}
+
 /// A parsed movie invocation: scenario selector, optional output dir, coloring
 /// mode, and whether to reuse retained snapshots instead of re-simulating.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MovieArgs {
-    /// Canonical scenario name: `"disk"`, `"dm"`, or `"cuspy"`.
-    pub scenario: String,
+    /// The selected scenario (preset name or custom toml path).
+    pub scenario: ScenarioArg,
     /// Output directory; `None` means the scenario's default temp location.
     pub out_dir: Option<PathBuf>,
     /// The M6e coloring mode (default: progenitor palette).
@@ -49,14 +88,15 @@ pub struct MovieArgs {
 }
 
 /// Map movie CLI arguments (everything except a leading `regrade`) to a
-/// [`MovieArgs`]: `[disk|dm|nfw|cuspy|disk-nfw] [out_dir]
-/// [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]`.
+/// [`MovieArgs`]: `[<preset>|<path/to/scenario.toml>] [out_dir]
+/// [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]`,
+/// where `<preset>` is any [`spec::PRESETS`] name.
 ///
 /// Back-compat rules preserved from the original positional CLI: `nfw` and
 /// `disk-nfw` are aliases for `dm` / `cuspy`; a bare first positional that is no
-/// scenario name is taken as the out dir with the `disk` scenario. Flags may come
-/// in any order. Errors (human-readable) on a third positional, unknown flags,
-/// unknown color names, or `--color` without a value.
+/// scenario name (and not a `.toml` path) is taken as the out dir with the `disk`
+/// scenario. Flags may come in any order. Errors (human-readable) on a third
+/// positional, unknown flags, unknown color names, or `--color` without a value.
 pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut color = ColorModeArg::default();
@@ -113,7 +153,7 @@ pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
     };
 
     Ok(MovieArgs {
-        scenario: scenario.to_string(),
+        scenario: ScenarioArg::Preset(scenario.to_string()),
         out_dir: out_dir.map(PathBuf::from),
         color,
         reuse_snapshots,
@@ -571,13 +611,17 @@ mod tests {
 
     // --- movie arg parsing (M6e) -----------------------------------------------
 
+    fn preset_arg(name: &str) -> ScenarioArg {
+        ScenarioArg::Preset(name.to_string())
+    }
+
     #[test]
     fn movie_defaults_to_disk_progenitor_fresh_sim() {
         let m = parse_movie_args(&args(&[])).unwrap();
         assert_eq!(
             m,
             MovieArgs {
-                scenario: "disk".to_string(),
+                scenario: preset_arg("disk"),
                 out_dir: None,
                 color: ColorModeArg::Progenitor,
                 reuse_snapshots: false,
@@ -595,23 +639,66 @@ mod tests {
             ("disk-nfw", "cuspy"),
         ] {
             let m = parse_movie_args(&args(&[raw])).unwrap();
-            assert_eq!(m.scenario, canonical, "{raw}");
+            assert_eq!(m.scenario, preset_arg(canonical), "{raw}");
+            assert_eq!(m.out_dir, None);
+        }
+    }
+
+    // --- scenario.toml front-end + zoo selectors (M6f) --------------------------
+
+    #[test]
+    fn movie_accepts_every_checked_in_preset_name() {
+        // The CLI selector set IS the preset registry — a new preset toml must be
+        // reachable without touching the parser.
+        for (name, _) in spec::PRESETS {
+            let m = parse_movie_args(&args(&[name])).unwrap();
+            assert_eq!(m.scenario, preset_arg(name), "{name}");
             assert_eq!(m.out_dir, None);
         }
     }
 
     #[test]
+    fn movie_first_positional_toml_path_is_a_custom_scenario() {
+        let m = parse_movie_args(&args(&["zoo/mine.toml"])).unwrap();
+        assert_eq!(
+            m.scenario,
+            ScenarioArg::Path(PathBuf::from("zoo/mine.toml"))
+        );
+        assert_eq!(m.out_dir, None);
+    }
+
+    #[test]
+    fn movie_toml_path_composes_with_out_dir_and_flags() {
+        let m = parse_movie_args(&args(&[
+            "zoo/mine.toml",
+            "out",
+            "--color",
+            "initial-radius",
+            "--reuse-snapshots",
+        ]))
+        .unwrap();
+        assert_eq!(
+            m.scenario,
+            ScenarioArg::Path(PathBuf::from("zoo/mine.toml"))
+        );
+        assert_eq!(m.out_dir, Some(PathBuf::from("out")));
+        assert_eq!(m.color, ColorModeArg::InitialRadius);
+        assert!(m.reuse_snapshots);
+    }
+
+    #[test]
     fn movie_second_positional_is_the_out_dir() {
         let m = parse_movie_args(&args(&["cuspy", "some/out"])).unwrap();
-        assert_eq!(m.scenario, "cuspy");
+        assert_eq!(m.scenario, preset_arg("cuspy"));
         assert_eq!(m.out_dir, Some(PathBuf::from("some/out")));
     }
 
     #[test]
     fn movie_bare_first_positional_is_out_dir_with_disk_scenario() {
-        // The original single-scenario CLI: `xtask <out_dir>` — must keep working.
+        // The original single-scenario CLI: `xtask <out_dir>` — must keep working
+        // (a non-preset, non-`.toml` positional is an out dir).
         let m = parse_movie_args(&args(&["renders/mine"])).unwrap();
-        assert_eq!(m.scenario, "disk");
+        assert_eq!(m.scenario, preset_arg("disk"));
         assert_eq!(m.out_dir, Some(PathBuf::from("renders/mine")));
     }
 

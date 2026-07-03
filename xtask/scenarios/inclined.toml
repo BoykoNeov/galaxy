@@ -1,0 +1,80 @@
+# The Toomre zoo: INCLINED twin of `cuspy` — galaxy 1's disk is tilted 45 deg out
+# of the orbital plane (about the line of nodes), galaxy 2 stays prograde. Same
+# orbit, same seed. Expectation: galaxy 1 throws a genuinely 3-D warped tail
+# (material lifted out of the orbital plane — this is what the M6d orbit camera
+# exists to show), while galaxy 2's stays flat — the contrast in one frame.
+
+name = "inclined"
+seed = 0x0CA5_D15C # cuspy's seed — the controlled twin family
+
+[model]
+kind = "disk-nfw"
+
+[model.galaxy1]
+disk_mass = 0.12
+scale_length = 0.6
+hz_frac = 0.1
+rmax_frac = 3.0
+halo = { mvir = 1.0, rs = 1.0, c = 10.0, skirt = 3.0 }
+inclination_deg = 45.0 # the classic intermediate tilt
+
+[model.galaxy2]
+disk_mass = 0.08
+scale_length = 0.5
+hz_frac = 0.1
+rmax_frac = 3.0
+halo = { mvir = 0.7, rs = 0.9, c = 10.0, skirt = 2.7 }
+# prograde (the flat-tail reference in the same frame)
+
+[model.counts.full]
+halo1 = 10000
+disk1 = 5000
+halo2 = 8000
+disk2 = 4000
+
+[model.counts.quick]
+halo1 = 5000
+disk1 = 3000
+halo2 = 4000
+disk2 = 2000
+
+[orbit]
+eccentricity = 1.0
+pericenter = 1.5
+separation = 8.0
+
+[sim]
+dt = 0.02
+n_steps = 1500
+snapshot_every = 25
+eps = 0.02 # cusp-resolution rule (M5f) — same budget as cuspy
+
+[look]
+splat_size = 0.15
+frame_percentile = 0.7
+palette = [[0.05, 0.035, 0.025], [1.0, 0.5, 0.25], [0.025, 0.035, 0.05], [0.35, 0.6, 1.0]]
+sf_progenitors = [1, 3]
+
+[[look.ramps]]
+inner = [0.05, 0.035, 0.025]
+outer = [0.05, 0.035, 0.025]
+
+[[look.ramps]]
+inner = [1.0, 0.35, 0.1]
+outer = [0.55, 0.75, 1.0]
+
+[[look.ramps]]
+inner = [0.025, 0.035, 0.05]
+outer = [0.025, 0.035, 0.05]
+
+[[look.ramps]]
+inner = [1.0, 0.3, 0.45]
+outer = [0.4, 0.9, 0.9]
+
+# A wider tilt sweep than cuspy: the payoff here is the out-of-plane structure,
+# so the camera dives from steep 3/4 toward face-on THROUGH the warped tail.
+[rig]
+kind = "orbit-tilt"
+azimuth_deg = [-110.0, 60.0]
+tilt_deg = [65.0, 20.0]
+window = 8

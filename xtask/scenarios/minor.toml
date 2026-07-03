@@ -1,0 +1,84 @@
+# The Toomre zoo: MINOR MERGER (1:10). The M3 warm primary disk is orbited by a
+# compact satellite one-tenth its total mass on a bound, moderately eccentric,
+# 40-degree-inclined orbit. Over ~2.7 radial periods (three pericenter passages)
+# the satellite is tidally stripped into a long-lived STREAM that wraps out of
+# the disk plane — the classic satellite-disruption picture (Sagittarius-like),
+# a different subject from the violent major encounters.
+
+name = "minor"
+seed = 0x5A7E_111E
+
+[model]
+kind = "disk-plummer"
+
+[model.galaxy1]
+# The primary: the M3 warm disk, prograde.
+disk_mass = 0.15
+scale_length = 0.5
+hz_frac = 0.1
+rmax_frac = 4.0
+toomre_q = 1.5
+halo = { mass = 1.0, scale = 1.0 }
+
+[model.galaxy2]
+# The satellite: (0.1 + 0.015) = 1/10 of the primary's (1.0 + 0.15), compact.
+disk_mass = 0.015
+scale_length = 0.2
+hz_frac = 0.1
+rmax_frac = 4.0
+toomre_q = 1.5
+halo = { mass = 0.1, scale = 0.25 }
+inclination_deg = 40.0 # the stream wraps out of the disk plane — 3-D structure
+
+[model.counts.full]
+halo1 = 5000
+disk1 = 4000
+halo2 = 1500
+disk2 = 2500 # the stream is drawn in satellite material — weight its disk
+
+[model.counts.quick]
+halo1 = 1500
+disk1 = 1200
+halo2 = 500
+disk2 = 800
+
+[orbit]
+eccentricity = 0.7 # bound — the satellite must come back
+pericenter = 1.2
+separation = 6.5 # just inside apocenter (6.8): start near turnaround
+
+[sim]
+dt = 0.02
+n_steps = 6000 # T=120 ~ 2.7 radial periods (T_r ~ 45): three pericenter passages
+snapshot_every = 100 # -> ~61 snapshots, same movie length as the majors
+eps = 0.05
+
+[look]
+splat_size = 0.12
+frame_percentile = 0.97 # the stream IS the subject — frame generously
+palette = [[0.05, 0.035, 0.025], [1.0, 0.5, 0.25], [0.025, 0.035, 0.05], [0.35, 0.6, 1.0]]
+sf_progenitors = [1, 3]
+
+[[look.ramps]]
+inner = [0.05, 0.035, 0.025]
+outer = [0.05, 0.035, 0.025]
+
+[[look.ramps]]
+inner = [1.0, 0.35, 0.1]
+outer = [0.55, 0.75, 1.0]
+
+[[look.ramps]]
+inner = [0.025, 0.035, 0.05]
+outer = [0.025, 0.035, 0.05]
+
+[[look.ramps]]
+inner = [1.0, 0.3, 0.45]
+outer = [0.4, 0.9, 0.9]
+
+# Slow half-orbit at a 3/4-ish tilt easing toward face-on: the out-of-plane
+# stream reads against the flat primary disk.
+[rig]
+kind = "orbit-tilt"
+azimuth_deg = [-90.0, 90.0]
+tilt_deg = [55.0, 30.0]
+window = 8

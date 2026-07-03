@@ -62,27 +62,18 @@ use galaxy_renderprep::{
 use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_xtask::{
     framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii, ColorModeArg,
-    DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS,
+    ScenarioArg, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K, DENSITY_STRENGTH, FRAME_H,
+    FRAME_W, G, PEAK_BRIGHTNESS, QUICK_H, QUICK_W, SIZE_MAX_FRAC, SIZE_MIN_FRAC, SUBFRAMES,
 };
 use glam::Vec3;
 
-// --- Shared physics / look (both scenarios) ----------------------------------
-const G: f64 = 1.0;
+// --- Shared render / grade look (all scenarios) --------------------------------
+// The shared physics/look constants (G, kNN density tuning, splat-size clamps,
+// frame sizes, subframe count) live in the lib (`galaxy_xtask`) so the M6f
+// spec-driven builder shares them; the grade-side and mode-color knobs below are
+// consumed only by this binary. Tuning provenance: DESIGN.md M3.6/M6a–M6e.
 const THETA: f64 = 0.5; // Barnes-Hut opening angle
 const FALLOFF: f32 = 6.0;
-const PEAK_BRIGHTNESS: f32 = 0.3; // per-particle peak, so dense cores additively saturate
-
-// Density-aware brightness boost (M3.6 estimator, switched ON and tuned in M6a).
-// Tuned by A/B on rendered QUICK cuspy frames (strengths 0/1.5/3/6, DESIGN M6a):
-// the mean reference ρ_ref is dominated by the dense inner disk, so the boost acts
-// on nuclei and inner knots — strength 3 makes them read as bright cores, 1.5 is
-// invisible (the boosted pixels were already tone-curve-saturated), 6 blows the
-// nuclei into blobs. k = 32 (top of the documented 8–32 band) halves the estimator's
-// shot noise vs 16 for negligible cost — temporal stability matters in a movie. The
-// kNN distance floor reuses each scenario's force softening ε — the smallest
-// separation the sim itself resolves.
-const DENSITY_K: usize = 32;
-const DENSITY_STRENGTH: f32 = 3.0;
 // M6e coloring. All kNN consumers reuse (DENSITY_K, scenario ε) so the O(N²)
 // estimate runs once per snapshot no matter how many passes are on.
 //   * Star-formation proxy (ON in every scenario): hue shift toward a young-
@@ -101,8 +92,6 @@ const DENSITY_STRENGTH: f32 = 3.0;
 //     if the mode is ever wanted on a disk+halo scene.
 const SF_YOUNG: [f32; 3] = [0.7, 0.8, 1.0];
 const SF_STRENGTH: f32 = 0.8;
-const SIZE_MIN_FRAC: f32 = 0.6;
-const SIZE_MAX_FRAC: f32 = 1.6;
 const DISPERSION_COLD: [f32; 3] = [0.25, 0.4, 1.0];
 const DISPERSION_HOT: [f32; 3] = [1.0, 0.5, 0.2];
 const EXPOSURE: f32 = 1.0;
@@ -113,16 +102,7 @@ const TONEMAP: ToneMap = ToneMap::AcesApprox;
 // cuspy halo field, 1.2 washes out structure; 0.45 makes nuclei and knots glow while
 // tails and halo dots stay resolved. Levels/radius are the documented CLI defaults.
 const BLOOM_STRENGTH: f32 = 0.45;
-// Hermite temporal upsampling (M6c): snapshots store full phase space, so cubic
-// Hermite in-betweens are physically informed and cost no sim time. 8 subframes
-// per snapshot at 60 fps turns the ~2 s / 30 fps flipbook into a ~8 s smooth
-// movie (playback slows 4x per unit sim time; pericenter reads as continuous).
-const SUBFRAMES: u32 = 8;
 const FPS: u32 = 60;
-const FRAME_W: u32 = 1280;
-const FRAME_H: u32 = 720;
-const QUICK_W: u32 = 640;
-const QUICK_H: u32 = 360;
 
 /// Everything a scenario hands the pipeline: the sampled IC plus the sim-timing,
 /// softening, splat look, and framing that differ between the disk and DM movies.
@@ -186,23 +166,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]"
         )
     })?;
+    let name = match &movie.scenario {
+        ScenarioArg::Preset(name) => name.clone(),
+        // Wired up with the M6f spec implementation.
+        ScenarioArg::Path(_) => {
+            return Err("custom scenario.toml paths are not implemented yet (M6f)".into())
+        }
+    };
     let out: PathBuf = movie.out_dir.clone().unwrap_or_else(|| {
-        std::env::temp_dir().join(match movie.scenario.as_str() {
-            "dm" => "galaxy_dm_merger",
-            "cuspy" => "galaxy_cuspy_disk",
-            _ => "galaxy_movie",
+        std::env::temp_dir().join(match name.as_str() {
+            "dm" => "galaxy_dm_merger".to_string(),
+            "cuspy" => "galaxy_cuspy_disk".to_string(),
+            "disk" => "galaxy_movie".to_string(),
+            other => format!("galaxy_{other}"),
         })
     });
 
     println!(
-        "scenario = {} (color: {:?}){}",
-        movie.scenario,
+        "scenario = {name} (color: {:?}){}",
         movie.color,
         if quick { " (quick preview)" } else { "" }
     );
     println!("output → {}", out.display());
 
-    let scenario = match movie.scenario.as_str() {
+    let scenario = match name.as_str() {
         "dm" => dm_scenario(quick),
         "cuspy" => cuspy_scenario(quick),
         _ => disk_scenario(quick),

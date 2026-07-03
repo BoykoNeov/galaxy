@@ -1,0 +1,69 @@
+# The M5e payoff: a 2:1 major dark-matter merger of two exponentially-truncated
+# NFW halos (rho ~ r^-1 cusps) on a deep parabolic encounter -> a single triaxial
+# remnant (NOT thin tails — those need cold disks). Particle counts split 2:1 to
+# match the mass ratio => equal particle mass across both halos. This preset
+# reproduces the hardcoded `dm` scenario bit-for-bit.
+
+name = "dm"
+seed = 0x0DEA_D000
+
+[model]
+kind = "nfw-merger"
+
+[model.galaxy1]
+# Primary: M_vir=1, r_s=1, c=10 => r_vir=10; exponential skirt r_d=3.
+mvir = 1.0
+rs = 1.0
+c = 10.0
+skirt = 3.0
+
+[model.galaxy2]
+# Secondary: half the virial mass (2:1 major merger), r_s=0.8 => r_vir=8.
+mvir = 0.5
+rs = 0.8
+c = 10.0
+skirt = 2.4
+
+[model.counts.full]
+halo1 = 12000
+halo2 = 6000
+
+[model.counts.quick]
+halo1 = 2000
+halo2 = 1000
+
+[orbit]
+eccentricity = 1.0 # parabolic
+pericenter = 3.0   # DEEP (peri << r_vir) so the halos fully overlap at closest approach
+separation = 40.0  # > r_vir1 + r_vir2 (=18): a clean approach
+
+[sim]
+dt = 0.02      # ~0.016 t_dyn — resolves the deep pericenter passage
+n_steps = 16000 # T=320: past first pericenter (t~104) through coalescence
+snapshot_every = 200
+snapshot_every_quick = 400
+eps = 0.05 # 0.05 r_s — matches the NFW stability test's softening
+
+[look]
+splat_size = 0.6 # world units — the NFW scene (~40u) is ~8x the disk scene
+frame_percentile = 0.97
+# halo1 warm (primary), halo2 cool (secondary)
+palette = [[1.0, 0.55, 0.3], [0.35, 0.6, 1.0]]
+sf_progenitors = [0, 1] # the halos ARE the luminous subject here (shocked-overlap diagnostic)
+
+# initial-radius ramps: inner keeps the halo identity color, outer pales toward
+# white — the remnant wears its provenance as a radial gradient.
+[[look.ramps]]
+inner = [1.0, 0.55, 0.3]
+outer = [1.0, 0.85, 0.65]
+
+[[look.ramps]]
+inner = [0.35, 0.6, 1.0]
+outer = [0.7, 0.85, 1.0]
+
+# The remnant is TRIAXIAL — a half-turn orbit at a fixed 3/4 tilt is what shows it.
+[rig]
+kind = "orbit-tilt"
+azimuth_deg = [-90.0, 90.0]
+tilt_deg = [60.0, 60.0]
+window = 6

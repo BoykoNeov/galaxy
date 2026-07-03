@@ -1,0 +1,80 @@
+# The Toomre zoo: RETROGRADE twin of `cuspy` — the control experiment. Identical
+# physics (same galaxies, same orbit, same seed => same realization) except both
+# disk spins are flipped to counter-rotate against the orbit (inclination 180).
+# Expectation: the near-resonant prograde tidal response vanishes — NO long thin
+# tails, only mild disk heating/warping. This is the "why prograde matters" pair;
+# the gate in spec.rs pins it to cuspy in everything but the spin.
+
+name = "retro"
+seed = 0x0CA5_D15C # cuspy's seed — a controlled twin, not a new realization
+
+[model]
+kind = "disk-nfw"
+
+[model.galaxy1]
+disk_mass = 0.12
+scale_length = 0.6
+hz_frac = 0.1
+rmax_frac = 3.0
+halo = { mvir = 1.0, rs = 1.0, c = 10.0, skirt = 3.0 }
+inclination_deg = 180.0 # retrograde: spin flipped to -Z
+
+[model.galaxy2]
+disk_mass = 0.08
+scale_length = 0.5
+hz_frac = 0.1
+rmax_frac = 3.0
+halo = { mvir = 0.7, rs = 0.9, c = 10.0, skirt = 2.7 }
+inclination_deg = 180.0
+
+[model.counts.full]
+halo1 = 10000
+disk1 = 5000
+halo2 = 8000
+disk2 = 4000
+
+[model.counts.quick]
+halo1 = 5000
+disk1 = 3000
+halo2 = 4000
+disk2 = 2000
+
+[orbit]
+eccentricity = 1.0
+pericenter = 1.5
+separation = 8.0
+
+[sim]
+dt = 0.02
+n_steps = 1500
+snapshot_every = 25
+eps = 0.02 # cusp-resolution rule (M5f) — same budget as cuspy
+
+[look]
+splat_size = 0.15
+frame_percentile = 0.7
+palette = [[0.05, 0.035, 0.025], [1.0, 0.5, 0.25], [0.025, 0.035, 0.05], [0.35, 0.6, 1.0]]
+sf_progenitors = [1, 3]
+
+[[look.ramps]]
+inner = [0.05, 0.035, 0.025]
+outer = [0.05, 0.035, 0.025]
+
+[[look.ramps]]
+inner = [1.0, 0.35, 0.1]
+outer = [0.55, 0.75, 1.0]
+
+[[look.ramps]]
+inner = [0.025, 0.035, 0.05]
+outer = [0.025, 0.035, 0.05]
+
+[[look.ramps]]
+inner = [1.0, 0.3, 0.45]
+outer = [0.4, 0.9, 0.9]
+
+# Same choreography as cuspy so the pair cuts together as a direct A/B.
+[rig]
+kind = "orbit-tilt"
+azimuth_deg = [-90.0, 40.0]
+tilt_deg = [55.0, 25.0]
+window = 8

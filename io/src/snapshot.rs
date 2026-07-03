@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use galaxy_core::{DVec3, ParticleId, Progenitor, State};
+use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 
 /// Upper bound on a header string length, to reject garbage before allocating.
 const MAX_STR_LEN: usize = 1 << 16;
@@ -222,6 +222,7 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         mass,
         id,
         progenitor,
+        kind: vec![Species::Collisionless; n],
         time,
         a: scale_factor,
     };

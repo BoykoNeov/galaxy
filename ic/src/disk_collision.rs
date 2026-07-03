@@ -20,7 +20,7 @@
 //! The combined realization is delivered in the global zero-COM / zero-momentum
 //! frame with contiguous unique ids, galaxy 1's particles first.
 
-use galaxy_core::{DVec3, ParticleId, Progenitor, State};
+use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 
 use crate::encounter;
 use crate::{ExponentialDisk, Orientation, Plummer, SphericalHalo};
@@ -202,6 +202,7 @@ impl<H: SphericalHalo> DiskCollision<H> {
             mass,
             id,
             progenitor,
+            kind: vec![Species::Collisionless; n],
             time: 0.0,
             a: 1.0,
         }

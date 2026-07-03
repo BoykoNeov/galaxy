@@ -9,6 +9,18 @@ pub struct ParticleId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Progenitor(pub u16);
 
+/// Physical species of a particle. Deliberately distinct from [`Progenitor`]
+/// (pure identity: which galaxy + component): physics and render routing key
+/// on `Species`, never on progenitor tags.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Species {
+    /// Star / dark-matter particle: gravity only.
+    Collisionless = 0,
+    /// SPH gas particle: gravity + hydrodynamic forces (M7).
+    Gas = 1,
+}
+
 /// Simulation state in Structure-of-Arrays layout (cache/SIMD friendly).
 ///
 /// Positions and velocities are f64 (dynamic range + energy conservation).
@@ -20,6 +32,7 @@ pub struct State {
     pub mass: Vec<f64>,
     pub id: Vec<ParticleId>,
     pub progenitor: Vec<Progenitor>,
+    pub kind: Vec<Species>,
     pub time: f64,
     pub a: f64,
 }
@@ -47,6 +60,7 @@ impl State {
             mass,
             id: (0..n as u64).map(ParticleId).collect(),
             progenitor: vec![Progenitor(0); n],
+            kind: vec![Species::Collisionless; n],
             time: 0.0,
             a: 1.0,
         }
@@ -59,5 +73,6 @@ impl State {
         assert_eq!(self.mass.len(), n, "mass length mismatch");
         assert_eq!(self.id.len(), n, "id length mismatch");
         assert_eq!(self.progenitor.len(), n, "progenitor length mismatch");
+        assert_eq!(self.kind.len(), n, "kind length mismatch");
     }
 }

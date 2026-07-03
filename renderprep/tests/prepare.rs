@@ -6,7 +6,7 @@
 //! is exactly `palette[progenitor]` and its brightness is exactly
 //! `brightness_per_mass * mass`.
 
-use galaxy_core::{DVec3, ParticleId, Progenitor, State};
+use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 use galaxy_renderprep::{
     knn_density, prepare, ColorMode, CompressionHue, DensityColoring, DispersionColoring,
     PrepConfig, SizeByDensity,
@@ -24,6 +24,7 @@ fn sample_state() -> State {
         mass: vec![2.0, 4.0, 1.0],
         id: vec![ParticleId(0), ParticleId(1), ParticleId(2)],
         progenitor: vec![Progenitor(0), Progenitor(1), Progenitor(0)],
+        kind: vec![Species::Collisionless; 3],
         time: 5.0,
         a: 1.0,
     }
@@ -119,6 +120,7 @@ fn clustered_state() -> State {
         mass: vec![1.0; n],
         id: (0..n as u64).map(ParticleId).collect(),
         progenitor: vec![Progenitor(0); n],
+        kind: vec![Species::Collisionless; n],
         time: 0.0,
         a: 1.0,
         pos,
@@ -200,6 +202,7 @@ fn density_tiny_state_does_not_panic() {
         mass: vec![1.0, 1.0],
         id: vec![ParticleId(0), ParticleId(1)],
         progenitor: vec![Progenitor(0); 2],
+        kind: vec![Species::Collisionless; 2],
         time: 0.0,
         a: 1.0,
     };
@@ -288,6 +291,7 @@ fn two_temperature_state() -> State {
         mass: vec![1.0; 6],
         id: (0..6).map(ParticleId).collect(),
         progenitor: vec![Progenitor(0); 6],
+        kind: vec![Species::Collisionless; 6],
         time: 0.0,
         a: 1.0,
         pos,
@@ -381,6 +385,7 @@ fn compression_hue_shifts_only_the_compressed_clump() {
         mass: vec![1.0; 8],
         id: (0..8).map(ParticleId).collect(),
         progenitor: vec![Progenitor(0); 8],
+        kind: vec![Species::Collisionless; 8],
         time: 0.0,
         a: 1.0,
         pos,

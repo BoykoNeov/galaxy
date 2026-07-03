@@ -6,7 +6,7 @@
 //! parameter `t = r/(r + r_half)` is a closed form; σ_ref and ρ-ratios are chosen
 //! so the mapped `t` is an exact binary fraction wherever exactness is asserted.
 
-use galaxy_core::{DVec3, ParticleId, Progenitor, State};
+use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 use galaxy_renderprep::{compression_colors, dispersion_colors, initial_radius_colors, RadialRamp};
 
 /// Build a state from positions + progenitors with the given masses (vel zero —
@@ -19,6 +19,7 @@ fn state_of(pos: Vec<DVec3>, progenitor: Vec<u16>, mass: Vec<f64>) -> State {
         vel: vec![DVec3::ZERO; n],
         id: (0..n as u64).map(ParticleId).collect(),
         progenitor: progenitor.into_iter().map(Progenitor).collect(),
+        kind: vec![Species::Collisionless; n],
         time: 0.0,
         a: 1.0,
         pos,

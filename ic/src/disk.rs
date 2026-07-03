@@ -39,7 +39,7 @@
 //! tests can select the disk population robustly. `sample` returns the halo
 //! particles first, then the disk particles.
 
-use galaxy_core::{DVec3, ParticleId, Progenitor, State};
+use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 
 use std::f64::consts::{PI, TAU};
 
@@ -392,6 +392,7 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
             mass,
             id,
             progenitor,
+            kind: vec![Species::Collisionless; n],
             time: 0.0,
             a: 1.0,
         }

@@ -8,6 +8,7 @@ pub mod barnes_hut;
 pub mod direct_sum;
 pub mod lbvh;
 pub mod potential;
+pub mod sph;
 
 pub use barnes_hut::{BarnesHut, BuildMode, FlatNode, FlatTree};
 pub use direct_sum::DirectSum;

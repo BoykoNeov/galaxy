@@ -19,7 +19,7 @@
 //! setup therefore fixes the *initial* COM phase-space coordinates exactly; the
 //! subsequent many-body evolution is the simulation's job, not a closed form.
 
-use galaxy_core::{DVec3, ParticleId, Progenitor, State};
+use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 
 use crate::encounter;
 use crate::Plummer;
@@ -163,6 +163,7 @@ impl Collision {
             mass,
             id,
             progenitor,
+            kind: vec![Species::Collisionless; n],
             time: 0.0,
             a: 1.0,
         }

@@ -88,8 +88,25 @@ impl Camera {
         distance: f32,
         near: f32,
     ) -> Self {
-        let _ = (target, view_dir, up_hint, half_extent, distance, near);
-        todo!("M6g: perspective camera constructor")
+        assert!(
+            distance.is_finite() && distance > 0.0,
+            "perspective distance must be finite and positive, got {distance}"
+        );
+        assert!(
+            near.is_finite() && near > 0.0 && near < distance,
+            "perspective near must be finite with 0 < near < distance, got near {near}, distance {distance}"
+        );
+        let forward = view_dir.normalize();
+        let right = forward.cross(up_hint).normalize();
+        let up = right.cross(forward).normalize();
+        Camera {
+            target,
+            right,
+            up,
+            forward,
+            half_extent,
+            projection: Projection::Perspective { distance, near },
+        }
     }
 
     /// Auto-frame the axis-aligned box `[min, max]` looking along `view_dir`: center
@@ -160,7 +177,17 @@ impl Camera {
                 d.dot(self.right) / self.half_extent.x,
                 d.dot(self.up) / self.half_extent.y,
             ),
-            Projection::Perspective { .. } => todo!("M6g: perspective projection"),
+            Projection::Perspective { distance, .. } => {
+                // Similar triangles from the pinhole at depth `distance` behind
+                // the target: lateral offsets scale by distance/depth, so the
+                // target plane (depth == distance) reproduces ortho exactly.
+                let z = d.dot(self.forward) + distance;
+                let s = distance / z;
+                Vec2::new(
+                    d.dot(self.right) * s / self.half_extent.x,
+                    d.dot(self.up) * s / self.half_extent.y,
+                )
+            }
         }
     }
 
@@ -169,8 +196,11 @@ impl Camera {
     /// orthographic, the distance past the target plane (unused by the splat
     /// path, defined for symmetry).
     pub fn view_depth(&self, world: Vec3) -> f32 {
-        let _ = world;
-        todo!("M6g: view depth")
+        let along = (world - self.target).dot(self.forward);
+        match self.projection {
+            Projection::Orthographic => along,
+            Projection::Perspective { distance, .. } => along + distance,
+        }
     }
 
     /// NDC half-extent of a splat of world-space `radius` centered at `world` —
@@ -180,8 +210,16 @@ impl Camera {
     /// scaled by the renderer — surface brightness is distance-invariant, so
     /// integrated flux falls as 1/d² automatically (the physical law).
     pub fn splat_extent(&self, world: Vec3, radius: f32) -> Vec2 {
-        let _ = (world, radius);
-        todo!("M6g: position-dependent splat extent")
+        match self.projection {
+            Projection::Orthographic => self.splat_ndc(radius),
+            Projection::Perspective { distance, .. } => {
+                let s = distance / self.view_depth(world);
+                Vec2::new(
+                    radius * s / self.half_extent.x,
+                    radius * s / self.half_extent.y,
+                )
+            }
+        }
     }
 
     /// NDC half-extent of a splat of the given world-space radius *at the target

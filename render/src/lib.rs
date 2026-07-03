@@ -40,6 +40,10 @@ pub enum RenderError {
     /// A GPU buffer could not be mapped for readback.
     #[error("failed to map GPU buffer for readback: {0}")]
     BufferMap(String),
+    /// A [`render::RenderConfig`] parameter is outside its documented domain
+    /// (e.g. a perspective splat-clamp window that is empty or non-finite).
+    #[error("invalid render config: {0}")]
+    Config(String),
     /// An OpenEXR read/write failed.
     #[error("OpenEXR error: {0}")]
     Exr(String),

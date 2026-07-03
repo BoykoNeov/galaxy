@@ -4,16 +4,21 @@
 //!
 //! Each particle is drawn as an instanced quad whose fragment applies a Gaussian
 //! falloff, additively blended (`src·1 + dst·1`) into an `Rgba32Float` target — the
-//! order-independent accumulation DESIGN calls for. Splat centers/sizes are
-//! projected to NDC on the CPU (simple, fine at MVP N; the world-space vertex-shader
-//! path is the 10⁸ swap). The GPU context is built once and reused per frame.
+//! order-independent accumulation DESIGN calls for. Instances carry **world-space**
+//! position/radius; the camera (basis + projection parameters) is a uniform and
+//! projection happens in the vertex shader (M6g — the 10⁸-particle path: no
+//! per-frame CPU projection loop). Orthographic reproduces the retired CPU
+//! projection bit-for-bit in formula (pinned by the golden gate in
+//! `tests/vertex_path.rs`); perspective keeps peak surface intensity fixed and
+//! shrinks screen size ∝ 1/depth, so apparent flux follows the physical 1/d² law
+//! with no tuned attenuation factor. The GPU context is built once and reused.
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use galaxy_renderprep::FrameData;
 
-use crate::camera::Camera;
+use crate::camera::{Camera, Projection};
 use crate::RenderError;
 
 /// HDR accumulation format: 32-bit float so galaxy cores don't saturate/band (16F
@@ -94,50 +99,124 @@ impl HdrImage {
     }
 }
 
-/// One splat as uploaded to the GPU: NDC center + NDC half-extent (from the camera)
-/// and premultiplied emissive color (`color · brightness`).
+/// One splat as uploaded to the GPU: **world-space** position and radius plus
+/// premultiplied emissive color (`color · brightness`). Projection is the vertex
+/// shader's job — the instance buffer is camera-independent.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuSplat {
-    center: [f32; 2],
-    half: [f32; 2],
+    pos: [f32; 3],
+    radius: f32,
     emissive: [f32; 3],
     _pad: f32,
 }
 
-/// Fragment uniform: the Gaussian falloff constant (padded to 16 bytes).
+/// Per-frame uniform: camera basis + projection parameters + splat-clamp policy.
+/// All vec4-aligned; the layout mirrors the WGSL `Uniforms` struct exactly.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Params {
-    falloff: f32,
-    _pad: [f32; 3],
+struct Uniforms {
+    /// Screen-right axis (xyz; w unused).
+    right: [f32; 4],
+    /// Screen-up axis (xyz; w unused).
+    up: [f32; 4],
+    /// View direction into the screen (xyz; w unused).
+    forward: [f32; 4],
+    /// World-space view target (xyz; w unused).
+    target: [f32; 4],
+    /// x, y: half_extent at the target plane; z: eye distance; w: near depth
+    /// (z, w meaningful for perspective only).
+    view: [f32; 4],
+    /// x: projection mode (0 = ortho, 1 = perspective); y: Gaussian falloff;
+    /// z: min splat half-extent in pixels; w: max splat half-extent in NDC.
+    params: [f32; 4],
+    /// x, y: viewport half-width / half-height in pixels (NDC→px scale).
+    viewport: [f32; 4],
 }
 
 const SHADER: &str = r#"
+struct Uniforms {
+    right: vec4<f32>,
+    up: vec4<f32>,
+    forward: vec4<f32>,
+    // `target` is a reserved WGSL keyword; same slot as Uniforms::target.
+    view_target: vec4<f32>,
+    view: vec4<f32>,
+    params: vec4<f32>,
+    viewport: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) local: vec2<f32>,
     @location(1) emissive: vec3<f32>,
 };
 
-@vertex
-fn vs(@location(0) corner: vec2<f32>,
-      @location(1) center: vec2<f32>,
-      @location(2) half: vec2<f32>,
-      @location(3) emissive: vec3<f32>) -> VsOut {
+// Degenerate clip position: z > w, so the whole primitive is discarded before
+// rasterization. Used to cull at/behind-near splats without touching the 1/z pole.
+fn culled() -> VsOut {
     var out: VsOut;
-    out.pos = vec4<f32>(center + corner * half, 0.0, 1.0);
-    out.local = corner;
-    out.emissive = emissive;
+    out.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+    out.local = vec2<f32>(0.0, 0.0);
+    out.emissive = vec3<f32>(0.0, 0.0, 0.0);
     return out;
 }
 
-struct Params { falloff: f32, pad0: f32, pad1: f32, pad2: f32 };
-@group(0) @binding(0) var<uniform> params: Params;
+@vertex
+fn vs(@location(0) corner: vec2<f32>,
+      @location(1) world: vec3<f32>,
+      @location(2) radius: f32,
+      @location(3) emissive: vec3<f32>) -> VsOut {
+    let d = world - u.view_target.xyz;
+    let lateral = vec2<f32>(dot(d, u.right.xyz), dot(d, u.up.xyz));
+    let he = u.view.xy;
+
+    var ndc: vec2<f32>;
+    var half: vec2<f32>;
+    var dim = 1.0;
+    if (u.params.x < 0.5) {
+        // Orthographic: the exact arithmetic of the retired CPU projection
+        // (golden-gated), position-independent splat size, no clamps.
+        ndc = lateral / he;
+        half = vec2<f32>(radius, radius) / he;
+    } else {
+        // Perspective: similar triangles about the pinhole at depth `distance`
+        // behind the target. At/behind the near plane the whole quad is culled
+        // (splats have no depth extent) and the 1/z pole is never evaluated.
+        let z = dot(d, u.forward.xyz) + u.view.z;
+        if (z <= u.view.w) {
+            return culled();
+        }
+        let s = u.view.z / z;
+        ndc = lateral * s / he;
+        half = vec2<f32>(radius, radius) * s / he;
+
+        // Pixel-space size clamp (aspect-correct cameras keep splats isotropic
+        // on screen; the y axis is the scalar). Clamping UP from sub-pixel dims
+        // emission by (true/clamped)^2 — the point-source regime, flux keeps
+        // the physical 1/d^2 law. Clamping DOWN (fill-rate guard) saturates:
+        // no brightness boost.
+        let py = half.y * u.viewport.y;
+        if (py <= 0.0) {
+            return culled();
+        }
+        let py_clamped = clamp(py, u.params.z, u.params.w * u.viewport.y);
+        let scale = py_clamped / py;
+        half = half * scale;
+        dim = min(1.0, 1.0 / (scale * scale));
+    }
+
+    var out: VsOut;
+    out.pos = vec4<f32>(ndc + corner * half, 0.0, 1.0);
+    out.local = corner;
+    out.emissive = emissive * dim;
+    return out;
+}
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let g = exp(-params.falloff * dot(in.local, in.local));
+    let g = exp(-u.params.y * dot(in.local, in.local));
     return vec4<f32>(in.emissive * g, g);
 }
 "#;
@@ -208,8 +287,8 @@ impl Renderer {
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("splat-params"),
-            size: std::mem::size_of::<Params>() as u64,
+            label: Some("splat-uniforms"),
+            size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -218,7 +297,7 @@ impl Renderer {
             label: Some("splat-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -262,7 +341,7 @@ impl Renderer {
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<GpuSplat>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![1 => Float32x2, 2 => Float32x2, 3 => Float32x3],
+                        attributes: &wgpu::vertex_attr_array![1 => Float32x3, 2 => Float32, 3 => Float32x3],
                     },
                 ],
             },
@@ -305,28 +384,52 @@ impl Renderer {
         camera: &Camera,
         cfg: &RenderConfig,
     ) -> Result<HdrImage, RenderError> {
-        // Project every splat to NDC on the CPU.
+        // World-space instances: projection is the vertex shader's job.
         let splats: Vec<GpuSplat> = (0..frame.len())
             .map(|i| {
-                let c = camera.project(frame.pos[i]);
-                let h = camera.splat_ndc(frame.size[i]);
                 let col = frame.color[i];
                 let b = frame.brightness[i];
                 GpuSplat {
-                    center: [c.x, c.y],
-                    half: [h.x, h.y],
+                    pos: frame.pos[i].to_array(),
+                    radius: frame.size[i],
                     emissive: [col[0] * b, col[1] * b, col[2] * b],
                     _pad: 0.0,
                 }
             })
             .collect();
 
+        let (mode, distance, near) = match camera.projection {
+            Projection::Orthographic => (0.0, 0.0, 0.0),
+            Projection::Perspective { distance, near } => {
+                // The clamp window must be a valid interval in pixels — a
+                // min_splat_px above the max would make the WGSL clamp() UB.
+                let max_px = cfg.max_splat_ndc * cfg.height as f32 / 2.0;
+                let clamps_valid = cfg.min_splat_px.is_finite()
+                    && cfg.min_splat_px >= 0.0
+                    && cfg.max_splat_ndc.is_finite()
+                    && cfg.max_splat_ndc > 0.0
+                    && cfg.min_splat_px <= max_px;
+                if !clamps_valid {
+                    return Err(RenderError::Config(format!(
+                        "perspective splat clamps invalid: min_splat_px {} must be finite, \
+                         ≥ 0, and ≤ max_splat_ndc·height/2 = {max_px}",
+                        cfg.min_splat_px
+                    )));
+                }
+                (1.0, distance, near)
+            }
+        };
         self.queue.write_buffer(
             &self.uniform_buf,
             0,
-            bytemuck::bytes_of(&Params {
-                falloff: cfg.falloff,
-                _pad: [0.0; 3],
+            bytemuck::bytes_of(&Uniforms {
+                right: camera.right.extend(0.0).to_array(),
+                up: camera.up.extend(0.0).to_array(),
+                forward: camera.forward.extend(0.0).to_array(),
+                target: camera.target.extend(0.0).to_array(),
+                view: [camera.half_extent.x, camera.half_extent.y, distance, near],
+                params: [mode, cfg.falloff, cfg.min_splat_px, cfg.max_splat_ndc],
+                viewport: [cfg.width as f32 / 2.0, cfg.height as f32 / 2.0, 0.0, 0.0],
             }),
         );
 

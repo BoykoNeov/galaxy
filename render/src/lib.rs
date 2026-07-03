@@ -18,7 +18,7 @@ pub mod exr_io;
 pub mod render;
 pub mod rig;
 
-pub use camera::Camera;
+pub use camera::{Camera, Projection};
 pub use exr_io::{read_exr, write_exr};
 pub use render::{HdrImage, RenderConfig, Renderer};
 pub use rig::{ease_in_out, smooth_envelope, CameraPath, RigError};

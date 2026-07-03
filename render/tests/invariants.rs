@@ -72,6 +72,7 @@ fn additive_blend_is_order_independent() {
         width: 128,
         height: 128,
         falloff: 6.0,
+        ..RenderConfig::default()
     };
 
     let frame = scene(40);
@@ -105,6 +106,7 @@ fn total_flux_scales_linearly_with_brightness() {
         width: 128,
         height: 128,
         falloff: 6.0,
+        ..RenderConfig::default()
     };
 
     let frame = scene(25);
@@ -133,6 +135,7 @@ fn overlapping_splats_exceed_one_without_clamping() {
         width: 64,
         height: 64,
         falloff: 6.0,
+        ..RenderConfig::default()
     };
 
     // 20 white unit-brightness splats stacked at the center: the center pixel must
@@ -162,6 +165,7 @@ fn centered_splat_is_symmetric() {
         width: 129,
         height: 129,
         falloff: 6.0,
+        ..RenderConfig::default()
     };
     let frame = FrameData {
         pos: vec![Vec3::ZERO],

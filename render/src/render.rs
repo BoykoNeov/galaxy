@@ -31,6 +31,17 @@ pub struct RenderConfig {
     /// Gaussian falloff constant `k`: a splat's intensity is `exp(-k · r²)` for `r`
     /// the normalized distance (0 at center, 1 at the quad edge). Larger = tighter.
     pub falloff: f32,
+    /// Perspective only: minimum on-screen splat half-extent in *pixels*. A splat
+    /// whose projected size falls below this is drawn at this size with its
+    /// emission dimmed by (true/clamped)² — the point-source regime: integrated
+    /// flux keeps the physical 1/d² law while distant stars stop shimmering as
+    /// sub-pixel quads. Ignored by orthographic cameras (bit-compat).
+    pub min_splat_px: f32,
+    /// Perspective only: maximum splat half-extent in NDC units, guarding fill
+    /// rate on close fly-bys. Clamping *down* does NOT boost emission — apparent
+    /// flux saturates instead of diverging as depth → near. Ignored by
+    /// orthographic cameras.
+    pub max_splat_ndc: f32,
 }
 
 impl Default for RenderConfig {
@@ -39,6 +50,8 @@ impl Default for RenderConfig {
             width: 1920,
             height: 1080,
             falloff: 6.0,
+            min_splat_px: 1.5,
+            max_splat_ndc: 1.0,
         }
     }
 }

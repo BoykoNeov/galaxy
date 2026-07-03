@@ -285,6 +285,7 @@ fn run_movie(
         width: s.width,
         height: s.height,
         falloff: FALLOFF,
+        ..RenderConfig::default()
     };
     let path = match s.rig {
         Rig::Static => {

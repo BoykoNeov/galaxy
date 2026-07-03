@@ -1133,9 +1133,39 @@ late-time positions — N-body is chaotic).
     the dense cuspy halo field, 1.2 washes structure; 0.45 makes nuclei/knots glow
     while tails and halo dots stay resolved.
   - [next: Hermite temporal upsampling to 60 fps (M6c).]
+- **Hermite temporal upsampling to 60 fps (landed, M6c) — kill the flipbook.**
+  Snapshots store full phase space (`pos` *and* `vel`), so cubic Hermite between
+  adjacent snapshots gives physically-informed in-betweens at zero sim cost.
+  `renderprep::interp` (view-side, not core): `HermiteSpan::new(s0, s1)` validates
+  once (equal lengths, **identical `ParticleId` streams** — the defensive gate
+  against a silent reorder scrambling the movie — strictly increasing finite
+  time), then `sample(u)` returns positions *and* velocities (the cubic's
+  analytic derivative — C¹ at joins, and the M6e Doppler input).
+  - **Endpoint bit-exactness by construction:** the Hermite basis forms hit
+    endpoint values exactly (`h00(0)=1`, others 0, etc.), and the velocity keeps
+    the `v0`/`v1` terms unscaled (no `Δt·v/Δt` round-trip), so `u=0`/`u=1`
+    reproduce the snapshots bit-for-bit — gated, not assumed.
+  - **Attribute strategy (decision):** full `prepare` (including the O(N²) kNN
+    density pass) runs only on the ~61 *snapshot* states; `subframe(span, f0,
+    f1, u)` takes Hermite positions + a two-product lerp `(1-u)·a + u·b` of the
+    prepared endpoint color/brightness/size (that form, not `a + u·(b-a)`, is
+    what makes both endpoints bit-exact). Density evolves on the snapshot
+    timescale; per-subframe kNN would multiply prep cost ~8× for no visible gain.
+  - Gates (`renderprep/tests/interp.rs`): endpoint bit-exactness; C¹ at the
+    joins; exactness on linear and cubic trajectories; **two Kepler oracles**
+    solved analytically in the test — circular (tolerance = the cubic-Hermite
+    local error bound `max|p⁗|·Δt⁴/384`, velocity `Δt³/72`) and eccentric e=0.5
+    straddling perihelion (same bound, `max|p⁗|` from a 5-point finite
+    difference of the *analytic* orbit); id/length/time rejection; subframe
+    endpoint reproduction, exact attribute lerp, Hermite-not-chord positions;
+    determinism.
+  - xtask: 8 subframes per snapshot interval, FPS 30→60 — ~61 snapshots →
+    ~481 frames, the ~2 s flipbook becomes a ~8 s continuous movie (playback
+    4× slower per unit sim time; pericenter reads as continuous motion).
+  - [next: camera rig — smoothed framing + orbit/tilt paths (M6d).]
 - **M6 (in progress) — "the beautiful": visual/cinematic series.** Asinh grade +
-  regrade loop + density boost ON (M6a) → bloom (M6b) — both landed above →
-  Hermite temporal upsampling to 60 fps (M6c) → animated camera rig (M6d) →
+  regrade loop + density boost ON (M6a) → bloom (M6b) → Hermite 60 fps
+  upsampling (M6c) — all landed above → animated camera rig (M6d) →
   coloring modes v2 incl. the density→blue star-formation proxy (M6e) →
   `scenario.toml` + Toomre encounter zoo (M6f) → perspective/vertex-path render,
   the 10⁸ swap (M6g, optional). Session-by-session plan with gates and decisions:

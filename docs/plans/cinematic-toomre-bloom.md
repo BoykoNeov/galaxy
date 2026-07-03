@@ -61,7 +61,7 @@ upsampling and the scenario zoo.
 |---|---|---|---|---|
 | 1 | **M6a** ✅ | Grade toolkit: asinh stretch, `regrade` subcommand, density boost ON | S | — |
 | 2 | **M6b** ✅ | Bloom (CPU mip-chain, applied at grade time in linear space) | M | M6a (regrade loop) |
-| 3 | **M6c** | Hermite temporal upsampling → smooth 60 fps movies | M | — |
+| 3 | **M6c** ✅ | Hermite temporal upsampling → smooth 60 fps movies | M | — |
 | 4 | **M6d** | Camera rig: smoothed framing + orbit/tilt paths | M | best after M6c |
 | 5 | **M6e** | Coloring modes v2: initial-radius ramp, σ_v, size-by-density | M | — |
 | 6 | **M6f** | `scenario.toml` front-end + the Toomre encounter zoo | M–L | easier after M6a–e |
@@ -146,7 +146,13 @@ interior translation equivariance; determinism.
 Demo: before/after regrade of the retained cuspy EXRs; pick default strength
 per scenario by eyeball; document.
 
-## M6c — Hermite temporal upsampling (Session 3, M)
+## M6c — Hermite temporal upsampling (Session 3, M) — LANDED
+
+*(Landed 2026-07; see the DESIGN.md M6c entry. As scoped below: `HermiteSpan` +
+`subframe` in `renderprep::interp`, endpoint-only `prepare` with lerped
+attributes, id/time gates as `Result`s, 8 subframes per snapshot, FPS 30→60.
+Both Kepler oracles — circular and an eccentric perihelion-straddling one —
+gate at the Δt⁴/384 local-error bound.)*
 
 **Goal:** kill the flipbook. Snapshots store `pos` *and* `vel`, so cubic
 Hermite interpolation between adjacent snapshots gives physically-informed

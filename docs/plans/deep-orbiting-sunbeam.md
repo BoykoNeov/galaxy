@@ -202,6 +202,29 @@ existing merger geometry); QUICK reduces n_gas + grid res, keeps dt.
 Physics lands first (M7a→b→c), then the view side (M7d→e), then the
 front-end (M7f).
 
+### Amendment 2026-07-03 — view-first reorder (user-decided)
+
+Remaining sessions run **M7d → M7e → M7b → M7c → M7f**. The dependency
+table already permits it: M7d needs only M7a (landed), and every M7d/M7e
+gate is analytic or synthetic (single-particle kernel exactness, uniform
+slab, two-star ordering, gas-off ≡ M6g golden, GPU ≡ CPU mirror) — none
+needs gas dynamics. Demo consequences:
+
+- M7d/M7e demo on **static synthetic gas** (hand-rolled sech² disk
+  positions, or a retained snapshot re-tagged `Species::Gas`) — the
+  inclined dust-lane look without force code. The owed M7a demo
+  (density side-by-side + timing) folds into the M7d session.
+- The money demo (dynamically shocked merger dust lanes) moves to
+  **M7c**, which renders through the already-landed volumetric path.
+- κ/emissivity knobs tuned on static gas get re-tuned on real merger
+  gas — absorbed by M7f's existing tuning pass.
+
+**GPU SPH gate** (still not an M7 session): at M7c, measure the full-res
+merger wall-clock. Painful (> ~30 min) → insert a GPU SPH session gated
+against the CPU stack right after; otherwise it stays the M8-era opener.
+GPU SPH can never precede M7b — the CPU forces are its oracle.
+Long-horizon ordering beyond M7: `docs/plans/long-burning-beacon.md`.
+
 ---
 
 ## M7a — gas plumbing + SPH kernel + neighbors + density (Session 1, M)

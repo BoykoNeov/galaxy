@@ -33,7 +33,7 @@ use galaxy_core::{LeapfrogKdk, State, StaticBackground};
 use galaxy_grade::{grade_file, GradeConfig, ToneMap};
 use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, TruncatedNfw};
 use galaxy_render::{write_exr, Camera, RenderConfig, Renderer};
-use galaxy_renderprep::{prepare, PrepConfig};
+use galaxy_renderprep::{prepare, DensityColoring, PrepConfig};
 use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_xtask::{framing_radius, parse_regrade_args};
 use glam::Vec3;
@@ -43,6 +43,18 @@ const G: f64 = 1.0;
 const THETA: f64 = 0.5; // Barnes-Hut opening angle
 const FALLOFF: f32 = 6.0;
 const PEAK_BRIGHTNESS: f32 = 0.3; // per-particle peak, so dense cores additively saturate
+
+// Density-aware brightness boost (M3.6 estimator, switched ON and tuned in M6a).
+// Tuned by A/B on rendered QUICK cuspy frames (strengths 0/1.5/3/6, DESIGN M6a):
+// the mean reference ρ_ref is dominated by the dense inner disk, so the boost acts
+// on nuclei and inner knots — strength 3 makes them read as bright cores, 1.5 is
+// invisible (the boosted pixels were already tone-curve-saturated), 6 blows the
+// nuclei into blobs. k = 32 (top of the documented 8–32 band) halves the estimator's
+// shot noise vs 16 for negligible cost — temporal stability matters in a movie. The
+// kNN distance floor reuses each scenario's force softening ε — the smallest
+// separation the sim itself resolves.
+const DENSITY_K: usize = 32;
+const DENSITY_STRENGTH: f32 = 3.0;
 const EXPOSURE: f32 = 1.0;
 const TONEMAP: ToneMap = ToneMap::AcesApprox;
 const FPS: u32 = 30;
@@ -124,6 +136,7 @@ const DM_SPLAT_SIZE: f32 = 0.6; // world units — the NFW scene (~40u) is ~8× 
 const DM_ECC: f64 = 1.0; // parabolic — the classic Toomre encounter
 const DM_PERI: f64 = 3.0;
 const DM_SEP: f64 = 40.0; // > r_vir1 + r_vir2 (=18) so the halos start on a clean approach
+const DM_EPS: f64 = 0.05; // 0.05·r_s (r_s=1) — matches the NFW stability test's softening
 
 fn dm_scenario(quick: bool) -> Scenario {
     // Primary: M_vir=1, r_s=1, c=10 ⇒ r_vir=10, exponential skirt r_d=3.
@@ -169,9 +182,13 @@ fn dm_scenario(quick: bool) -> Scenario {
             palette: vec![DM_HALO1_COLOR, DM_HALO2_COLOR],
             brightness_per_mass: PEAK_BRIGHTNESS / particle_mass as f32,
             size: DM_SPLAT_SIZE,
-            density: None,
+            density: Some(DensityColoring {
+                k: DENSITY_K,
+                softening: DM_EPS,
+                strength: DENSITY_STRENGTH,
+            }),
         },
-        eps: 0.05, // 0.05·r_s (r_s=1) — matches the NFW stability test's softening
+        eps: DM_EPS,
         dt,
         n_steps,
         snapshot_every,
@@ -263,7 +280,11 @@ fn disk_scenario(quick: bool) -> Scenario {
             palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
             brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
             size: DISK_SPLAT_SIZE,
-            density: None,
+            density: Some(DensityColoring {
+                k: DENSITY_K,
+                softening: DISK_EPS,
+                strength: DENSITY_STRENGTH,
+            }),
         },
         eps: DISK_EPS,
         dt: 0.02,
@@ -371,7 +392,11 @@ fn cuspy_scenario(quick: bool) -> Scenario {
             palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
             brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
             size: CUSPY_SPLAT_SIZE,
-            density: None,
+            density: Some(DensityColoring {
+                k: DENSITY_K,
+                softening: CUSPY_EPS,
+                strength: DENSITY_STRENGTH,
+            }),
         },
         eps: CUSPY_EPS,
         dt: 0.02,

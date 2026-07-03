@@ -1207,10 +1207,79 @@ late-time positions — N-body is chaotic).
     what shows it; `disk` keeps the static face-on framing (back-compat
     exemplar). Envelope breathes ~5.6→8.5 world units on the QUICK cuspy run.
   - [next: coloring modes v2 — initial-radius ramp, σ_v, density→hue (M6e).]
+- **Coloring modes v2 (landed, M6e) — diversify what the colors *mean*.**
+  `prepare` grows `ColorMode {Progenitor | Frozen(colors) | Dispersion}` plus two
+  independent opt-in passes — `SizeByDensity` and `CompressionHue` — all default
+  OFF, so the pre-M6e map stays bit-for-bit (gated). Every kNN consumer carries
+  `(k, softening)` and `prepare` dedups them through a `KnnCache`: the movie
+  config points them all at `(DENSITY_K, ε)`, so the O(N²) estimate still runs
+  **once** per snapshot however many passes are on.
+  - **Initial-radius ramp** (`coloring::initial_radius_colors`): per progenitor,
+    mass-weighted COM + half-mass radius from snapshot 0; `t = r/(r + r_half)` —
+    exactly 0 at the COM, exactly ½ at `r_half` (the median-mass particle sits at
+    the ramp midpoint; normalization is per-progenitor scale-free) — through an
+    `(inner, outer)` ramp. The colors ride `ColorMode::Frozen` keyed by particle
+    index, so tails carry a *provenance* gradient for the whole movie. xtask
+    ramps: disks amber→blue-white vs rose→cyan (inner old/warm → outer
+    young/blue, like real disks); halos constant at their dim palette color.
+  - **σ_v coloring**: `knn_neighbourhood` extends the density estimator's
+    partial-select to carry the k nearest *indices* (left partition + pivot;
+    densities gated bit-identical to `knn_density`); `velocity_dispersion` is the
+    rms deviation from the neighbourhood mean over `{self} ∪ neighbours`;
+    `dispersion_colors` maps `t = σ²/(σ² + σ_ref²)` cold→hot. **Quadratic on
+    purpose** (first A/B finding): σ spans only ~2–3× across a self-gravitating
+    body, and the linear ratio painted everything midpoint-gray; squaring
+    (specific kinetic energy) doubles the contrast under the same
+    endpoint/midpoint/monotone gates. **Scoped to single-population subjects**
+    (second finding): the ramp replaces the palette and with it the 20×
+    halo/disk brightness compensation — on disk scenarios the ~5×-heavier,
+    2×-more-numerous halo particles swamp the frame at any ramp brightness that
+    still shows the disks. `--color dispersion` is the dm merger's mode (blue
+    σ-cold envelope around the σ-hot remnant core); a palette-luminance-weighted
+    σ ramp is the named follow-up if ever wanted on a disk+halo scene.
+  - **Star-formation proxy** (`compression_colors`): hue lerp from the base
+    color toward young-blue-white `[0.7, 0.8, 1.0]`, `t = strength·(1 −
+    ρ0/max(ρ, ρ0))` — keyed on **compression** vs the same particle's t=0
+    neighbourhood (the plan's recommended variant: absolute ρ would falsely blue
+    the undisturbed dense cores; only tidally-compressed material lights up, and
+    ρ ≤ ρ0 keeps the base bit-exactly). Honest caveat: the sim is collisionless —
+    stellar density stands in for gas compression; a standard visualization
+    proxy, not physics. ON by default in every scenario (strength 0.8), **masked
+    to luminous progenitors** via the gated `ρ0 = 0` sentinel (third finding: the
+    first A/B washed the frame white once the halos overlapped — ratio ≥ 2
+    compression lifted 9k deliberately-dim halo particles ~15× in flux; also the
+    physics — the disk-scenario halos are dark-matter stand-ins with no gas). The
+    dm merger masks nothing: its halos are the luminous subject and the tint is
+    a shocked-overlap diagnostic.
+  - **Size-by-density** (`density_sizes`): `base·clamp((ρ_ref/ρ)^⅓, 0.6, 1.6)` —
+    the SPH-style spacing law; mean-positive-reference and sentinel discipline
+    exactly as `density_boost`. ON by default; at these clamps it reads as
+    tight cores / soft halo dots without changing the scene's character.
+  - **xtask**: `--color progenitor|initial-radius|dispersion` and
+    `--reuse-snapshots` (re-prep + re-render retained snapshots, no re-sim — the
+    prep-stage analogue of the M6a regrade loop; errors if snapshots are missing
+    or the particle count mismatches the scenario, the QUICK/full trap).
+    `parse_movie_args` is unit-gated in `xtask/lib.rs`.
+  - **Doppler hue deferred** (per plan): it couples frame-data to a view axis,
+    which Contract 3 deliberately avoids; `HermiteSpan::sample` already returns
+    the velocities it would need.
+  - Gates (`renderprep/tests/{coloring,density,prepare}.rs`, `xtask` lib): ramp
+    COM/midpoint exactness, monotonicity, per-progenitor scale/position freedom,
+    mass-weighted COM, degenerate progenitors; kNN index/d_k consistency and
+    bit-identical densities; σ_v pair/lattice/two-population oracles, bulk-
+    velocity invariance, empty-neighbourhood sentinel; size hand values, clamps,
+    monotone, sentinel, inverted-band panic; compression exact-base guarantees
+    (ρ≤ρ0 / strength 0 / sentinels), monotone bounded-by-strength, exact ½ at
+    ρ=2ρ0; frozen-colors bit-stability across frames; default-config bit-compat;
+    full-featured determinism; movie-arg parsing.
+  - Demo: retained M6d QUICK snapshots re-rendered in seconds-to-minutes per
+    mode — cuspy in progenitor (+SF proxy +sizes) and initial-radius, dm in
+    dispersion (`M:\claud_projects\temp\m6e\`).
+  - [next: `scenario.toml` front-end + the Toomre encounter zoo (M6f).]
 - **M6 (in progress) — "the beautiful": visual/cinematic series.** Asinh grade +
   regrade loop + density boost ON (M6a) → bloom (M6b) → Hermite 60 fps
-  upsampling (M6c) → animated camera rig (M6d) — all landed above →
-  coloring modes v2 incl. the density→blue star-formation proxy (M6e) →
+  upsampling (M6c) → animated camera rig (M6d) → coloring modes v2 incl. the
+  density→blue star-formation proxy (M6e) — all landed above →
   `scenario.toml` + Toomre encounter zoo (M6f) → perspective/vertex-path render,
   the 10⁸ swap (M6g, optional). Session-by-session plan with gates and decisions:
   `docs/plans/cinematic-toomre-bloom.md`.

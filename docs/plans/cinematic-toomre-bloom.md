@@ -63,7 +63,7 @@ upsampling and the scenario zoo.
 | 2 | **M6b** ✅ | Bloom (CPU mip-chain, applied at grade time in linear space) | M | M6a (regrade loop) |
 | 3 | **M6c** ✅ | Hermite temporal upsampling → smooth 60 fps movies | M | — |
 | 4 | **M6d** ✅ | Camera rig: smoothed framing + orbit/tilt paths | M | best after M6c |
-| 5 | **M6e** | Coloring modes v2: initial-radius ramp, σ_v, size-by-density | M | — |
+| 5 | **M6e** ✅ | Coloring modes v2: initial-radius ramp, σ_v, size-by-density | M | — |
 | 6 | **M6f** | `scenario.toml` front-end + the Toomre encounter zoo | M–L | easier after M6a–e |
 | 7 | **M6g** | Perspective camera + world-space vertex-shader projection | L | optional, last |
 
@@ -219,7 +219,19 @@ today's camera bit-exact; determinism.
 Demo: cuspy at 60 fps with orbit + breathing zoom; an edge-on/¾ segment that
 shows the 3-D structure face-on flattens away.
 
-## M6e — coloring modes v2 (Session 5, M)
+## M6e — coloring modes v2 (Session 5, M) — LANDED
+
+*(Landed 2026-07; see the DESIGN.md M6e entry. All four scoped items shipped —
+mode enum + frozen initial-radius ramp, σ_v via `knn_neighbourhood` indices,
+size-by-density, and the compression-triggered SF proxy (the recommended
+variant) — plus `--color` / `--reuse-snapshots` in xtask. Three findings from
+the rendered A/Bs, argued in DESIGN: the SF hue is masked to luminous
+progenitors via the ρ0=0 sentinel (halo overlap otherwise washes the frame
+white), the σ_v map is quadratic (linear σ/(σ+σ_ref) painted everything
+midpoint-gray), and σ_v mode is scoped to single-population subjects — it
+replaces the palette's 20× halo/disk brightness compensation, so it is the dm
+merger's mode; a palette-luminance-weighted variant is the named follow-up.
+Doppler hue deferred as recommended below.)*
 
 **Goal:** diversify what the colors *mean*. `prepare` grows a mode enum
 (default = today's progenitor palette, bit-compatible).

@@ -223,6 +223,15 @@ Scope, in recommended order:
   the same mean-referenced, non-dimming-style bounded mapping as the M3.6
   brightness boost (dense → bluer; underdense → base color untouched, so the
   red/old tails stay progenitor-colored).
+  - **Refinement to decide at session time — trigger on *compression*, not
+    absolute density:** real star formation follows *gas being compressed*, and
+    the reddest parts of real galaxies are their densest old cores — so keying
+    blue on absolute ρ would falsely blue the undisturbed cores. Keying on the
+    density *increment* vs the same particle's t=0 neighbourhood
+    (ρ_i(t)/ρ_i(0) > 1 ⇒ blue-shift) makes only tidally-compressed material
+    (bridges, shocked overlap, ring waves) light up blue while pre-existing
+    cores keep their old-population color. Costs one extra kNN pass on
+    snapshot 0 (cache it); recommended over the absolute-ρ variant.
 - **Doppler hue** (optional, may defer): hue shift by line-of-sight velocity.
   Caveat to settle honestly: it couples frame-data to a view axis, which
   Contract 3 deliberately avoids — if built, `prepare` takes a *declared* LOS

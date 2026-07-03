@@ -1,8 +1,37 @@
 //! `galaxy-xtask`: the pipeline orchestrator (scenario → sim → renderprep → render
 //! → grade → ffmpeg). The binary is the glue; this lib holds the pure, testable bits.
 
+use std::path::PathBuf;
+
+use galaxy_grade::GradeConfig;
 use galaxy_renderprep::FrameData;
 use glam::Vec3;
+
+/// Default asinh softening knob β for `regrade --tonemap asinh` when `--beta` is not
+/// given. A tuning constant, eyeballed against the rendered collision frames (M6a).
+pub const DEFAULT_ASINH_BETA: f32 = 0.2;
+
+/// A parsed `regrade` invocation: which EXR frames to read, where the PNGs go, and
+/// the grade to apply.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegradeArgs {
+    /// Directory holding the retained linear-HDR `.exr` frames.
+    pub exr_dir: PathBuf,
+    /// Output directory for the graded 16-bit `.png` frames.
+    pub png_dir: PathBuf,
+    /// The grade (exposure + tone curve) to apply to every frame.
+    pub grade: GradeConfig,
+}
+
+/// Map `regrade` CLI arguments (everything after the `regrade` selector) to a
+/// [`RegradeArgs`]: `<exr_dir> <png_dir> [--exposure E] [--tonemap
+/// aces|reinhard|asinh] [--beta B]`. Flags may come in any order. Errors (as a
+/// human-readable message) on missing/extra positionals, unknown flags or tonemap
+/// names, malformed or non-positive numbers, and `--beta` without `asinh` (β only
+/// exists on the asinh curve — anything else is a typo worth failing fast on).
+pub fn parse_regrade_args(_args: &[String]) -> Result<RegradeArgs, String> {
+    todo!("M6a: regrade arg parsing")
+}
 
 /// The union of the axis-aligned bounding boxes of every frame — the scene extent
 /// over the *whole* run. The renderer frames one camera from this so the view is
@@ -93,5 +122,104 @@ mod tests {
     #[test]
     fn framing_radius_of_nothing_is_zero() {
         assert_eq!(framing_radius(&[], 0.98), 0.0);
+    }
+
+    // --- regrade arg parsing (M6a) -------------------------------------------
+
+    use galaxy_grade::ToneMap;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn regrade_defaults_to_unit_exposure_aces() {
+        let r = parse_regrade_args(&args(&["in_exr", "out_png"])).unwrap();
+        assert_eq!(r.exr_dir, PathBuf::from("in_exr"));
+        assert_eq!(r.png_dir, PathBuf::from("out_png"));
+        assert_eq!(
+            r.grade,
+            GradeConfig {
+                exposure: 1.0,
+                tonemap: ToneMap::AcesApprox,
+            }
+        );
+    }
+
+    #[test]
+    fn regrade_parses_full_asinh_invocation() {
+        let r = parse_regrade_args(&args(&[
+            "e", "p", "--exposure", "2.5", "--tonemap", "asinh", "--beta", "0.05",
+        ]))
+        .unwrap();
+        assert_eq!(
+            r.grade,
+            GradeConfig {
+                exposure: 2.5,
+                tonemap: ToneMap::Asinh { beta: 0.05 },
+            }
+        );
+    }
+
+    #[test]
+    fn regrade_flags_are_order_independent() {
+        // --beta before --tonemap must still land on the asinh curve.
+        let a = parse_regrade_args(&args(&[
+            "e", "p", "--beta", "0.05", "--tonemap", "asinh",
+        ]))
+        .unwrap();
+        let b = parse_regrade_args(&args(&[
+            "e", "p", "--tonemap", "asinh", "--beta", "0.05",
+        ]))
+        .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn regrade_selects_reinhard_by_name() {
+        let r = parse_regrade_args(&args(&["e", "p", "--tonemap", "reinhard"])).unwrap();
+        assert_eq!(r.grade.tonemap, ToneMap::Reinhard);
+    }
+
+    #[test]
+    fn regrade_asinh_without_beta_uses_the_documented_default() {
+        let r = parse_regrade_args(&args(&["e", "p", "--tonemap", "asinh"])).unwrap();
+        assert_eq!(
+            r.grade.tonemap,
+            ToneMap::Asinh {
+                beta: DEFAULT_ASINH_BETA
+            }
+        );
+        assert!(DEFAULT_ASINH_BETA > 0.0);
+    }
+
+    #[test]
+    fn regrade_rejects_malformed_invocations() {
+        for (bad, why) in [
+            (&["only_one"][..], "missing png_dir"),
+            (&["a", "b", "c"][..], "extra positional"),
+            (&["e", "p", "--gamma", "2.2"][..], "unknown flag"),
+            (&["e", "p", "--exposure"][..], "flag missing its value"),
+            (&["e", "p", "--exposure", "abc"][..], "non-numeric exposure"),
+            (&["e", "p", "--exposure", "-1"][..], "non-positive exposure"),
+            (&["e", "p", "--tonemap", "filmic"][..], "unknown tonemap"),
+            (
+                &["e", "p", "--tonemap", "asinh", "--beta", "0"][..],
+                "non-positive beta",
+            ),
+            (
+                &["e", "p", "--beta", "0.1"][..],
+                "beta without the asinh tonemap",
+            ),
+            (
+                &["e", "p", "--tonemap", "reinhard", "--beta", "0.1"][..],
+                "beta with a non-asinh tonemap",
+            ),
+        ] {
+            assert!(
+                parse_regrade_args(&args(bad)).is_err(),
+                "should reject: {why} ({bad:?})"
+            );
+        }
     }
 }

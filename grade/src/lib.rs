@@ -17,12 +17,22 @@ use std::path::Path;
 use exr::prelude::read_first_rgba_layer_from_file;
 
 /// The tone-mapping operator: how unbounded linear HDR is compressed to `[0, 1]`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// (`Eq` is not derived: `Asinh` carries an `f32` softening knob.)
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ToneMap {
     /// Narkowicz's cheap ACES filmic approximation — the cinematic default.
     AcesApprox,
     /// Reinhard `x / (1 + x)` — simple, well-behaved, softer highlights.
     Reinhard,
+    /// Lupton-style asinh stretch `β·asinh(x/β)` (clamped to `[0, 1]`) — the
+    /// astro-imaging curve: linear below the softening knob `β`, logarithmic
+    /// above it, so faint tidal tails survive an exposure push without the
+    /// additive cores blowing out. `beta` must be positive; it is floored at
+    /// `f32::MIN_POSITIVE` so a degenerate `0.0` stays total (no NaN).
+    Asinh {
+        /// The softening knob β: the pivot between the linear and log regimes.
+        beta: f32,
+    },
 }
 
 /// Grading configuration. Config-driven so a whole frame sequence regrades from one
@@ -64,6 +74,7 @@ pub fn tone_curve(c: [f32; 3], op: ToneMap) -> [f32; 3] {
     c.map(|x| match op {
         ToneMap::AcesApprox => aces_approx(x),
         ToneMap::Reinhard => (x / (1.0 + x)).clamp(0.0, 1.0),
+        ToneMap::Asinh { .. } => todo!("M6a: Lupton-style asinh stretch"),
     })
 }
 

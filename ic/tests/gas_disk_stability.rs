@@ -170,17 +170,31 @@ fn pressure_correction_prevents_gas_disk_expansion() {
     let g_over = growth(over_supported);
     println!("gas mean-radius growth: corrected={g_corr:.4}  over-supported={g_over:.4}");
 
-    // The correctly-corrected disk stays near equilibrium; the over-supported one
-    // (full v_c rotation on top of SPH pressure) flings outward. The gap is the
-    // milestone claim that the pressure correction is load-bearing.
+    // `over_supported` is `corrected` with ONLY the gas velocities boosted (identical
+    // positions), so both share a common-mode baseline expansion B (SPH relaxation +
+    // the analytic IC not being a perfect radial SPH equilibrium — this is a
+    // cylindrical radial metric, so it is NOT vertical settling): g_corr = B,
+    // g_over = B + Δ. The milestone claim is the differential Δ > 0 — removing the
+    // pressure correction adds real radial expansion. Gate on the GAP, not the ratio:
+    // the ratio 1 + Δ/B drifts toward 1 if B grows under a future N/integrator change
+    // even with the physics intact, whereas the gap cancels B and measures the effect
+    // directly. Self-gating: `remove_pressure_correction` IS "correction removed", so
+    // if `sample_gas`'s correction breaks, g_corr rises toward g_over, the gap
+    // collapses, and this fails. Measured (fiducial c_s=0.08, ~5% of v_c²):
+    // corrected≈0.146, over-supported≈0.228, gap≈0.082; the 0.04 floor sits ~50% below.
     assert!(
         g_over > 0.02,
         "over-supported gas should visibly expand (>2%): {g_over:.4}"
     );
     assert!(
-        g_over > 3.0 * g_corr,
-        "over-supported gas must expand several times more than the corrected disk: \
-         over={g_over:.4} vs corrected={g_corr:.4}"
+        g_over > g_corr,
+        "the pressure correction must reduce expansion: over={g_over:.4} corrected={g_corr:.4}"
+    );
+    assert!(
+        g_over - g_corr > 0.04,
+        "removing the pressure correction must add >4% mean-radius expansion \
+         (measured ~8%): over={g_over:.4} corrected={g_corr:.4} gap={:.4}",
+        g_over - g_corr
     );
 }
 

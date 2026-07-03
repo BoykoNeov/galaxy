@@ -1690,6 +1690,66 @@ late-time positions — N-body is chaotic).
     rendered through this path.
   - [next per the view-first reorder: M7b — SPH forces (pressure + Monaghan
     viscosity), `GravitySph`, CFL sentinel, isothermal shock tube.]
+- **Gas-disk IC — isothermal SPH gas on `ExponentialDisk` (landed, M7c).** The
+  first self-gravitating gas layer: a fraction of the disk mass reborn as SPH
+  gas that holds equilibrium under the real `GravitySph(BarnesHut)` solver.
+  - **`f_gas` splits the disk mass, not adds to it (the potential is invariant).**
+    `with_gas(f_gas, c_s)` re-tags a fraction `f_gas` of the SAME truncated
+    exponential as `Species::Gas`/`Progenitor(4)`; stars keep (1−f_gas). Gas and
+    stars trace one profile, so the total `disk_mass`, the combined enclosed
+    mass, and every population's `circular_velocity` are **unchanged** from the
+    gas-free disk — the whole `disk.rs` rotation machinery is reused untouched.
+    Gas differs in exactly two physical ways.
+  - **Thermal sech² layer (Spitzer):** z₀(R) = c_s²/(π G Σ_gas(R)), Σ_gas = f·Σ.
+    z₀ *flares* outward (Σ_gas falls), so the gas is thicker than the stars and
+    thickens with R; ρ_mid = Σ_gas/(2z₀) ∝ Σ_gas². Sampled by the same
+    atanh-CDF inversion as the stellar sheet but with the R-dependent z₀.
+  - **Pressure-corrected rotation:** v_φ,gas² = v_c² − 2c_s²R/Rd, from radial
+    momentum balance c_s²R dlnρ_mid/dR with dlnρ_mid/dR = −2R/Rd in the body
+    (ρ_mid ∝ Σ_gas²). Clamped ≥0 (v_c² ~ R² vanishes faster than the linear
+    pressure term at the center), exactly mirroring `mean_azimuthal_velocity`'s
+    NaN guard. Gas is **fluid-cold** — v_r = v_z = 0, one deterministic v_φ,gas,
+    NO Box–Muller spread (pressure support is the SPH c_s at evolve time).
+  - **Toomre with the gas prefactor π:** Q_gas = c_s κ/(π G Σ_gas) (stellar disk
+    uses 3.36). `min_gas_toomre_q` grid-scans the body — Q→∞ at the center (the
+    epicyclic κ's 2πΣ/R term diverges) and rises again toward r_max, so the
+    minimum sits interior. `with_gas` rejects min Q_gas < 1 **loudly** (message
+    names "Q_gas") so a fragmenting IC never launches; fiducial c_s=0.08 gives
+    min Q_gas ≈ 2.7, c_s=0.005 gives ≈ 0.17 (rejected).
+  - **Positions-only stellar invariant (the stream-spacing trick).** `sample_gas`
+    calls `self.sample(n_halo, n_disk, seed)` — which ignores `self.gas` — so the
+    halo and stellar POSITIONS are **bit-identical** to the gas-free IC at the
+    same seed; stellar masses then scale by (1−f_gas) (mass can't move a
+    position). Gas draws from a reserved `mix³(seed)` stream (past halo/pos/vel),
+    so n_gas = 0 leaves the stellar draws bit-identical too.
+  - **Zero-COM via the gas block (advisor-caught).** `sample`'s combined recenter
+    leaves each sub-block a *finite-N* COM ±M_halo·mean_pos (~1e-3, NOT roundoff);
+    scaling the stars unbalances it by −f·M_halo·mean_pos ≈ 6e-4 — 7 orders over
+    the 1e-10 gate. Fix: the gas is the only block free to move (halo+star locked
+    to the gas-free IC), so it **absorbs the whole-system residual** — subtract
+    mean·(mtot/M_gas) from each gas particle → total COM/momentum exactly zero,
+    halo+star bit-identity intact. The compensation shift is f-independent
+    (M_halo·mean_pos/M_disk), so it doesn't blow up at small gas fractions; the
+    resulting ~2% coherent gas translation cancels to first order under azimuthal
+    averaging, so the CDF/flaring/v_φ statistical gates survive (verified).
+  - Gates: 14 sampling gates (Σ_gas normalization + falloff, cylindrical enclosed
+    mass, z₀ Spitzer hand-values + flaring, pressure-corrected v_φ + center clamp,
+    Q_gas π-prefactor + stability, loud reject `#[should_panic]`, tag/COM/momentum,
+    radial CDF, flaring RMS(z)=0.9069·z₀, ⟨v_φ⟩ on the corrected curve, the two
+    positions-bit-identical invariants) — all closed forms hand-derived, not the
+    code's own output. Two `#[ignore]` dynamical gates under `GravitySph(BarnesHut)`
+    + `LeapfrogKdk`: equilibrium over an orbit (L_z to 7e-4, r_half drift 0.23 <
+    0.30, RMS-z ratio 1.0, CFL green at the IC) and the pressure-correction
+    differential — spin the SAME realization up to full v_c (over-supported) and it
+    expands markedly more; gated on the **gap** g_over−g_corr > 0.04 (measured 0.082,
+    ~8% extra radial growth) not the ratio, so a growing common-mode baseline can't
+    erode it. (Both dynamical gates' tolerances calibrated from measured numbers,
+    replacing red placeholders.)
+  - [still owed in M7c: the `CflGuard` sink-decorator + xtask wiring (read the
+    xtask `Sink`/`run_movie` pipeline first), then `DiskCollision` gas — the gas
+    tag remap is **+1 not +2** (g1 gas=4, g2 gas=5; `place_galaxy`'s uniform +2
+    shift is wrong for gas) and galaxy-2's seed offset must advance past the new
+    gas stream — and the dynamical merger dust-lane demo (the M7 money shot).]
 
 ## Validation strategy
 

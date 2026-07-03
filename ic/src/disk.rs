@@ -410,7 +410,10 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
 
     /// Invert the disk's radial cumulative distribution: return the R ∈ [0, r_max]
     /// with M_d(<R)/M_d = `x` (x ∈ [0,1)). Bisection on the monotone CDF.
-    fn sample_radius(&self, x: f64) -> f64 {
+    ///
+    /// `pub(crate)` so the gas layer ([`crate::gas_disk`]) can reuse it: the gas
+    /// traces the same truncated exponential, so its radii invert the same CDF.
+    pub(crate) fn sample_radius(&self, x: f64) -> f64 {
         let (mut lo, mut hi) = (0.0_f64, self.r_max);
         let target = x * self.disk_mass;
         // ~50 iterations halve [0, r_max] to well below f64 precision.
@@ -428,12 +431,15 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
 
 /// SplitMix64: the same tiny deterministic PRNG the Plummer sampler uses (avoids
 /// an external `rand` dependency). `next_f64` returns a value in [0, 1).
-struct SplitMix64 {
+///
+/// `pub(crate)` so the gas layer ([`crate::gas_disk`]) draws its gas stream from
+/// the same generator the stellar disk uses.
+pub(crate) struct SplitMix64 {
     state: u64,
 }
 
 impl SplitMix64 {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
@@ -445,7 +451,7 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
 
-    fn next_f64(&mut self) -> f64 {
+    pub(crate) fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 }
@@ -460,7 +466,11 @@ fn box_muller(u1: f64, u2: f64) -> (f64, f64) {
 
 /// One SplitMix64 step, deriving the disk's PRNG seed from the halo's so the two
 /// populations draw from well-separated streams. Mirrors `collision.rs`.
-fn mix_seed(seed: u64) -> u64 {
+///
+/// `pub(crate)` so the gas layer derives its gas stream `mix³(seed)` past the
+/// halo (`seed`), stellar-position (`mix(seed)`), and stellar-velocity (`mix²(seed)`)
+/// streams.
+pub(crate) fn mix_seed(seed: u64) -> u64 {
     let z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);

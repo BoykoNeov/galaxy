@@ -30,6 +30,10 @@
 //! Motion (M6c): frames are Hermite-upsampled between snapshots — full renderprep
 //! (incl. kNN density) on the snapshot cadence, 8 physically-informed in-betweens
 //! per interval, 60 fps — so ~61 snapshots become a ~8 s continuous movie.
+//!
+//! Camera (M6d): each scenario picks a `Rig` — `Static` (the pre-M6d face-on
+//! framing, bit-exact) or `OrbitTilt` (eased azimuth/tilt sweep with the zoom
+//! breathing along a smoothed per-snapshot framing envelope).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,11 +41,12 @@ use std::process::Command;
 use galaxy_core::{LeapfrogKdk, State, StaticBackground};
 use galaxy_grade::{grade_file, BloomConfig, GradeConfig, ToneMap};
 use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, TruncatedNfw};
-use galaxy_render::{write_exr, Camera, RenderConfig, Renderer};
+use galaxy_render::camera::DEFAULT_MARGIN;
+use galaxy_render::{smooth_envelope, write_exr, Camera, CameraPath, RenderConfig, Renderer};
 use galaxy_renderprep::{prepare, subframe, DensityColoring, FrameData, HermiteSpan, PrepConfig};
 use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_xtask::{
-    framing_radius, parse_regrade_args, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS,
+    framing_radius, parse_regrade_args, per_frame_radii, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS,
 };
 use glam::Vec3;
 
@@ -98,7 +103,21 @@ struct Scenario {
     width: u32,
     height: u32,
     frame_percentile: f32,
+    rig: Rig,
     info: String,
+}
+
+/// Per-scenario camera choreography (M6d). `Static` is the pre-M6d behavior:
+/// one face-on framing over the whole run, bit-exact with the old pipeline.
+enum Rig {
+    Static,
+    /// Eased azimuth/tilt sweep (degrees, start → end) with a breathing zoom:
+    /// per-snapshot percentile radii smoothed by a ±`window`-snapshot envelope.
+    OrbitTilt {
+        azimuth_deg: (f32, f32),
+        tilt_deg: (f32, f32),
+        window: usize,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -220,6 +239,14 @@ fn dm_scenario(quick: bool) -> Scenario {
         // slightly lower percentile than the disk movie crops them and keeps the
         // remnant filling the frame.
         frame_percentile: 0.97,
+        // The remnant is TRIAXIAL — a half-turn orbit at a fixed ¾ tilt is what
+        // shows it (a static face-on view reads as a round blob). Window ±6
+        // snapshots ≈ the merger's dynamical time at this cadence.
+        rig: Rig::OrbitTilt {
+            azimuth_deg: (-90.0, 90.0),
+            tilt_deg: (60.0, 60.0),
+            window: 6,
+        },
         info,
     }
 }
@@ -316,6 +343,9 @@ fn disk_scenario(quick: bool) -> Scenario {
         width,
         height,
         frame_percentile: 0.98,
+        // The original M3 movie keeps its static face-on framing — the back-compat
+        // exemplar (same constants + deterministic pipeline ⇒ same frames).
+        rig: Rig::Static,
         info,
     }
 }
@@ -433,6 +463,15 @@ fn cuspy_scenario(quick: bool) -> Scenario {
         // A lower percentile crops the halo skirt and keeps the disk + tails filling the
         // frame (the dim halo still glows underneath).
         frame_percentile: 0.7,
+        // The M6d choreography: start ¾-inclined (the 3-D structure face-on
+        // flattens away), orbit slowly through first pericenter, and settle
+        // toward face-on as the tails extend (tails read best face-on). The
+        // zoom breathes via the ±8-snapshot envelope as the tails fling out.
+        rig: Rig::OrbitTilt {
+            azimuth_deg: (-90.0, 40.0),
+            tilt_deg: (55.0, 25.0),
+            window: 8,
+        },
         info,
     }
 }
@@ -477,8 +516,9 @@ fn regrade(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The scenario-independent pipeline: simulate the IC to snapshots, renderprep every
-/// snapshot to frame-data, frame one stable camera over the whole run, then render +
-/// grade each frame and (optionally) ffmpeg them into a movie.
+/// snapshot to frame-data, build the scenario's camera path (static framing or the
+/// M6d orbit/tilt rig), then render + grade each frame and (optionally) ffmpeg them
+/// into a movie.
 fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let snap_dir = out.join("snapshots");
     let exr_dir = out.join("exr");
@@ -524,20 +564,56 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
     let frames: Vec<_> = states.iter().map(|st| prepare(st, &s.prep)).collect();
     println!("prepared {} endpoint frames", frames.len());
 
-    // 3. One stable camera over the whole run (centered on the zero-COM barycenter,
-    //    sized to a robust percentile radius so a few escapers don't shrink the
-    //    galaxies to dots), then render + grade each frame.
+    // 3. The camera path (M6d). Static: one face-on framing over the whole run
+    //    (centered on the zero-COM barycenter, sized to a robust percentile radius
+    //    so a few escapers don't shrink the galaxies to dots) — bit-exact with the
+    //    pre-M6d pipeline. OrbitTilt: eased azimuth/tilt sweep, with the zoom
+    //    breathing along the smoothed per-snapshot envelope of the same percentile
+    //    radius (3-D, since an orbiting camera has no preferred plane).
     let rcfg = RenderConfig {
         width: s.width,
         height: s.height,
         falloff: FALLOFF,
     };
-    let radius = framing_radius(&frames, s.frame_percentile).max(1e-3);
-    println!(
-        "framing radius (p{:.0}) = {radius:.2}",
-        s.frame_percentile * 100.0
-    );
-    let camera = Camera::face_on(Vec3::splat(-radius), Vec3::splat(radius), rcfg.aspect());
+    let path = match s.rig {
+        Rig::Static => {
+            let radius = framing_radius(&frames, s.frame_percentile).max(1e-3);
+            println!(
+                "framing radius (p{:.0}) = {radius:.2}",
+                s.frame_percentile * 100.0
+            );
+            CameraPath::fixed(Camera::face_on(
+                Vec3::splat(-radius),
+                Vec3::splat(radius),
+                rcfg.aspect(),
+            ))
+        }
+        Rig::OrbitTilt {
+            azimuth_deg,
+            tilt_deg,
+            window,
+        } => {
+            let raw = per_frame_radii(&frames, s.frame_percentile);
+            let envelope: Vec<f32> = smooth_envelope(&raw, window)
+                .into_iter()
+                .map(|r| r.max(1e-3))
+                .collect();
+            println!(
+                "framing envelope (p{:.0}, ±{window} snapshots) = {:.2}..{:.2}",
+                s.frame_percentile * 100.0,
+                envelope.iter().copied().fold(f32::INFINITY, f32::min),
+                envelope.iter().copied().fold(0.0f32, f32::max),
+            );
+            CameraPath::orbit_tilt(
+                Vec3::ZERO,
+                (azimuth_deg.0.to_radians(), azimuth_deg.1.to_radians()),
+                (tilt_deg.0.to_radians(), tilt_deg.1.to_radians()),
+                envelope,
+                DEFAULT_MARGIN,
+                rcfg.aspect(),
+            )?
+        }
+    };
     let gcfg = GradeConfig {
         exposure: EXPOSURE,
         tonemap: TONEMAP,
@@ -556,7 +632,10 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
         n => (n - 1) * s.subframes as usize + 1,
     };
     let emit = |i: usize, frame: &FrameData| -> Result<(), Box<dyn std::error::Error>> {
-        let img = renderer.render_frame(frame, &camera, &rcfg)?;
+        // The movie's unit timeline: frame i of `total` (a single-frame movie
+        // sits at u = 0, the path start).
+        let u = i as f32 / total.saturating_sub(1).max(1) as f32;
+        let img = renderer.render_frame(frame, &path.camera_at(u), &rcfg)?;
         if i == total / 2 {
             let flux = img.total_flux();
             let peak = img

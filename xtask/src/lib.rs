@@ -19,6 +19,49 @@ pub const DEFAULT_BLOOM_LEVELS: u32 = 5;
 /// `--bloom-radius` is not given (M6b).
 pub const DEFAULT_BLOOM_RADIUS: f32 = 2.0;
 
+/// Which M6e coloring mode a movie invocation asked for (`--color`). This is the
+/// CLI-level selector; the scenario maps it onto a concrete `renderprep::ColorMode`
+/// (frozen ramp colors need snapshot 0, which only the pipeline has).
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum ColorModeArg {
+    /// The flat progenitor palette — the pre-M6e look (default).
+    #[default]
+    Progenitor,
+    /// Frozen initial-radius ramp, computed from snapshot 0.
+    InitialRadius,
+    /// Per-frame velocity-dispersion (σ_v) ramp.
+    Dispersion,
+}
+
+/// A parsed movie invocation: scenario selector, optional output dir, coloring
+/// mode, and whether to reuse retained snapshots instead of re-simulating.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MovieArgs {
+    /// Canonical scenario name: `"disk"`, `"dm"`, or `"cuspy"`.
+    pub scenario: String,
+    /// Output directory; `None` means the scenario's default temp location.
+    pub out_dir: Option<PathBuf>,
+    /// The M6e coloring mode (default: progenitor palette).
+    pub color: ColorModeArg,
+    /// Skip the simulation and read existing `snapshots/*.snap` under the out dir
+    /// (errors downstream if none exist — reuse is an explicit promise).
+    pub reuse_snapshots: bool,
+}
+
+/// Map movie CLI arguments (everything except a leading `regrade`) to a
+/// [`MovieArgs`]: `[disk|dm|nfw|cuspy|disk-nfw] [out_dir]
+/// [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]`.
+///
+/// Back-compat rules preserved from the original positional CLI: `nfw` and
+/// `disk-nfw` are aliases for `dm` / `cuspy`; a bare first positional that is no
+/// scenario name is taken as the out dir with the `disk` scenario. Flags may come
+/// in any order. Errors (human-readable) on a third positional, unknown flags,
+/// unknown color names, or `--color` without a value.
+pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
+    let _ = args;
+    todo!("M6e: movie arg parsing")
+}
+
 /// A parsed `regrade` invocation: which EXR frames to read, where the PNGs go, and
 /// the grade to apply.
 #[derive(Clone, Debug, PartialEq)]
@@ -463,6 +506,104 @@ mod tests {
         ] {
             assert!(
                 parse_regrade_args(&args(bad)).is_err(),
+                "should reject: {why} ({bad:?})"
+            );
+        }
+    }
+
+    // --- movie arg parsing (M6e) -----------------------------------------------
+
+    #[test]
+    fn movie_defaults_to_disk_progenitor_fresh_sim() {
+        let m = parse_movie_args(&args(&[])).unwrap();
+        assert_eq!(
+            m,
+            MovieArgs {
+                scenario: "disk".to_string(),
+                out_dir: None,
+                color: ColorModeArg::Progenitor,
+                reuse_snapshots: false,
+            }
+        );
+    }
+
+    #[test]
+    fn movie_scenario_names_and_aliases_canonicalize() {
+        for (raw, canonical) in [
+            ("disk", "disk"),
+            ("dm", "dm"),
+            ("nfw", "dm"),
+            ("cuspy", "cuspy"),
+            ("disk-nfw", "cuspy"),
+        ] {
+            let m = parse_movie_args(&args(&[raw])).unwrap();
+            assert_eq!(m.scenario, canonical, "{raw}");
+            assert_eq!(m.out_dir, None);
+        }
+    }
+
+    #[test]
+    fn movie_second_positional_is_the_out_dir() {
+        let m = parse_movie_args(&args(&["cuspy", "some/out"])).unwrap();
+        assert_eq!(m.scenario, "cuspy");
+        assert_eq!(m.out_dir, Some(PathBuf::from("some/out")));
+    }
+
+    #[test]
+    fn movie_bare_first_positional_is_out_dir_with_disk_scenario() {
+        // The original single-scenario CLI: `xtask <out_dir>` — must keep working.
+        let m = parse_movie_args(&args(&["renders/mine"])).unwrap();
+        assert_eq!(m.scenario, "disk");
+        assert_eq!(m.out_dir, Some(PathBuf::from("renders/mine")));
+    }
+
+    #[test]
+    fn movie_parses_color_modes() {
+        for (name, mode) in [
+            ("progenitor", ColorModeArg::Progenitor),
+            ("initial-radius", ColorModeArg::InitialRadius),
+            ("dispersion", ColorModeArg::Dispersion),
+        ] {
+            let m = parse_movie_args(&args(&["cuspy", "--color", name])).unwrap();
+            assert_eq!(m.color, mode, "{name}");
+        }
+    }
+
+    #[test]
+    fn movie_flags_are_order_independent_and_compose() {
+        let a = parse_movie_args(&args(&[
+            "--reuse-snapshots",
+            "cuspy",
+            "--color",
+            "initial-radius",
+            "out",
+        ]))
+        .unwrap();
+        let b = parse_movie_args(&args(&[
+            "cuspy",
+            "out",
+            "--color",
+            "initial-radius",
+            "--reuse-snapshots",
+        ]))
+        .unwrap();
+        assert_eq!(a, b);
+        assert!(a.reuse_snapshots);
+        assert_eq!(a.color, ColorModeArg::InitialRadius);
+        assert_eq!(a.out_dir, Some(PathBuf::from("out")));
+    }
+
+    #[test]
+    fn movie_rejects_malformed_invocations() {
+        for (bad, why) in [
+            (&["disk", "out", "extra"][..], "third positional"),
+            (&["--color"][..], "flag missing its value"),
+            (&["--color", "rainbow"][..], "unknown color mode"),
+            (&["--colour", "progenitor"][..], "unknown flag"),
+            (&["--reuse"][..], "unknown flag (not the full name)"),
+        ] {
+            assert!(
+                parse_movie_args(&args(bad)).is_err(),
                 "should reject: {why} ({bad:?})"
             );
         }

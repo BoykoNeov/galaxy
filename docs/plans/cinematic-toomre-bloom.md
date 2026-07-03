@@ -64,7 +64,7 @@ upsampling and the scenario zoo.
 | 3 | **M6c** ✅ | Hermite temporal upsampling → smooth 60 fps movies | M | — |
 | 4 | **M6d** ✅ | Camera rig: smoothed framing + orbit/tilt paths | M | best after M6c |
 | 5 | **M6e** ✅ | Coloring modes v2: initial-radius ramp, σ_v, size-by-density | M | — |
-| 6 | **M6f** | `scenario.toml` front-end + the Toomre encounter zoo | M–L | easier after M6a–e |
+| 6 | **M6f** ✅ | `scenario.toml` front-end + the Toomre encounter zoo | M–L | easier after M6a–e |
 | 7 | **M6g** | Perspective camera + world-space vertex-shader projection | L | optional, last |
 
 M6a→M6b are the look; M6c→M6d are the motion; M6e is the information content;
@@ -289,7 +289,20 @@ today bit-exact; determinism.
 Demo: one cuspy sim (no re-sim — snapshots retained) rendered in 2–3 modes
 side by side.
 
-## M6f — `scenario.toml` front-end + the Toomre zoo (Session 6, M–L)
+## M6f — `scenario.toml` front-end + the Toomre zoo (Session 6, M–L) — LANDED
+
+*(Landed 2026-07; see the DESIGN.md M6f entry. As scoped below: schema +
+embedded preset registry in `xtask::spec` (serde/toml xtask-only), the three
+originals gated to reproduce the hardcoded constructors — spec field-for-field
+plus a build-vs-direct-IC `State` equality — and all four zoo members shipped
+as presets. The anticipated IC extension was NOT needed: `from_angles` already
+covers the out-of-plane bullseye disk; the plumbing is pinned by the
+retro-equals-cuspy-rotated-π-about-x build gate. Tuning findings argued in
+DESIGN: the bullseye intruder must be a minority particle population or the
+framing percentile chases it off the ring (plus p80/splat 0.08/T=20), and the
+minor merger frames at p90 because p97 chased far-slung escapers. One serde
+decision: `[model]`/`[rig]` deserialize via strict intermediate tables since
+tagged enums cannot `deny_unknown_fields`.)*
 
 **Goal:** diversify the *subject*. All current movies are coplanar prograde
 parabolic encounters; the classic encounter zoo is mostly config once

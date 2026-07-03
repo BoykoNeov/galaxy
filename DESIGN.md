@@ -1276,13 +1276,87 @@ late-time positions — N-body is chaotic).
     mode — cuspy in progenitor (+SF proxy +sizes) and initial-radius, dm in
     dispersion (`M:\claud_projects\temp\m6e\`).
   - [next: `scenario.toml` front-end + the Toomre encounter zoo (M6f).]
+- **`scenario.toml` front-end + the Toomre encounter zoo (landed, M6f) —
+  scenarios become data.** `xtask::spec` grows the declarative schema
+  (`ScenarioSpec`: `[model]` galaxies/orientations/counts, `[orbit]`, `[sim]`,
+  `[look]`, `[rig]`), a compile-time-embedded preset registry
+  (`xtask/scenarios/*.toml`), and `build_scenario(spec, quick)` — main.rs is
+  now pure glue. serde/toml is an **xtask-only dependency by design**: the
+  engine crates stay serde-free.
+  - **Schema stance: physics is gated, aesthetics are data.** Validation turns
+    every IC-constructor `assert!` into a readable error (a toml is user input,
+    not a programming-time contract) plus the cross-field rules (palette/ramp
+    lengths = the model's progenitor count, SF mask in range, bound-orbit
+    separation ≤ apocenter). Unknown keys fail loudly *everywhere*: serde's
+    tagged enums can't `deny_unknown_fields`, so `[model]`/`[rig]` deserialize
+    through strict intermediate tables (`try_from`) — the one non-obvious serde
+    decision of the session.
+  - **Back-compat is the headline gate:** the three original scenarios are
+    checked-in presets reproduced *field-for-field* against independent literal
+    copies of the old hardcoded constants, and the disk preset's *build* is
+    gated `State`-equal against direct inline IC construction — same params,
+    same seed ⇒ same movie. CLI selector set == the preset registry (a new toml
+    is reachable without touching the parser); `nfw`/`disk-nfw` aliases and the
+    bare-out-dir positional keep working; any first positional ending `.toml`
+    is a custom scenario.
+  - **The orientation door was already open:** `Orientation::from_angles`
+    covers the whole zoo — no IC change was needed. The plumbing is pinned by
+    the sharpest gate of the session: building `retro` must equal building
+    `cuspy` **rigidly rotated π about x** per galaxy (positions *and*
+    velocities, 1e-9), which no sign-convention slip survives.
+  - **The zoo** (all QUICK-rendered, `M:\claud_projects\temp\m6f\`; presets
+    carry the expectations as comments):
+    - `retro` — cuspy's controlled twin (same seed/orbit/sim, spins flipped
+      180°): tidal tails *suppressed* — at the frames where prograde cuspy
+      shows bridge + two tails, retro shows two intact round disks with mild
+      heating. The "why prograde matters" A/B pair, cut-together-able because
+      the rig choreography is identical.
+    - `inclined` — galaxy 1 tilted 45°, galaxy 2 prograde: the tilted disk
+      throws a genuinely 3-D warped, S-twisted tail while its partner's stays
+      flat — the contrast in one frame; rig sweeps tilt 65°→20° through it.
+    - `bullseye` — the Cartwheel geometry: target disk spin i=90°/ω=180°
+      (spin axis = (0,1,0), exactly the pericenter passage direction), compact
+      intruder on a parabolic near-central punch (peri = 0.3 Rd, slightly
+      off-center along the node line). Expanding ring density wave confirmed —
+      annular rim, dim center, displaced nucleus — dissolving by t≈18.
+      Tuning findings (first QUICK A/B): the escaping intruder must be a
+      *minority particle population* (~12%; equal flux via heavier particles)
+      or any framing percentile above its share chases it off the ring;
+      the compact scene (disk radius 2) wants p80 + splat 0.08 (p70/0.12
+      mushed out); T=20 — the ring is dead past t≈18, cadence 16 keeps ~63
+      snapshots.
+    - `minor` — 1:10 satellite (0.115 vs 1.15) on a bound e=0.7, 40°-inclined
+      orbit starting near apocenter, T=120 ≈ 2.7 radial periods (gated):
+      blue stream arcs over the primary at first pericenter, satellite fully
+      disrupted into a diffuse wrap by the third. Tuning finding: p97 framing
+      chased the few % of far-slung escapers (envelope max 46 → galaxy became
+      a dot); the stream lives inside the satellite's ~7-unit apocenter — p90.
+  - **Physics cautions carried:** retro/inclined inherit cuspy's cusp-resolution
+    budget (M5f: halo N high + ε=0.02 even in QUICK); bullseye/minor ride the
+    warm (Q=1.5) Plummer family, so no cusp constraint.
+  - Gates (`xtask` lib `spec::tests` + `tests/scenario_build.rs`): the three
+    preset-reproduction equalities; retro/inclined pinned as cuspy twins on
+    (seed, orbit, sim, model-with-flipped-spins) with look/rig left free (rule
+    2: aesthetics are eyeballed, not gated); bullseye spin-axis/pericenter
+    geometry; minor mass-ratio/bound/apocenter-start/≥2-radial-periods; a
+    17-case reject table (broken physics, typo'd keys at every table depth,
+    zero counts/cadence, percentile > 1, c ≤ 1, sub-pericenter separation,
+    beyond-apocenter bound start); build determinism; QUICK vs full counts,
+    cadence override, frame size; brightness unit = disk-1 (resp. equal-mass
+    halo) particle mass; movie-arg parsing over the registry + `.toml` paths.
+  - Demo: the four-movie QUICK zoo contact sheet under
+    `M:\claud_projects\temp\m6f\` (retro/inclined at first pass; bullseye/minor
+    after one documented tuning iteration each); full-res renders of all four
+    from the same presets.
+  - [next: perspective camera + world-space vertex-shader projection — the 10⁸
+    swap (M6g, optional).]
 - **M6 (in progress) — "the beautiful": visual/cinematic series.** Asinh grade +
   regrade loop + density boost ON (M6a) → bloom (M6b) → Hermite 60 fps
   upsampling (M6c) → animated camera rig (M6d) → coloring modes v2 incl. the
-  density→blue star-formation proxy (M6e) — all landed above →
-  `scenario.toml` + Toomre encounter zoo (M6f) → perspective/vertex-path render,
-  the 10⁸ swap (M6g, optional). Session-by-session plan with gates and decisions:
-  `docs/plans/cinematic-toomre-bloom.md`.
+  density→blue star-formation proxy (M6e) → `scenario.toml` front-end + the
+  Toomre encounter zoo (M6f) — all landed above → perspective/vertex-path
+  render, the 10⁸ swap (M6g, optional). Session-by-session plan with gates and
+  decisions: `docs/plans/cinematic-toomre-bloom.md`.
 
 ## Validation strategy
 

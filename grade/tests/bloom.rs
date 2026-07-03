@@ -236,6 +236,41 @@ fn interior_impulse_translates_by_the_mip_stride_bitexactly() {
 }
 
 #[test]
+fn constant_image_blooms_to_constant_everywhere() {
+    // The border gate (found on the first rendered A/B: a bright band along the
+    // frame edges). Global flux conservation alone allows boundary handling to
+    // PILE the reflected halo flux onto border rows; a constant image makes that
+    // visible as out[border] > out[interior]. The doubly-stochastic stance: every
+    // stage must conserve flux (per-source normalization, gated above) AND map
+    // constants to constants (per-target normalization, gated here) — then
+    // bloom(c) = (1+strength)·c at EVERY pixel, and there is no band. Dimensions
+    // 31×22 hit both border parities (odd and even) through the mip chain.
+    // Tolerance is fp-only (~100 ops/value at ~6e-8): the clamp pile-up this
+    // guards against is a 10–50% effect.
+    const W: usize = 31;
+    const H: usize = 22;
+    const C: f32 = 0.6;
+    let img = vec![[C; 3]; W * H];
+    let cfg = BloomConfig {
+        strength: 0.8,
+        levels: 4,
+        radius: 2.0,
+    };
+    let expected = (1.0 + cfg.strength) * C;
+    for (i, p) in bloom(&img, W, H, &cfg).iter().enumerate() {
+        for &c in p {
+            let rel = (c - expected).abs() / expected;
+            assert!(
+                rel < 1e-4,
+                "pixel ({},{}): {c} vs constant {expected} (rel err {rel:.2e})",
+                i % W,
+                i / W
+            );
+        }
+    }
+}
+
+#[test]
 fn tiny_image_with_huge_levels_stays_total() {
     // The pyramid must cap at the 1×1 mip floor rather than loop or degenerate;
     // flux conservation must survive the cap.

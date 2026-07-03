@@ -12,14 +12,20 @@
 //! `ForceSolver` trait takes `&State`, so a stored column could never be kept
 //! fresh and would go stale for every downstream consumer.
 
+pub mod cfl;
 pub mod density;
+pub mod forces;
+pub mod gravity_sph;
 pub mod grid;
 pub mod kernel;
 pub mod reference;
 
+pub use cfl::{max_stable_dt, validate_dt, CflViolation};
 pub use density::{
     density_adaptive, density_adaptive_serial, density_fixed, DensityConfig, DensityResult,
 };
+pub use forces::{hydro_accelerations, hydro_accelerations_serial, HydroParams};
+pub use gravity_sph::GravitySph;
 pub use grid::HashGrid;
 pub use kernel::{grad_w, w, SUPPORT};
 pub use reference::{reference_density, reference_neighbours};

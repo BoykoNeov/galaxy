@@ -1046,12 +1046,58 @@ late-time positions — N-body is chaotic).
   - [next: the warm cuspy disk once ρ(r)'s cusp divergence is handled (unlocks Q≈1.5
     survival over *several* orbits, i.e. a full merger rather than a single flyby); a
     `scenario.toml` front-end so these hardcoded scenarios become data.]
-- **M6 (planned) — "the beautiful": visual/cinematic series.** Asinh grade + regrade
-  loop + density boost ON (M6a) → bloom (M6b) → Hermite temporal upsampling to 60 fps
-  (M6c) → animated camera rig (M6d) → coloring modes v2 incl. the density→blue
-  star-formation proxy (M6e) → `scenario.toml` + Toomre encounter zoo (M6f) →
-  perspective/vertex-path render, the 10⁸ swap (M6g, optional). Session-by-session
-  plan with gates and decisions: `docs/plans/cinematic-toomre-bloom.md`.
+- **Grade toolkit: asinh stretch + `regrade` loop + density boost ON (landed, M6a) —
+  the switched-off wins.** First session of the M6 visual series: exploit what was
+  already built (retained linear EXRs, the invariant-gated M3.6 density estimator)
+  and establish the seconds-cheap look-iteration loop every later session leans on.
+  - **`ToneMap::Asinh { beta }`** (`grade`): the Lupton-style astro stretch
+    `f(x; β) = β·asinh(x/β)`, clamped to `[0, 1]`. Linear (unit slope) below the
+    softening knob β, logarithmic above — so exposure can be pushed hard enough to
+    reveal the faint tidal tails while the log regime holds the additive cores far
+    below where ACES/Reinhard flat-line (at x=100: Reinhard ≈0.990, asinh(β=0.1)
+    ≈0.760 — that ordering is a gate). Other gates: hand values
+    (asinh(1)=ln(1+√2)), monotone + `[0,1]` over a geometric HDR sweep, β→large
+    recovers the identity at small x (`asinh(u)=u−u³/6+…`), and β floored at
+    `f32::MIN_POSITIVE` so a degenerate `β=0` stays total (`0·asinh(∞)` would NaN a
+    whole frame). `ToneMap` drops `Eq` for the f32 payload (`PartialEq` stays).
+  - **`xtask regrade <exr_dir> <png_dir> [--exposure E --tonemap
+    aces|reinhard|asinh --beta B]`**: grades every retained `.exr` into same-stem
+    PNGs and (ffmpeg permitting) muxes `png_dir/movie.mp4` — self-contained in the
+    target dir, never clobbers the original render's frames. ~61 frames regrade in
+    seconds; this is the loop that makes grade-time iteration (and M6b's bloom
+    tuning) cheap. The arg→`GradeConfig` mapping (`parse_regrade_args`) is pure and
+    unit-gated (defaults, order-independent flags, fail-fast on unknown
+    flags/tonemaps, non-positive numbers, `--beta` without asinh); the binary stays
+    test-exempt I/O glue. Movie defaults are unchanged (ACES, exposure 1) — asinh
+    is the regrade-time look; for the cuspy QUICK preview, `--exposure 4 --tonemap
+    asinh` (β=0.2, the `DEFAULT_ASINH_BETA`) is the documented starting point:
+    tails and bridge clearly lifted, cores intact, while exposure 8 / β=0.1 washes
+    the halo shot-noise dots into the foreground.
+  - **Density boost ON in all three scenarios** — `DensityColoring { k: 32,
+    softening: ε (per scenario), strength: 3.0 }` — the exact follow-up the M3.6
+    scope note promised, tuned by A/B against rendered QUICK cuspy frames
+    (strengths 0/1.5/3/6 on bit-identical snapshots; a retained pre-M6a run gave
+    the boost-off control). **Tuning finding:** the mean reference ρ_ref is
+    dominated by the dense inner disk (cuspy frame 35: ρ_ref≈2.8e3 ≈ the disk's
+    median, only ~3–4% of *halo* particles exceed it), so the boost acts on nuclei
+    and inner-disk knots and leaves bridge/tails at base brightness (they sit below
+    ρ_ref — the non-dimming design working as intended; tail reveal is the asinh
+    grade's job, not the boost's). Consequences: strength 1.5 is *invisible* (its
+    boosted pixels were already tone-curve-saturated — graded A/B frames come out
+    statistically identical), 3.0 makes the nuclei read as bright compact cores
+    instead of grainy patches, 6 blows them into structureless blobs. k=32 (top of
+    the documented 8–32 band) halves the estimator's shot noise vs k=16 for
+    negligible cost — temporal stability matters in a movie; the kNN floor reuses
+    each scenario's force softening ε, the smallest separation the sim resolves.
+  - [next: bloom at grade time in linear space (M6b) — the placement decision is
+    already argued in the plan doc.]
+- **M6 (in progress) — "the beautiful": visual/cinematic series.** Asinh grade +
+  regrade loop + density boost ON (M6a, landed above) → bloom (M6b) → Hermite
+  temporal upsampling to 60 fps (M6c) → animated camera rig (M6d) → coloring modes
+  v2 incl. the density→blue star-formation proxy (M6e) → `scenario.toml` + Toomre
+  encounter zoo (M6f) → perspective/vertex-path render, the 10⁸ swap (M6g,
+  optional). Session-by-session plan with gates and decisions:
+  `docs/plans/cinematic-toomre-bloom.md`.
 
 ## Validation strategy
 

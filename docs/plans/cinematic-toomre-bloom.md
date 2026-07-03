@@ -59,7 +59,7 @@ upsampling and the scenario zoo.
 
 | Session | Milestone | One-liner | Effort | Depends on |
 |---|---|---|---|---|
-| 1 | **M6a** | Grade toolkit: asinh stretch, `regrade` subcommand, density boost ON | S | — |
+| 1 | **M6a** ✅ | Grade toolkit: asinh stretch, `regrade` subcommand, density boost ON | S | — |
 | 2 | **M6b** | Bloom (CPU mip-chain, applied at grade time in linear space) | M | M6a (regrade loop) |
 | 3 | **M6c** | Hermite temporal upsampling → smooth 60 fps movies | M | — |
 | 4 | **M6d** | Camera rig: smoothed framing + orbit/tilt paths | M | best after M6c |
@@ -75,7 +75,11 @@ choppiness).
 
 ---
 
-## M6a — grade toolkit + the switched-off wins (Session 1, S)
+## M6a — grade toolkit + the switched-off wins (Session 1, S) — LANDED
+
+*(Landed 2026-07; see the DESIGN.md M6a entry for the tuning findings — chosen
+density values k=32 / soft=ε / strength=3.0, and the asinh regrade starting point
+exposure 4 / β=0.2.)*
 
 **Goal:** exploit what's already built. Establish the fast iterate-on-look loop
 (regrade EXRs in seconds) that every later session leans on.

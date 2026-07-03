@@ -15,8 +15,9 @@
 //!   * A bare first arg that is none of `disk`/`dm`/`cuspy` is taken as `out_dir` with
 //!     the `disk` scenario (back-compat with the original single-scenario CLI).
 //!   * `regrade <exr_dir> <png_dir> [--exposure E] [--tonemap aces|reinhard|asinh]
-//!     [--beta B]` re-grades retained linear EXRs into fresh PNGs (+ movie if ffmpeg
-//!     is present) in seconds — no re-simulation, no re-render (the M6a look loop).
+//!     [--beta B] [--bloom S] [--bloom-levels N] [--bloom-radius R]` re-grades
+//!     retained linear EXRs into fresh PNGs (+ movie if ffmpeg is present) in seconds
+//!     — no re-simulation, no re-render (the M6a look loop; bloom added in M6b).
 //!   * Set `GALAXY_MOVIE_QUICK=1` for a fast low-N, low-res preview (same physical
 //!     time and dt, so the trajectory is faithful — only particle count, frame size,
 //!     and frame cadence are reduced). Use it to sanity-check a scenario before a
@@ -30,12 +31,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use galaxy_core::{LeapfrogKdk, State, StaticBackground};
-use galaxy_grade::{grade_file, GradeConfig, ToneMap};
+use galaxy_grade::{grade_file, BloomConfig, GradeConfig, ToneMap};
 use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, TruncatedNfw};
 use galaxy_render::{write_exr, Camera, RenderConfig, Renderer};
 use galaxy_renderprep::{prepare, DensityColoring, PrepConfig};
 use galaxy_sim::{run, DirectorySink, SimConfig};
-use galaxy_xtask::{framing_radius, parse_regrade_args};
+use galaxy_xtask::{
+    framing_radius, parse_regrade_args, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS,
+};
 use glam::Vec3;
 
 // --- Shared physics / look (both scenarios) ----------------------------------
@@ -57,6 +60,12 @@ const DENSITY_K: usize = 32;
 const DENSITY_STRENGTH: f32 = 3.0;
 const EXPOSURE: f32 = 1.0;
 const TONEMAP: ToneMap = ToneMap::AcesApprox;
+// Bloom (M6b), ON by default in all three scenarios. Strength tuned by A/B regrades
+// of retained QUICK EXRs (0 / 0.3 / 0.45 / 0.6 / 1.2, cuspy under asinh exposure 4 +
+// disk/dm under the ACES movie default): 0.3 is timid, 0.6 starts to haze the dense
+// cuspy halo field, 1.2 washes out structure; 0.45 makes nuclei and knots glow while
+// tails and halo dots stay resolved. Levels/radius are the documented CLI defaults.
+const BLOOM_STRENGTH: f32 = 0.45;
 const FPS: u32 = 30;
 const FRAME_W: u32 = 1280;
 const FRAME_H: u32 = 720;
@@ -421,7 +430,8 @@ fn cuspy_scenario(quick: bool) -> Scenario {
 /// stems still regrade fine, ffmpeg just skips them with its usual message.
 fn regrade(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     const USAGE: &str = "usage: regrade <exr_dir> <png_dir> \
-         [--exposure E] [--tonemap aces|reinhard|asinh] [--beta B]";
+         [--exposure E] [--tonemap aces|reinhard|asinh] [--beta B] \
+         [--bloom S] [--bloom-levels N] [--bloom-radius R]";
     let cfg = parse_regrade_args(args).map_err(|e| format!("regrade: {e}\n{USAGE}"))?;
 
     let mut exrs: Vec<PathBuf> = std::fs::read_dir(&cfg.exr_dir)?
@@ -513,7 +523,11 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
     let gcfg = GradeConfig {
         exposure: EXPOSURE,
         tonemap: TONEMAP,
-        bloom: None,
+        bloom: Some(BloomConfig {
+            strength: BLOOM_STRENGTH,
+            levels: DEFAULT_BLOOM_LEVELS,
+            radius: DEFAULT_BLOOM_RADIUS,
+        }),
     };
     let renderer = Renderer::new()?;
 

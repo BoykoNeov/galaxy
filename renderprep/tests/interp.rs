@@ -63,9 +63,21 @@ fn c1_continuity_across_a_snapshot_boundary() {
     // Three snapshots of one particle on a generic curved path. The interpolant
     // on [s0,s1] and the one on [s1,s2] must agree at the join in BOTH position
     // and velocity (C¹) — bit-exact, because both reproduce s1's phase space.
-    let s0 = snap(0.0, vec![DVec3::new(0.1, 0.2, 0.3)], vec![DVec3::new(1.0, -0.5, 0.2)]);
-    let s1 = snap(0.8, vec![DVec3::new(0.9, -0.1, 0.5)], vec![DVec3::new(0.7, 0.4, -0.3)]);
-    let s2 = snap(1.5, vec![DVec3::new(1.4, 0.3, 0.1)], vec![DVec3::new(0.2, 0.6, -0.8)]);
+    let s0 = snap(
+        0.0,
+        vec![DVec3::new(0.1, 0.2, 0.3)],
+        vec![DVec3::new(1.0, -0.5, 0.2)],
+    );
+    let s1 = snap(
+        0.8,
+        vec![DVec3::new(0.9, -0.1, 0.5)],
+        vec![DVec3::new(0.7, 0.4, -0.3)],
+    );
+    let s2 = snap(
+        1.5,
+        vec![DVec3::new(1.4, 0.3, 0.1)],
+        vec![DVec3::new(0.2, 0.6, -0.8)],
+    );
 
     let left = HermiteSpan::new(&s0, &s1).unwrap();
     let right = HermiteSpan::new(&s1, &s2).unwrap();
@@ -214,7 +226,10 @@ fn kepler_eccentric_orbit_oracle() {
         let t = t0 + u * dt;
         let (p, _) = span.sample(u);
         let err = (p[0] - pos_at(t)).abs().max_element();
-        assert!(err <= tol, "Kepler eccentric position: err {err} > tol {tol}");
+        assert!(
+            err <= tol,
+            "Kepler eccentric position: err {err} > tol {tol}"
+        );
     }
 }
 
@@ -329,8 +344,16 @@ fn subframe_attributes_lerp_linearly() {
 fn subframe_positions_are_hermite_not_lerp() {
     // A curved trajectory where the cubic visibly departs from the chord: the
     // subframe's positions must match span.sample(u), not the endpoint lerp.
-    let s0 = snap(0.0, vec![DVec3::new(1.0, 0.0, 0.0)], vec![DVec3::new(0.0, 2.0, 0.0)]);
-    let s1 = snap(1.0, vec![DVec3::new(-1.0, 0.0, 0.0)], vec![DVec3::new(0.0, -2.0, 0.0)]);
+    let s0 = snap(
+        0.0,
+        vec![DVec3::new(1.0, 0.0, 0.0)],
+        vec![DVec3::new(0.0, 2.0, 0.0)],
+    );
+    let s1 = snap(
+        1.0,
+        vec![DVec3::new(-1.0, 0.0, 0.0)],
+        vec![DVec3::new(0.0, -2.0, 0.0)],
+    );
     let cfg = PrepConfig::default();
     let f0 = prepare(&s0, &cfg);
     let f1 = prepare(&s1, &cfg);

@@ -26,6 +26,10 @@
 //! Layout under `out_dir`: `snapshots/` `.snap`, `exr/` linear HDR, `frames/` PNGs,
 //! `movie.mp4` (if ffmpeg is on PATH). The EXR layer is kept so the frames can be
 //! regraded (different exposure/tonemap) without re-simulating or re-rendering.
+//!
+//! Motion (M6c): frames are Hermite-upsampled between snapshots — full renderprep
+//! (incl. kNN density) on the snapshot cadence, 8 physically-informed in-betweens
+//! per interval, 60 fps — so ~61 snapshots become a ~8 s continuous movie.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,7 +38,7 @@ use galaxy_core::{LeapfrogKdk, State, StaticBackground};
 use galaxy_grade::{grade_file, BloomConfig, GradeConfig, ToneMap};
 use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, TruncatedNfw};
 use galaxy_render::{write_exr, Camera, RenderConfig, Renderer};
-use galaxy_renderprep::{prepare, DensityColoring, PrepConfig};
+use galaxy_renderprep::{prepare, subframe, DensityColoring, FrameData, HermiteSpan, PrepConfig};
 use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_xtask::{
     framing_radius, parse_regrade_args, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS,
@@ -66,7 +70,12 @@ const TONEMAP: ToneMap = ToneMap::AcesApprox;
 // cuspy halo field, 1.2 washes out structure; 0.45 makes nuclei and knots glow while
 // tails and halo dots stay resolved. Levels/radius are the documented CLI defaults.
 const BLOOM_STRENGTH: f32 = 0.45;
-const FPS: u32 = 30;
+// Hermite temporal upsampling (M6c): snapshots store full phase space, so cubic
+// Hermite in-betweens are physically informed and cost no sim time. 8 subframes
+// per snapshot at 60 fps turns the ~2 s / 30 fps flipbook into a ~8 s smooth
+// movie (playback slows 4x per unit sim time; pericenter reads as continuous).
+const SUBFRAMES: u32 = 8;
+const FPS: u32 = 60;
 const FRAME_W: u32 = 1280;
 const FRAME_H: u32 = 720;
 const QUICK_W: u32 = 640;
@@ -83,6 +92,8 @@ struct Scenario {
     dt: f64,
     n_steps: u64,
     snapshot_every: u64,
+    /// Hermite in-between frames per snapshot interval (M6c); 1 = no upsampling.
+    subframes: u32,
     seed: u64,
     width: u32,
     height: u32,
@@ -169,7 +180,7 @@ fn dm_scenario(quick: bool) -> Scenario {
     // orbital energy on the deep, fully-overlapping first passage).
     let dt = 0.02;
     let n_steps = 16_000;
-    let snapshot_every = if quick { 400 } else { 200 }; // ~40 / ~80 frames
+    let snapshot_every = if quick { 400 } else { 200 }; // ~40 / ~80 snapshots
 
     let (width, height) = if quick {
         (QUICK_W, QUICK_H)
@@ -201,6 +212,7 @@ fn dm_scenario(quick: bool) -> Scenario {
         dt,
         n_steps,
         snapshot_every,
+        subframes: SUBFRAMES,
         seed,
         width,
         height,
@@ -298,7 +310,8 @@ fn disk_scenario(quick: bool) -> Scenario {
         eps: DISK_EPS,
         dt: 0.02,
         n_steps: 1500,
-        snapshot_every: 25, // → ~61 frames
+        snapshot_every: 25, // → ~61 snapshots
+        subframes: SUBFRAMES,
         seed,
         width,
         height,
@@ -410,7 +423,8 @@ fn cuspy_scenario(quick: bool) -> Scenario {
         eps: CUSPY_EPS,
         dt: 0.02,
         n_steps: 1500,
-        snapshot_every: 25, // → ~61 frames
+        snapshot_every: 25, // → ~61 snapshots
+        subframes: SUBFRAMES,
         seed,
         width,
         height,
@@ -494,17 +508,21 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
         summary.steps, summary.snapshots_emitted, summary.final_time
     );
 
-    // 2. Renderprep: snapshot → frame-data.
+    // 2. Renderprep on the SNAPSHOT cadence: the full prepare (including the O(N²)
+    //    kNN density pass) runs only on snapshot states; the Hermite subframes below
+    //    lerp these endpoint attributes (M6c decision — density evolves on the
+    //    snapshot timescale, so per-subframe kNN would cost minutes for no gain).
     let mut snaps: Vec<PathBuf> = std::fs::read_dir(&snap_dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "snap"))
         .collect();
     snaps.sort(); // snapshot_<step:08>.snap → lexicographic == step order
-    let frames: Vec<_> = snaps
+    let states: Vec<State> = snaps
         .iter()
-        .map(|p| galaxy_io::read_file(p).map(|(_, st)| prepare(&st, &s.prep)))
+        .map(|p| galaxy_io::read_file(p).map(|(_, st)| st))
         .collect::<Result<Vec<_>, _>>()?;
-    println!("prepared {} frames", frames.len());
+    let frames: Vec<_> = states.iter().map(|st| prepare(st, &s.prep)).collect();
+    println!("prepared {} endpoint frames", frames.len());
 
     // 3. One stable camera over the whole run (centered on the zero-COM barycenter,
     //    sized to a robust percentile radius so a few escapers don't shrink the
@@ -531,9 +549,15 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
     };
     let renderer = Renderer::new()?;
 
-    for (i, frame) in frames.iter().enumerate() {
+    // 4. Hermite temporal upsampling (M6c): `subframes` in-betweens per snapshot
+    //    interval, plus the final snapshot itself → (n-1)·subframes + 1 frames.
+    let total = match states.len() {
+        0 | 1 => states.len(),
+        n => (n - 1) * s.subframes as usize + 1,
+    };
+    let emit = |i: usize, frame: &FrameData| -> Result<(), Box<dyn std::error::Error>> {
         let img = renderer.render_frame(frame, &camera, &rcfg)?;
-        if i == frames.len() / 2 {
+        if i == total / 2 {
             let flux = img.total_flux();
             let peak = img
                 .pixels
@@ -546,12 +570,24 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
         let png = frame_dir.join(format!("frame_{i:05}.png"));
         write_exr(&exr, &img)?;
         grade_file(&exr, &png, &gcfg)?;
+        Ok(())
+    };
+    let mut i = 0;
+    for w in 0..states.len().saturating_sub(1) {
+        // The span validates the id/time gates once per snapshot pair (a silent
+        // id mismatch would scramble the movie — fail loudly instead).
+        let span = HermiteSpan::new(&states[w], &states[w + 1])?;
+        for j in 0..s.subframes {
+            let u = f64::from(j) / f64::from(s.subframes);
+            emit(i, &subframe(&span, &frames[w], &frames[w + 1], u))?;
+            i += 1;
+        }
     }
-    println!(
-        "rendered + graded {} frames → {}",
-        frames.len(),
-        frame_dir.display()
-    );
+    if let Some(last) = frames.last() {
+        emit(i, last)?;
+        i += 1;
+    }
+    println!("rendered + graded {i} frames → {}", frame_dir.display());
 
     // 4. ffmpeg → movie (optional; leaves PNGs if ffmpeg is absent).
     encode_movie(&frame_dir, &out.join("movie.mp4"));

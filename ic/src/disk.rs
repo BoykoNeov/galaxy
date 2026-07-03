@@ -43,21 +43,29 @@ use galaxy_core::{DVec3, ParticleId, Progenitor, State};
 
 use std::f64::consts::{PI, TAU};
 
-use crate::Plummer;
+use crate::{Plummer, SphericalHalo};
 
 /// Toomre's stellar stability factor: Q = σ_R κ / (3.36 G Σ). The 3.36 is the
 /// value for a collisionless (stellar) disk; π is the gas value.
 const TOOMRE_FACTOR: f64 = 3.36;
 
-/// A cold exponential disk of low-mass particles inside a live Plummer halo/bulge.
+/// A cold exponential disk of low-mass particles inside a live spherical halo/bulge.
 ///
-/// Choose units freely; `g` must match the halo's `g`. The disk mass should be a
-/// small fraction of the halo mass (submaximal) for the cold disk to hold together.
+/// The halo is any [`SphericalHalo`] — a cored [`Plummer`] (the default, and the
+/// original M3 model) or a cuspy [`Nfw`](crate::Nfw)/[`Hernquist`](crate::Hernquist)/
+/// [`TruncatedNfw`](crate::TruncatedNfw). Swapping it changes the disk's rotation
+/// curve (a cuspy halo gives the realistic rising-to-flat curve) with no other code
+/// change — the disk reads only the halo's closed-form `g`, total mass, ρ(r) and
+/// M(<r), plus its particle sampler.
+///
+/// Choose units freely; the disk's `g` is taken from `halo.g()`. The disk mass
+/// should be a small fraction of the halo mass (submaximal) for the cold disk to
+/// hold together.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ExponentialDisk {
-    /// Gravitational constant `G` (must equal `halo.g`).
+pub struct ExponentialDisk<H = Plummer> {
+    /// Gravitational constant `G` (equals `halo.g()`).
     pub g: f64,
-    /// Total disk mass `M_d` (should be ≪ `halo.total_mass`).
+    /// Total disk mass `M_d` (should be ≪ the halo's total mass).
     pub disk_mass: f64,
     /// Radial exponential scale length `Rd`.
     pub scale_length: f64,
@@ -66,7 +74,7 @@ pub struct ExponentialDisk {
     /// Truncation radius (no disk particles beyond this cylindrical radius).
     pub r_max: f64,
     /// The live spherical halo/bulge the disk is embedded in.
-    pub halo: Plummer,
+    pub halo: H,
     /// Optional Toomre-Q warmth. `None` = the fully-cold kinematic disk (v_φ = v_c,
     /// zero dispersion). `Some(q)` gives the disk in-plane and vertical velocity
     /// dispersion targeting Toomre stability parameter `q`, with the mean azimuthal
@@ -74,15 +82,16 @@ pub struct ExponentialDisk {
     toomre_q: Option<f64>,
 }
 
-impl ExponentialDisk {
+impl<H: SphericalHalo> ExponentialDisk<H> {
     /// Construct a disk galaxy. All scalar parameters must be strictly positive,
-    /// `g` must equal `halo.g`, and `r_max` must exceed the scale length.
+    /// the disk's `g` is inherited from `halo.g()`, and `r_max` must exceed the
+    /// scale length.
     pub fn new(
         disk_mass: f64,
         scale_length: f64,
         scale_height: f64,
         r_max: f64,
-        halo: Plummer,
+        halo: H,
     ) -> Self {
         assert!(disk_mass > 0.0, "disk mass must be positive");
         assert!(scale_length > 0.0, "scale length must be positive");
@@ -92,7 +101,7 @@ impl ExponentialDisk {
             "truncation radius ({r_max}) must exceed the scale length ({scale_length})"
         );
         Self {
-            g: halo.g,
+            g: halo.g(),
             disk_mass,
             scale_length,
             scale_height,
@@ -276,7 +285,7 @@ impl ExponentialDisk {
 
     /// Total galaxy mass, disk + halo.
     pub fn total_mass(&self) -> f64 {
-        self.disk_mass + self.halo.total_mass
+        self.disk_mass + self.halo.total_mass()
     }
 
     /// Sample the galaxy: `n_halo` Plummer halo particles (`Progenitor(0)`) drawn

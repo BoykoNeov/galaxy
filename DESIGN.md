@@ -1004,9 +1004,48 @@ late-time positions — N-body is chaotic).
     conserved. RMS thickness is a *loose* sanity bound only: the cold v_z=0 sheet is a
     geometric layer, not a vertical equilibrium, so it settles/phase-mixes vertically,
     more so in the steeper cuspy field.
-  - [next: wire a cuspy `ExponentialDisk` into `DiskCollision` for a *disk+halo*
-    merger movie with real tidal tails (the M5e DM movie is pure blobs); and/or the
-    warm cuspy disk once ρ(r)'s cusp divergence is handled.]
+- **Cuspy-disk collision (landed, M5g) — tidal tails on a cusp, the demoable payoff.**
+  M5f abstracted the disk's halo behind `SphericalHalo`; M5g abstracts the *collision*
+  the same way. `DiskCollision<H = Plummer>` (`ic/disk_collision.rs`) is now generic
+  over the halo type, so two rotating disks can encounter each other inside live cuspy
+  [`TruncatedNfw`] halos, not only cored Plummer. The **default type parameter** keeps
+  every existing `DiskCollision` mention meaning `<Plummer>` (the M3 disk suite and the
+  xtask `disk` scenario compile unchanged); the placement code is pure forwarding to
+  `ExponentialDisk<H>`'s already-tested generic surface, and `place_galaxy` operates on
+  the sampled `State`, so nothing in the assembly is halo-specific. This is the disk
+  analogue of the M5e `NfwCollision` (which is pure blobs) and the cuspy analogue of the
+  M3 `disk` movie.
+  - **No red-first — deliberately.** Widening a type parameter is a *mechanical,
+    behavior-preserving* change: there is no honest failing state (a `todo!()` inserted
+    only to manufacture a red would be the very fake-impl anti-pattern the TDD rule
+    forbids — confirmed with the reviewer). The safety net is instead that the existing
+    Plummer `disk_collision.rs` suite **stays green**, proving the widening preserves
+    behavior. The new `disk_collision_cuspy.rs` gates only what the generalization newly
+    touches — the orbit recovering its conic from the *cuspy* combined masses, four-
+    progenitor assembly / zero-COM from cuspy-sampled halos, the disks' surviving +Z
+    spin. It does **not** re-derive the ⟨v_φ⟩(R) rotation curve: `sample` = (cuspy
+    `ExponentialDisk::sample`, gated in `disk_in_cuspy_halo.rs`) ∘ (rigid placement,
+    gated in `disk_collision.rs`), so re-testing it is the redundancy this doc calls out
+    for the M5e case.
+  - **The payoff scenario (`xtask cuspy`).** Two cold disks in truncated-NFW halos on a
+    parabolic prograde passage. A QUICK preview shows the classic Toomre sequence: two
+    coherent disks approach → an **S-shaped tidal bridge-and-tails** at first pericenter
+    → the cores stay intact and bright as the pair separates. Genuine tidal features,
+    not the DM-merger's blobs.
+  - **Two cusp-forced choices in the scenario.** (1) The disks are **COLD**. The Plummer
+    `disk` movie runs *warm* (Toomre Q≈1.5) to survive several orbits, but that knob
+    reads ρ(r) — which **diverges at the cusp** — so warm-in-a-cusp stays the scoped
+    follow-up; a cold disk on circular orbits is an equilibrium in any spherical
+    potential, the honest increment. (2) The stabilizer is therefore **resolution, not
+    warmth** (the M5f finding carries straight over): the halos are particle-heavy
+    (nh 10000+8000 full, 5000+4000 quick — kept high *even in QUICK* so the low-N preview
+    isn't a false negative for a cusp that only holds when resolved) with ε=0.02·r_s
+    (between the disk movie's 0.05 and M5f's deep-cusp 0.01). Framed at **p70**, not
+    p98, so the far-larger halo skirt (r_vir=10 vs disk r_max≈1.8) is cropped and the
+    disk + tails fill the frame while the dim halo glows underneath.
+  - [next: the warm cuspy disk once ρ(r)'s cusp divergence is handled (unlocks Q≈1.5
+    survival over *several* orbits, i.e. a full merger rather than a single flyby); a
+    `scenario.toml` front-end so these hardcoded scenarios become data.]
 
 ## Validation strategy
 

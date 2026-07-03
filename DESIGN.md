@@ -1163,9 +1163,53 @@ late-time positions — N-body is chaotic).
     ~481 frames, the ~2 s flipbook becomes a ~8 s continuous movie (playback
     4× slower per unit sim time; pericenter reads as continuous motion).
   - [next: camera rig — smoothed framing + orbit/tilt paths (M6d).]
+- **Camera rig (landed, M6d) — the difference between a diagram and a film.**
+  `render::rig` (pure CPU math; xtask wires a path per scenario): `ease_in_out`
+  is the quintic smootherstep `6u⁵−15u⁴+10u³` (zero first derivative at both
+  ends — the camera starts and stops at rest; peak slope 15/8 is what the
+  smoothness gates budget against), evaluated in **f64** because the f32
+  quintic wobbles ~5e-7 near u=1 — enough to break frame-to-frame monotonicity.
+  `smooth_envelope(raw, window)` turns per-frame framing radii into a breathing
+  zoom: moving max over ±window then a truncated Gaussian (σ = window/3, kernel
+  radius = window, edges clamped).
+  - **The envelope can never crop tighter than the raw requirement — exactly.**
+    Because the kernel never reaches past the moving-max half-window, every
+    output is a convex combination of maxima that each cover frame i, so
+    `out[i] ≥ raw[i]` holds in exact arithmetic (a final elementwise max pins
+    it in f32; gated with strict ≥ under proptest). The moving max also looks
+    *ahead*: the camera widens before a transient needs the room.
+  - **`CameraPath`:** `Fixed` (returns the given camera at every u — the
+    pre-M6d pipeline bit-exactly, gated) or `OrbitTilt` — eased azimuth θ /
+    polar tilt φ sweep about a target, radius sampled from the envelope track
+    **linear in raw u, not eased time** (the envelope is already time-aligned
+    to the action; easing applies to angles only).
+  - **Pole-safe basis:** camera along r̂(θ,φ), view −r̂, screen-up −φ̂ — exactly
+    orthogonal to the view axis for *every* (θ,φ), so there is no degenerate
+    up-hint at face-on (orthonormality is a proptest over the whole domain);
+    θ=−90°, φ=0 reproduces the historical +Y-up face-on orientation.
+  - **Per-frame radii are the 3-D percentile** (xtask `per_frame_radii`), not
+    the in-plane radius the static framing uses: an orbiting/tilted camera has
+    no preferred plane, and a sphere of radius r projects to r in every
+    orthographic view — the same percentile knob (`frame_percentile`) feeds it.
+  - Gates (`render/tests/rig.rs`): ease endpoint/midpoint exactness, vanishing
+    end-derivatives, monotonicity, symmetry; envelope ≥ raw (strict, proptest),
+    hand-computed kernel values, step-response jumps ≤ H·max-weight,
+    determinism; fixed-path bit-exactness; orbit/tilt orthonormal basis + aspect
+    everywhere (proptest), endpoint angles, linear-in-u radius sampling,
+    per-frame |Δangle| ≤ (|Δθ|+|Δφ|)·(15/8)/(n−1) and |Δr| smoothness budgets,
+    parameter validation, determinism.
+  - **Choreography (eyeballed per rule 2, QUICK renders):** `cuspy` starts
+    ¾-inclined and settles toward face-on (tilt 55°→25°) through a slow 130°
+    orbit (azimuth −90°→40°), ±8-snapshot envelope window — the inclined
+    opening shows the disks as ellipses, the tails read face-on by the time
+    they extend; `dm` half-turn orbit (−90°→90°) at fixed 60° tilt, ±6 window —
+    a static view reads the triaxial remnant as a round blob, the orbit is
+    what shows it; `disk` keeps the static face-on framing (back-compat
+    exemplar). Envelope breathes ~5.6→8.5 world units on the QUICK cuspy run.
+  - [next: coloring modes v2 — initial-radius ramp, σ_v, density→hue (M6e).]
 - **M6 (in progress) — "the beautiful": visual/cinematic series.** Asinh grade +
   regrade loop + density boost ON (M6a) → bloom (M6b) → Hermite 60 fps
-  upsampling (M6c) — all landed above → animated camera rig (M6d) →
+  upsampling (M6c) → animated camera rig (M6d) — all landed above →
   coloring modes v2 incl. the density→blue star-formation proxy (M6e) →
   `scenario.toml` + Toomre encounter zoo (M6f) → perspective/vertex-path render,
   the 10⁸ swap (M6g, optional). Session-by-session plan with gates and decisions:

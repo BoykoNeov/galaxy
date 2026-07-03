@@ -62,7 +62,7 @@ upsampling and the scenario zoo.
 | 1 | **M6a** ✅ | Grade toolkit: asinh stretch, `regrade` subcommand, density boost ON | S | — |
 | 2 | **M6b** ✅ | Bloom (CPU mip-chain, applied at grade time in linear space) | M | M6a (regrade loop) |
 | 3 | **M6c** ✅ | Hermite temporal upsampling → smooth 60 fps movies | M | — |
-| 4 | **M6d** | Camera rig: smoothed framing + orbit/tilt paths | M | best after M6c |
+| 4 | **M6d** ✅ | Camera rig: smoothed framing + orbit/tilt paths | M | best after M6c |
 | 5 | **M6e** | Coloring modes v2: initial-radius ramp, σ_v, size-by-density | M | — |
 | 6 | **M6f** | `scenario.toml` front-end + the Toomre encounter zoo | M–L | easier after M6a–e |
 | 7 | **M6g** | Perspective camera + world-space vertex-shader projection | L | optional, last |
@@ -182,7 +182,17 @@ error of cubic Hermite at the chosen snapshot cadence.
 
 Demo: cuspy movie at 60 fps — pericenter passage visibly continuous.
 
-## M6d — camera rig: smoothed framing + orbit/tilt (Session 4, M)
+## M6d — camera rig: smoothed framing + orbit/tilt (Session 4, M) — LANDED
+
+*(Landed 2026-07; see the DESIGN.md M6d entry. As scoped below: `render::rig`
+with quintic ease (f64-evaluated — the f32 quintic breaks frame-to-frame
+monotonicity near u=1), moving-max + truncated-Gaussian envelope (kernel radius
+≤ the moving-max half-window ⇒ never crops tighter than raw, exactly),
+`CameraPath::{fixed, orbit_tilt}` with a pole-safe −φ̂ screen-up basis. One
+addition to the scope as written: per-frame radii are the **3-D** percentile,
+not in-plane — view-independent, which an orbiting camera needs. Choreography:
+cuspy tilt 55°→25°, azimuth −90°→40°, ±8-snapshot window; dm fixed 60° tilt,
+azimuth −90°→90°, ±6; disk stays static.)*
 
 **Goal:** replace the single static framing with a smooth, animated camera —
 the difference between a diagram and a film. `Camera` already supports any

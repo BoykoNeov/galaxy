@@ -152,10 +152,13 @@ fn sph_shock_tube_matches_the_isothermal_riemann_solution() {
     let mut n_star = 0usize;
     for i in 0..state.len() {
         let p = state.pos[i];
-        // Central column, ≥ 3 from the ±4 transverse faces (> 2h ≈ 1.8 → no
-        // kernel deficit; the transverse rarefaction (c_s·t ≈ 1.5) hasn't
-        // reached it either).
-        if p.y.abs() > 1.0 || p.z.abs() > 1.0 || p.x.abs() > 3.0 {
+        // Central column, ≥ 3 from the ±4 transverse faces (farther than
+        // 2h ≈ 1.8 → no kernel deficit; the transverse rarefaction (c_s·t ≈ 1.5)
+        // hasn't reached it either). ASYMMETRIC x-window: the left holds only
+        // the compact rarefaction fan (x ∈ [−1.5, −0.45]), so x > −2 clears the
+        // left free-end rarefaction (it reaches x ≈ −2.5 by t=1.5); the right
+        // must reach past the shock (x ≈ 2.1) to sample the post-shock ρ_R.
+        if p.y.abs() > 1.0 || p.z.abs() > 1.0 || p.x < -2.0 || p.x > 3.0 {
             continue;
         }
         let xi = p.x / t;

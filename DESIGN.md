@@ -1479,6 +1479,78 @@ late-time positions — N-body is chaotic).
   - [next: SPH forces (pressure + Monaghan viscosity), `GravitySph` composite,
     CFL sentinel, isothermal shock tube vs the analytic Riemann solution
     (M7b).]
+- **SPH forces + `GravitySph` + CFL (landed, M7b).** The gas learns to push
+  back: the hydrodynamic force path, its composite solver, and the timestep
+  sentinel, gated against a two-particle hand oracle and the exact isothermal
+  Riemann solution.
+  - **Symmetric `P/ρ²` momentum equation (D2), isothermal EOS P = c_s²ρ:**
+    a_i = −Σ_j m_j (P_i/ρ_i² + P_j/ρ_j² + Π_ij) ∇_i W̄_ij with the **kernel
+    average** symmetrization W̄_ij = ½(W(r,h_i)+W(r,h_j)). This grad-average is
+    exactly the negation of ∇_j W̄_ji AND parallel to r_ij, so the pairwise
+    force is antisymmetric (linear momentum) and central (angular momentum) —
+    both conserved to roundoff. Equal-mass pairs are **bit-exactly**
+    antisymmetric (the coefficient is bit-identical by `+` commutativity and
+    Π_ij = Π_ji, the grad-average exactly negated); the unit gates use h_i ≠ h_j
+    so an averaging bug can't hide behind equal h.
+  - **Monaghan (1992) artificial viscosity** (α=1, β=2; Balsara deferred):
+    Π_ij = (−α c̄ μ_ij + β μ_ij²)/ρ̄, μ = h̄(v_ij·r_ij)/(r² + 0.01 h̄²), active
+    ONLY on approach (v_ij·r_ij < 0) — a receding pair is bit-identical to the
+    inviscid case. Uses the velocities present at the call (v_{n+1/2}); the
+    first-order viscous-timing error is invisible to the momentum gates because
+    the pairwise force stays antisymmetric.
+  - **Gather-per-target, like density (D5):** each target sums its neighbors in
+    ascending index over a `SUPPORT·h_max`-cell grid (the GLOBAL max, so no
+    averaged-kernel neighbor — nonzero for r < 2·max(h_i,h_j) — is ever missed),
+    so rayon ≡ serial is bit-exact.
+  - **`GravitySph<G>` composite (D4):** gravity over ALL particles (gas is just
+    mass to the wrapped solver, sharing its Plummer ε — softening and smoothing
+    decoupled in v1), hydro added to the gas rows only. `&mut self` lets it
+    recompute ρ/h internally exactly once per KDK step at post-drift positions,
+    warm-starting h across steps (bracket hint only; the converged h is
+    position-determined). `gravity: Option<G>` — `None` is the pure-hydro mode
+    (shock tube, gas balls) running the IDENTICAL fluid path, only skipping the
+    gravity add. `potential_energy` delegates to the wrapped solver; total
+    energy is deliberately NOT a gate (isothermal = implicit heat bath), the
+    conservation gates are momentum + the shock tube.
+  - **CFL sentinel (D6):** `max_stable_dt = C_cfl·min_i h_i/v_sig,i` with the
+    Gadget projected signal velocity v_sig,i = max_j(2c_s − 3 w_ij) over
+    approaching neighbors (w_ij = v_ij·r̂ < 0), floored at 2c_s; a gas-free
+    state carries no hydro constraint (+∞). `validate_dt` returns a typed
+    `CflViolation`; the `CflGuard` sink decorator and its xtask wiring fold into
+    M7c, where a real `GravitySph` pipeline run exists to guard (wiring it now
+    would be dead code — no gas run reaches xtask until the gas-disk IC lands).
+  - **Isothermal shock-tube gate (the flagship):** a 4:1 density jump at rest,
+    driven by the stock `LeapfrogKdk` + `GravitySph::hydro_only` — the real
+    force code the merger will use. Geometry (advisor-vetted): free surfaces
+    everywhere (no periodic-BC machinery), transverse widened to ±4 so a central
+    column stays farther than 2h from every face for the whole window (the
+    ~3000-particle floor is intrinsic — N = a·b² in units of the spacing,
+    resolution-independent), longitudinal ends far enough that their
+    rarefactions miss the shock region by t = 1.5. Oracle: the exact isothermal
+    Riemann solution (left rarefaction + right shock), ρ* from one scalar
+    bisection of ln(ρ_L/ρ*) = (ρ*−ρ_R)/√(ρ_R ρ*), sampled self-similarly at
+    x/t. Loose L1 (< 0.15 on ρ and u_x, justified by 2–3h shock smearing over
+    the measured span) plus a star-state plateau check; measured L1(ρ)=0.13,
+    L1(u)=0.12, and the intermediate ρ lands within 0.01% of ρ*≈1.985 — the
+    shock speed and intermediate state are essentially exact, the L1 is
+    smearing-limited. `#[ignore]` (dynamical, run `--release --ignored`);
+    a separate non-ignored self-check pins the oracle constants (ρ*≈1.985,
+    u*≈0.700, S≈1.409) so a profile failure can't be blamed on a bad oracle.
+  - Gates: two-particle hand oracle (unequal h), exact equal-mass antisymmetry,
+    linear+angular momentum to roundoff (proptest, a one-sided kernel misses by
+    O(1/N) ≫ 1e-9), uniform-lattice interior ~zero net force, viscosity
+    approach-only, parallel ≡ serial bit-exact; CFL bound scales h_min/(2c_s)
+    static, trips on 2× the bound, shrinks under a converging flow, +∞ gas-free;
+    `GravitySph` gravity-off ≡ standalone hydro path, mixed-species adds hydro to
+    gas rows only, potential_energy delegation.
+  - Demo (`validate/sph/plot_shock.py`, sibling of the REBOUND harness): the
+    SPH particle density and x-velocity overlaid on the exact Riemann solution —
+    rarefaction fan, ρ≈2 / u≈0.7 intermediate plateau, and the shock at x≈2.1,
+    with the documented 2–3h smearing at the front. The QUICK gas-ball bounce
+    movie folds into M7c's first gas sim (the view-first amendment already moved
+    the money demo there; a gas ball is redundant once a real disk runs).
+  - [next: gas-disk IC + evolve-and-stay-put + first gas-dynamical merger, and
+    the `CflGuard` pipeline wiring (M7c).]
 - **Renderprep voxelization + frame-data v2 (landed, M7d — view-first
   reorder, ahead of M7b/c).** Gas becomes a single-channel ρ voxel grid, the
   raymarcher's input (M7e) and the frame file's new optional payload.

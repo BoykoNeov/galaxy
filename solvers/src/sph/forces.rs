@@ -93,8 +93,20 @@ fn hydro_impl(
         h_max.is_finite() && h_max > 0.0,
         "hydro_accelerations needs positive finite smoothing lengths"
     );
-    // Build at the GLOBAL max support so no averaged-kernel neighbor
-    // (nonzero when r < 2·max(h_i,h_j)) is ever missed for any target.
+    // Gather at the GLOBAL max support (not per-target 2·h_i): the averaged
+    // kernel W̄ = ½(W(h_i)+W(h_j)) is nonzero for r < 2·max(h_i,h_j), so a pair
+    // with 2h_i < r < 2h_j contributes force to BOTH i and j. Querying only
+    // 2·h_i would give i's force to j but not j's to i — Newton's third law and
+    // momentum conservation would break. So this radius is load-bearing, not
+    // just a "don't miss a neighbor" convenience.
+    //
+    // PERF (flagged for M7c): under a wide adaptive-h range (a
+    // centrally-concentrated gas disk/merger) h_max is a far-outskirts value, so
+    // this global-radius gather goes quadratic — the same trap the M7d density
+    // deposition hit. The bit-exactness-preserving fix is the M7d scatter-by-
+    // plane template: gather at 2·h_i, then SCATTER each pair's contribution to
+    // both i and j over the h_j-reach in ascending index. Deferred: the M7b
+    // shock tube has near-uniform h (h_max ≈ h_typical), so it stays cheap here.
     let grid = HashGrid::build(pos, SUPPORT * h_max);
     let cs2 = params.sound_speed * params.sound_speed;
 

@@ -74,12 +74,18 @@ fn two_particle_force_matches_the_hand_oracle() {
 
     // Sign sanity: two rest particles must push APART. Particle 1 is at +x, so
     // particle 0 must accelerate in −x.
-    assert!(expect0_x < 0.0, "hand oracle sign wrong: expected repulsion");
+    assert!(
+        expect0_x < 0.0,
+        "hand oracle sign wrong: expected repulsion"
+    );
     let rel = (acc[0].x - expect0_x).abs() / expect0_x.abs();
     assert!(rel < 1e-12, "a_0.x = {} vs oracle {expect0_x}", acc[0].x);
     assert!(acc[0].y.abs() < 1e-14 && acc[0].z.abs() < 1e-14);
     // Antisymmetry (equal mass): a_1 == −a_0 exactly.
-    assert_eq!(acc[1], -acc[0], "equal-mass pair must be exactly antisymmetric");
+    assert_eq!(
+        acc[1], -acc[0],
+        "equal-mass pair must be exactly antisymmetric"
+    );
 }
 
 #[test]
@@ -94,7 +100,10 @@ fn pairwise_force_is_exactly_antisymmetric() {
     let rho = vec![1.7, 2.6];
     let h = vec![0.9, 1.25];
     let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &params);
-    assert_eq!(acc[0], -acc[1], "equal-mass pair not bit-exactly antisymmetric");
+    assert_eq!(
+        acc[0], -acc[1],
+        "equal-mass pair not bit-exactly antisymmetric"
+    );
 }
 
 #[test]
@@ -152,7 +161,7 @@ fn viscosity_activates_only_on_approach() {
     let rho = vec![1.5, 1.5];
     let h = vec![0.9, 0.9];
 
-    let rest = hydro_accelerations(&pos, &vec![DVec3::ZERO; 2], &mass, &rho, &h, &params);
+    let rest = hydro_accelerations(&pos, &[DVec3::ZERO; 2], &mass, &rho, &h, &params);
     // Approaching: particle 0 moves +x (toward 1), particle 1 moves −x.
     let v_app = vec![DVec3::new(0.5, 0.0, 0.0), DVec3::new(-0.5, 0.0, 0.0)];
     let approach = hydro_accelerations(&pos, &v_app, &mass, &rho, &h, &params);
@@ -258,7 +267,10 @@ fn gravity_off_runs_the_identical_hydro_path() {
 
     let dens = density_adaptive(&pos, &state.mass, &cfg, None);
     let expect = hydro_accelerations(&pos, &vel, &state.mass, &dens.rho, &dens.h, &params);
-    assert_eq!(acc, expect, "gravity-off must equal the standalone hydro path");
+    assert_eq!(
+        acc, expect,
+        "gravity-off must equal the standalone hydro path"
+    );
 }
 
 #[test]
@@ -276,7 +288,7 @@ fn mixed_species_routing_adds_hydro_to_gas_only() {
     let mut pos = gas_pos.clone();
     pos.extend_from_slice(&star_pos);
     let mut vel = gas_vel.clone();
-    vel.extend(std::iter::repeat(DVec3::ZERO).take(40));
+    vel.extend(std::iter::repeat_n(DVec3::ZERO, 40));
     let mut state = State::from_phase_space(pos.clone(), vel.clone(), vec![1.0; 160]);
     for i in 0..120 {
         state.kind[i] = Species::Gas;
@@ -290,11 +302,14 @@ fn mixed_species_routing_adds_hydro_to_gas_only() {
     let mut grav = g;
     let mut grav_acc = vec![DVec3::ZERO; 160];
     grav.accelerations(&state, &mut grav_acc);
-    let dens = density_adaptive(&gas_pos, &vec![1.0; 120], &cfg, None);
-    let hydro = hydro_accelerations(&gas_pos, &gas_vel, &vec![1.0; 120], &dens.rho, &dens.h, &params);
+    let dens = density_adaptive(&gas_pos, &[1.0; 120], &cfg, None);
+    let hydro = hydro_accelerations(&gas_pos, &gas_vel, &[1.0; 120], &dens.rho, &dens.h, &params);
 
     for i in 120..160 {
-        assert_eq!(acc[i], grav_acc[i], "collisionless {i} must be gravity-only");
+        assert_eq!(
+            acc[i], grav_acc[i],
+            "collisionless {i} must be gravity-only"
+        );
     }
     for i in 0..120 {
         let expect = grav_acc[i] + hydro[i];

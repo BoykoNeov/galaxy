@@ -20,6 +20,10 @@
 //! averaged-kernel neighbor (`r < 2·max(h_i,h_j)`) is ever missed.
 
 use galaxy_core::DVec3;
+use rayon::prelude::*;
+
+use super::grid::HashGrid;
+use super::kernel::{grad_w, SUPPORT};
 
 /// Isothermal SPH force parameters.
 #[derive(Clone, Copy, Debug)]
@@ -56,8 +60,7 @@ pub fn hydro_accelerations(
     h: &[f64],
     params: &HydroParams,
 ) -> Vec<DVec3> {
-    let _ = (pos, vel, mass, rho, h, params);
-    todo!("M7b: symmetric P/ρ² + Monaghan viscosity, gather-per-target (parallel)")
+    hydro_impl(pos, vel, mass, rho, h, params, true)
 }
 
 /// Serial twin of [`hydro_accelerations`] for the parallel ≡ serial gate.
@@ -69,6 +72,73 @@ pub fn hydro_accelerations_serial(
     h: &[f64],
     params: &HydroParams,
 ) -> Vec<DVec3> {
-    let _ = (pos, vel, mass, rho, h, params);
-    todo!("M7b: symmetric P/ρ² + Monaghan viscosity, gather-per-target (serial)")
+    hydro_impl(pos, vel, mass, rho, h, params, false)
+}
+
+fn hydro_impl(
+    pos: &[DVec3],
+    vel: &[DVec3],
+    mass: &[f64],
+    rho: &[f64],
+    h: &[f64],
+    params: &HydroParams,
+    parallel: bool,
+) -> Vec<DVec3> {
+    let n = pos.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+    assert!(
+        h_max.is_finite() && h_max > 0.0,
+        "hydro_accelerations needs positive finite smoothing lengths"
+    );
+    // Build at the GLOBAL max support so no averaged-kernel neighbor
+    // (nonzero when r < 2·max(h_i,h_j)) is ever missed for any target.
+    let grid = HashGrid::build(pos, SUPPORT * h_max);
+    let cs2 = params.sound_speed * params.sound_speed;
+
+    // Acceleration on target `i`: gather neighbors in ascending index (fixed
+    // order ⇒ parallel ≡ serial bit-exact), sum the symmetric pressure term and
+    // Monaghan viscosity against the exactly-negated grad-average.
+    let accel_one = |i: usize| -> DVec3 {
+        let xi = pos[i];
+        let term_i = cs2 / rho[i]; // P_i/ρ_i² for the isothermal EOS
+        let ngb = grid.neighbours_within(pos, xi, SUPPORT * h_max);
+        let mut a = DVec3::ZERO;
+        for &j in &ngb {
+            if j == i {
+                continue;
+            }
+            let r_ij = xi - pos[j];
+            let r = r_ij.length();
+            // W̄ = ½(W(h_i)+W(h_j)); ∇_j W̄_ji is the exact negation of this.
+            let grad_avg = (grad_w(r_ij, h[i]) + grad_w(r_ij, h[j])) * 0.5;
+            let term_j = cs2 / rho[j];
+            // Monaghan artificial viscosity, active only on approach.
+            let v_ij = vel[i] - vel[j];
+            let vr = v_ij.dot(r_ij);
+            let visc = if vr < 0.0 {
+                let h_bar = 0.5 * (h[i] + h[j]);
+                let rho_bar = 0.5 * (rho[i] + rho[j]);
+                let mu = h_bar * vr / (r * r + params.visc_eps2 * h_bar * h_bar);
+                // Isothermal: c̄ = c_s (constant sound speed).
+                (-params.alpha * params.sound_speed * mu + params.beta * mu * mu) / rho_bar
+            } else {
+                0.0
+            };
+            let coeff = term_i + term_j + visc;
+            // a_i += −m_j·coeff·∇_i W̄. Structured so the equal-mass pair term is
+            // the exact negation of particle j's (coeff bit-identical by
+            // commutativity, grad_avg exactly negated).
+            a += grad_avg * (-mass[j] * coeff);
+        }
+        a
+    };
+
+    if parallel {
+        (0..n).into_par_iter().map(accel_one).collect()
+    } else {
+        (0..n).map(accel_one).collect()
+    }
 }

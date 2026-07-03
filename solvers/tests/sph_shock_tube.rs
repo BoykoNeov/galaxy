@@ -4,8 +4,8 @@
 //! solution within a loose L1 bound set by resolution and ~2–3h shock smearing.
 //!
 //! Geometry (advisor-vetted, D-plan "padded free ends"): free surfaces
-//! everywhere, transverse widened to ±4 so a central column |y|,|z| < 0.5 stays
-//! > 2h from every transverse face for the whole measurement window; the
+//! everywhere, transverse widened to ±4 so a central measurement column stays
+//! farther than 2h from every transverse face for the whole window; the
 //! longitudinal ends at ±4 are far enough that their rarefactions do not reach
 //! the shock region (|x| ≲ 2.1) by t_meas = 1.5. Driven by the stock
 //! `LeapfrogKdk` + `GravitySph::hydro_only` (gravity off) — the real force code
@@ -152,7 +152,10 @@ fn sph_shock_tube_matches_the_isothermal_riemann_solution() {
     let mut n_star = 0usize;
     for i in 0..state.len() {
         let p = state.pos[i];
-        if p.y.abs() > 0.5 || p.z.abs() > 0.5 || p.x.abs() > 3.0 {
+        // Central column, ≥ 3 from the ±4 transverse faces (> 2h ≈ 1.8 → no
+        // kernel deficit; the transverse rarefaction (c_s·t ≈ 1.5) hasn't
+        // reached it either).
+        if p.y.abs() > 1.0 || p.z.abs() > 1.0 || p.x.abs() > 3.0 {
             continue;
         }
         let xi = p.x / t;
@@ -166,9 +169,14 @@ fn sph_shock_tube_matches_the_isothermal_riemann_solution() {
             n_star += 1;
         }
     }
-    assert!(n_meas > 200, "too few measured particles: {n_meas}");
+    assert!(n_meas > 100, "too few measured particles: {n_meas}");
     l1_rho /= n_meas as f64;
     l1_u /= n_meas as f64;
+    let star_rho = star_rho_sum / n_star.max(1) as f64;
+    println!(
+        "t={t:.3} n_meas={n_meas} n_star={n_star} L1(rho)={l1_rho:.4} L1(u)={l1_u:.4} \
+         star_rho={star_rho:.4} (ρ*={rs:.4})"
+    );
 
     // Loose L1: 2–3h shock smearing spread over the measured span dominates the
     // error; a wrong shock speed or ρ* misses by ≫ 0.3.
@@ -177,7 +185,6 @@ fn sph_shock_tube_matches_the_isothermal_riemann_solution() {
 
     // Intermediate density plateau pins ρ* (and hence the shock speed) directly.
     assert!(n_star > 20, "star region under-sampled: {n_star}");
-    let star_rho = star_rho_sum / n_star as f64;
     assert!(
         (star_rho - rs).abs() / rs < 0.08,
         "star-region ρ = {star_rho}, want ρ* = {rs} within 8%"

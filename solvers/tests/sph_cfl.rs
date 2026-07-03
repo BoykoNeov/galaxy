@@ -50,7 +50,10 @@ fn bound_is_positive_and_scales_like_h_over_signal_speed() {
 
     let got = max_stable_dt(&state, &params, &cfg, C_CFL);
     let rel = (got - expect).abs() / expect;
-    assert!(rel < 1e-9, "max_stable_dt = {got}, want {expect} (static ⇒ v_sig = 2c_s)");
+    assert!(
+        rel < 1e-9,
+        "max_stable_dt = {got}, want {expect} (static ⇒ v_sig = 2c_s)"
+    );
 }
 
 #[test]
@@ -63,7 +66,10 @@ fn validate_trips_on_over_large_dt_and_passes_a_safe_one() {
     let params = HydroParams::default();
 
     let bound = max_stable_dt(&state, &params, &cfg, C_CFL);
-    assert!(bound.is_finite() && bound > 0.0, "bound must be finite positive");
+    assert!(
+        bound.is_finite() && bound > 0.0,
+        "bound must be finite positive"
+    );
 
     // Safe: half the bound passes; over-large: twice the bound trips.
     assert!(validate_dt(&state, &params, &cfg, 0.5 * bound, C_CFL).is_ok());
@@ -82,7 +88,12 @@ fn moving_toward_neighbors_shrinks_the_bound() {
     let cfg = DensityConfig::default();
     let params = HydroParams::default();
 
-    let static_bound = max_stable_dt(&gas_state(pos.clone(), vec![DVec3::ZERO; pos.len()]), &params, &cfg, C_CFL);
+    let static_bound = max_stable_dt(
+        &gas_state(pos.clone(), vec![DVec3::ZERO; pos.len()]),
+        &params,
+        &cfg,
+        C_CFL,
+    );
     // Radially converging velocity field v = −k·x (everything falls inward).
     let conv: Vec<DVec3> = pos.iter().map(|&p| -3.0 * p).collect();
     let moving_bound = max_stable_dt(&gas_state(pos, conv), &params, &cfg, C_CFL);

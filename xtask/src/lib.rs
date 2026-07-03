@@ -130,34 +130,60 @@ pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
         }
     }
 
-    // First positional: a scenario name/alias, else the out dir under the original
-    // single-scenario CLI (`xtask <out_dir>` defaulted to the disk movie).
+    // First positional: a preset name/alias or a scenario.toml path, else the out
+    // dir under the original single-scenario CLI (`xtask <out_dir>` defaulted to
+    // the disk movie).
+    let disk = || ScenarioArg::Preset("disk".to_string());
     let (scenario, out_dir) = match positionals.as_slice() {
-        [] => ("disk", None),
-        [one] => match *one {
-            "disk" | "dm" | "nfw" | "cuspy" | "disk-nfw" => (*one, None),
-            other => ("disk", Some(other)),
+        [] => (disk(), None),
+        [one] => match resolve_scenario(one) {
+            Some(s) => (s, None),
+            None => (disk(), Some(*one)),
         },
-        [scenario, out] => (*scenario, Some(*out)),
+        [scenario, out] => (
+            resolve_scenario(scenario).ok_or_else(|| unknown_scenario(scenario))?,
+            Some(*out),
+        ),
         more => {
             return Err(format!(
                 "at most two positionals [scenario] [out_dir], got {more:?}"
             ))
         }
     };
-    let scenario = match scenario {
-        "disk" => "disk",
-        "dm" | "nfw" => "dm",
-        "cuspy" | "disk-nfw" => "cuspy",
-        other => return Err(format!("unknown scenario `{other}` (disk|dm|cuspy)")),
-    };
 
     Ok(MovieArgs {
-        scenario: ScenarioArg::Preset(scenario.to_string()),
+        scenario,
         out_dir: out_dir.map(PathBuf::from),
         color,
         reuse_snapshots,
     })
+}
+
+/// Resolve a scenario positional: a `.toml` path is a custom scenario, otherwise
+/// an alias-canonicalized name is looked up in the preset registry. `None` means
+/// "not a scenario" (the caller decides whether that makes it an out dir or an
+/// error).
+fn resolve_scenario(raw: &str) -> Option<ScenarioArg> {
+    if raw.ends_with(".toml") {
+        return Some(ScenarioArg::Path(PathBuf::from(raw)));
+    }
+    let canonical = match raw {
+        "nfw" => "dm",
+        "disk-nfw" => "cuspy",
+        other => other,
+    };
+    spec::PRESETS
+        .iter()
+        .any(|(name, _)| *name == canonical)
+        .then(|| ScenarioArg::Preset(canonical.to_string()))
+}
+
+fn unknown_scenario(raw: &str) -> String {
+    let names: Vec<&str> = spec::PRESETS.iter().map(|(name, _)| *name).collect();
+    format!(
+        "unknown scenario `{raw}` (presets: {}; or a path to a scenario.toml)",
+        names.join("|")
+    )
 }
 
 /// A parsed `regrade` invocation: which EXR frames to read, where the PNGs go, and

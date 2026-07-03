@@ -1,20 +1,14 @@
 //! Movie orchestrator: builds a two-galaxy collision, steps it to snapshots, then
-//! renderprep → render → grade → ffmpeg into a movie. Two hardcoded scenarios (a
-//! `scenario.toml` front-end is a later addition):
+//! renderprep → render → grade → ffmpeg into a movie. Scenarios are **data**
+//! (M6f): checked-in `scenario.toml` presets under `xtask/scenarios/` — the
+//! originals (`disk`, `dm`, `cuspy`, gated to reproduce the pre-M6f hardcoded
+//! constructors bit-for-bit) plus the Toomre encounter zoo (`retro`, `inclined`,
+//! `bullseye`, `minor`) — or any user toml on the same schema (see `spec`).
 //!
-//!   * `disk` (default) — a parabolic prograde encounter of two warm exponential-disk
-//!     galaxies in live Plummer halos → thin curved **tidal tails** (the M3 demo).
-//!   * `dm` — a 2:1 major **dark-matter merger** of two exponentially-truncated NFW
-//!     halos (ρ∝r⁻¹ cusps) → a single triaxial remnant (the M5e payoff).
-//!   * `cuspy` — the M5g payoff: a parabolic prograde encounter of two *cold* disks in
-//!     live **cuspy** (exponentially-truncated NFW) halos → tidal tails on the
-//!     realistic rising-to-flat rotation curve (the disk analogue of `dm`, and the
-//!     cuspy analogue of `disk`).
-//!
-//! Usage: `cargo run -p galaxy-xtask --release [disk|dm|cuspy] [out_dir]
+//! Usage: `cargo run -p galaxy-xtask --release [<preset>|<scenario.toml>] [out_dir]
 //! [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]`
-//!   * A bare first arg that is none of `disk`/`dm`/`cuspy` is taken as `out_dir` with
-//!     the `disk` scenario (back-compat with the original single-scenario CLI).
+//!   * A bare first arg that is no preset name (and not a `.toml` path) is taken as
+//!     `out_dir` with the `disk` scenario (back-compat with the original CLI).
 //!   * `regrade <exr_dir> <png_dir> [--exposure E] [--tonemap aces|reinhard|asinh]
 //!     [--beta B] [--bloom S] [--bloom-levels N] [--bloom-radius R]` re-grades
 //!     retained linear EXRs into fresh PNGs (+ movie if ffmpeg is present) in seconds
@@ -51,19 +45,19 @@ use std::process::Command;
 
 use galaxy_core::{LeapfrogKdk, State, StaticBackground};
 use galaxy_grade::{grade_file, BloomConfig, GradeConfig, ToneMap};
-use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, TruncatedNfw};
 use galaxy_render::camera::DEFAULT_MARGIN;
 use galaxy_render::{smooth_envelope, write_exr, Camera, CameraPath, RenderConfig, Renderer};
 use galaxy_renderprep::{
     initial_radius_colors, knn_density, prepare, subframe, ColorMode, CompressionHue,
-    DensityColoring, DispersionColoring, FrameData, HermiteSpan, PrepConfig, RadialRamp,
-    SizeByDensity,
+    DispersionColoring, FrameData, HermiteSpan, PrepConfig, RadialRamp,
 };
 use galaxy_sim::{run, DirectorySink, SimConfig};
+use galaxy_xtask::spec::{
+    build_scenario, parse_scenario_toml, preset, Rig, Scenario, ScenarioSpec,
+};
 use galaxy_xtask::{
     framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii, ColorModeArg,
-    ScenarioArg, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K, DENSITY_STRENGTH, FRAME_H,
-    FRAME_W, G, PEAK_BRIGHTNESS, QUICK_H, QUICK_W, SIZE_MAX_FRAC, SIZE_MIN_FRAC, SUBFRAMES,
+    ScenarioArg, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K, G,
 };
 use glam::Vec3;
 
@@ -104,52 +98,6 @@ const TONEMAP: ToneMap = ToneMap::AcesApprox;
 const BLOOM_STRENGTH: f32 = 0.45;
 const FPS: u32 = 60;
 
-/// Everything a scenario hands the pipeline: the sampled IC plus the sim-timing,
-/// softening, splat look, and framing that differ between the disk and DM movies.
-/// The pipeline (`run_movie`) is single-sourced over this so both scenarios share
-/// one sim→prep→render→grade→ffmpeg path.
-struct Scenario {
-    state: State,
-    prep: PrepConfig,
-    eps: f64,
-    dt: f64,
-    n_steps: u64,
-    snapshot_every: u64,
-    /// Hermite in-between frames per snapshot interval (M6c); 1 = no upsampling.
-    subframes: u32,
-    seed: u64,
-    width: u32,
-    height: u32,
-    frame_percentile: f32,
-    rig: Rig,
-    /// Per-progenitor `(inner, outer)` ramp for `--color initial-radius` (M6e):
-    /// halos keep constant ramps (their dim palette color at both ends), disks get
-    /// a provenance gradient.
-    ramp: Vec<([f32; 3], [f32; 3])>,
-    /// Progenitors the star-formation compression proxy applies to (M6e). Disk
-    /// scenarios list only the disks: their halos are dark-matter stand-ins (no
-    /// gas ⇒ no star formation), and — the practical teeth of that physics — a
-    /// bright compression tint on the numerous heavy halo particles washes the
-    /// whole frame white once the halos overlap (the first rendered A/B). The dm
-    /// merger lists both halos: they are the luminous subject there, and the tint
-    /// is an honest "shocked overlap" diagnostic, not an SF claim.
-    sf_progenitors: Vec<u16>,
-    info: String,
-}
-
-/// Per-scenario camera choreography (M6d). `Static` is the pre-M6d behavior:
-/// one face-on framing over the whole run, bit-exact with the old pipeline.
-enum Rig {
-    Static,
-    /// Eased azimuth/tilt sweep (degrees, start → end) with a breathing zoom:
-    /// per-snapshot percentile radii smoothed by a ±`window`-snapshot envelope.
-    OrbitTilt {
-        azimuth_deg: (f32, f32),
-        tilt_deg: (f32, f32),
-        window: usize,
-    },
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -162,19 +110,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let movie = parse_movie_args(&args).map_err(|e| {
         format!(
-            "{e}\nusage: [disk|dm|cuspy] [out_dir] \
+            "{e}\nusage: [<preset>|<scenario.toml>] [out_dir] \
              [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]"
         )
     })?;
-    let name = match &movie.scenario {
-        ScenarioArg::Preset(name) => name.clone(),
-        // Wired up with the M6f spec implementation.
-        ScenarioArg::Path(_) => {
-            return Err("custom scenario.toml paths are not implemented yet (M6f)".into())
+    let spec: ScenarioSpec = match &movie.scenario {
+        ScenarioArg::Preset(name) => {
+            let text = preset(name).ok_or_else(|| format!("preset `{name}` missing"))?;
+            parse_scenario_toml(text).map_err(|e| format!("preset `{name}`: {e}"))?
+        }
+        ScenarioArg::Path(path) => {
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            parse_scenario_toml(&text).map_err(|e| format!("{}: {e}", path.display()))?
         }
     };
     let out: PathBuf = movie.out_dir.clone().unwrap_or_else(|| {
-        std::env::temp_dir().join(match name.as_str() {
+        // The three original scenarios keep their pre-M6f default dirs (retained
+        // snapshot/EXR workflows point at them); new ones derive from the name.
+        std::env::temp_dir().join(match spec.name.as_str() {
             "dm" => "galaxy_dm_merger".to_string(),
             "cuspy" => "galaxy_cuspy_disk".to_string(),
             "disk" => "galaxy_movie".to_string(),
@@ -183,384 +137,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     println!(
-        "scenario = {name} (color: {:?}){}",
+        "scenario = {} (color: {:?}){}",
+        spec.name,
         movie.color,
         if quick { " (quick preview)" } else { "" }
     );
     println!("output → {}", out.display());
 
-    let scenario = match name.as_str() {
-        "dm" => dm_scenario(quick),
-        "cuspy" => cuspy_scenario(quick),
-        _ => disk_scenario(quick),
-    };
+    let scenario = build_scenario(&spec, quick);
     println!("{}", scenario.info);
     run_movie(&scenario, &out, movie.color, movie.reuse_snapshots)
-}
-
-// --- Scenario: DM merger ------------------------------------------------------
-// Two exponentially-truncated NFW halos (M5d) on a parabolic (Toomre) encounter — a
-// 2:1 major dark-matter merger. Both are pure ρ∝r⁻¹ cusps with no disk, so the movie
-// shows two cuspy blobs coalescing into one triaxial remnant — NOT thin tidal tails
-// (those need cold disks). The passage is DEEP (peri=3 ≪ r_vir≈10) so the halos fully
-// overlap at closest approach; dynamical friction in that overlap is what binds a
-// marginally-bound (e=1) pair into a single remnant on the first passage.
-const DM_HALO1_COLOR: [f32; 3] = [1.0, 0.55, 0.3]; // warm (primary)
-const DM_HALO2_COLOR: [f32; 3] = [0.35, 0.6, 1.0]; // cool (secondary)
-                                                   // M6e initial-radius ramps: inner keeps the halo identity color, outer pales
-                                                   // toward white — the remnant then wears its provenance (deep-cusp material vs
-                                                   // skirt material) as a radial gradient that survives the scrambling.
-const DM_HALO1_RAMP: ([f32; 3], [f32; 3]) = (DM_HALO1_COLOR, [1.0, 0.85, 0.65]);
-const DM_HALO2_RAMP: ([f32; 3], [f32; 3]) = (DM_HALO2_COLOR, [0.7, 0.85, 1.0]);
-const DM_SPLAT_SIZE: f32 = 0.6; // world units — the NFW scene (~40u) is ~8× the disk scene
-const DM_ECC: f64 = 1.0; // parabolic — the classic Toomre encounter
-const DM_PERI: f64 = 3.0;
-const DM_SEP: f64 = 40.0; // > r_vir1 + r_vir2 (=18) so the halos start on a clean approach
-const DM_EPS: f64 = 0.05; // 0.05·r_s (r_s=1) — matches the NFW stability test's softening
-
-fn dm_scenario(quick: bool) -> Scenario {
-    // Primary: M_vir=1, r_s=1, c=10 ⇒ r_vir=10, exponential skirt r_d=3.
-    let g1 = TruncatedNfw::new(Nfw::new(G, 1.0, 1.0, 10.0), 3.0);
-    // Secondary: half the virial mass (2:1 major merger), r_s=0.8 ⇒ r_vir=8, r_d=2.4.
-    let g2 = TruncatedNfw::new(Nfw::new(G, 0.5, 0.8, 10.0), 2.4);
-    let collision = NfwCollision::new(g1, g2, DM_ECC, DM_PERI, DM_SEP);
-
-    // Particle counts split 2:1 to match the mass ratio ⇒ EQUAL particle mass across
-    // both halos (clean, uniform brightness weighting). Quick mode drops N ~6×.
-    let (n1, n2) = if quick { (2000, 1000) } else { (12000, 6000) };
-    let seed = 0x0DEA_D000;
-    let state = collision.sample(n1, n2, seed);
-    let particle_mass = g1.total_mass() / n1 as f64; // = g2.total_mass()/n2 by design
-
-    // Timing: t_dyn≈1.2 (inner NFW scale). dt=0.02 ≈ 0.016·t_dyn resolves the deep
-    // pericenter passage (a bit tighter than the stability test's 0.025·t_dyn). Total
-    // T = n_steps·dt = 320 carries the run past first pericenter (t_peri≈104 for this
-    // orbit, Barker's equation) through the second infall to full coalescence into a
-    // single triaxial remnant — the halos are bound (dynamical friction robs the
-    // orbital energy on the deep, fully-overlapping first passage).
-    let dt = 0.02;
-    let n_steps = 16_000;
-    let snapshot_every = if quick { 400 } else { 200 }; // ~40 / ~80 snapshots
-
-    let (width, height) = if quick {
-        (QUICK_W, QUICK_H)
-    } else {
-        (FRAME_W, FRAME_H)
-    };
-    let info = format!(
-        "IC: {} particles (halo1 {} + halo2 {}), particle mass {particle_mass:.3e}; \
-         parabolic peri={DM_PERI} sep={DM_SEP} (r_vir 10+8), t_peri≈104, T={:.0}",
-        n1 + n2,
-        n1,
-        n2,
-        n_steps as f64 * dt,
-    );
-
-    Scenario {
-        state,
-        prep: PrepConfig {
-            palette: vec![DM_HALO1_COLOR, DM_HALO2_COLOR],
-            brightness_per_mass: PEAK_BRIGHTNESS / particle_mass as f32,
-            size: DM_SPLAT_SIZE,
-            density: Some(DensityColoring {
-                k: DENSITY_K,
-                softening: DM_EPS,
-                strength: DENSITY_STRENGTH,
-            }),
-            color: ColorMode::Progenitor, // --color may override in run_movie
-            size_by_density: Some(SizeByDensity {
-                k: DENSITY_K,
-                softening: DM_EPS,
-                min_frac: SIZE_MIN_FRAC,
-                max_frac: SIZE_MAX_FRAC,
-            }),
-            compression: None, // filled by run_movie (rho0 needs snapshot 0)
-        },
-        eps: DM_EPS,
-        dt,
-        n_steps,
-        snapshot_every,
-        subframes: SUBFRAMES,
-        seed,
-        width,
-        height,
-        // The diffuse skirt + a few post-merger escapers would blow up the AABB; a
-        // slightly lower percentile than the disk movie crops them and keeps the
-        // remnant filling the frame.
-        frame_percentile: 0.97,
-        // The remnant is TRIAXIAL — a half-turn orbit at a fixed ¾ tilt is what
-        // shows it (a static face-on view reads as a round blob). Window ±6
-        // snapshots ≈ the merger's dynamical time at this cadence.
-        rig: Rig::OrbitTilt {
-            azimuth_deg: (-90.0, 90.0),
-            tilt_deg: (60.0, 60.0),
-            window: 6,
-        },
-        ramp: vec![DM_HALO1_RAMP, DM_HALO2_RAMP],
-        sf_progenitors: vec![0, 1],
-        info,
-    }
-}
-
-// --- Scenario: disk collision (the original M3 movie) -------------------------
-// A parabolic coplanar-PROGRADE encounter of two rotating warm exponential-disk
-// galaxies (Toomre Q≈1.5), each a low-mass disk in a live Plummer halo → thin curved
-// tidal tails. See the git history for the full physics rationale; this is the
-// original hardcoded scenario, unchanged (same constants + deterministic pipeline ⇒
-// same frames when not in quick mode), now behind the `disk` selector.
-const HALO_M1: f64 = 1.0;
-const HALO_A1: f64 = 1.0;
-const DISK_M1: f64 = 0.15;
-const DISK_RD1: f64 = 0.5;
-const HALO_M2: f64 = 0.7;
-const HALO_A2: f64 = 0.9;
-const DISK_M2: f64 = 0.1;
-const DISK_RD2: f64 = 0.45;
-const DISK_HZ_FRAC: f64 = 0.1;
-const DISK_RMAX_FRAC: f64 = 4.0;
-const DISK_Q: f64 = 1.5;
-const DISK_ECC: f64 = 1.0;
-const DISK_PERI: f64 = 1.5;
-const DISK_SEP: f64 = 8.0;
-const DISK_EPS: f64 = 0.05;
-const DISK_SPLAT_SIZE: f32 = 0.12;
-const HALO1_COLOR: [f32; 3] = [0.05, 0.035, 0.025];
-const DISK1_COLOR: [f32; 3] = [1.0, 0.5, 0.25]; // warm
-const HALO2_COLOR: [f32; 3] = [0.025, 0.035, 0.05];
-const DISK2_COLOR: [f32; 3] = [0.35, 0.6, 1.0]; // cool
-                                                // M6e initial-radius ramps (shared by `disk` and `cuspy`): inner = warm/old →
-                                                // outer = blue/young, like real disks; the two galaxies stay tellable apart by
-                                                // their ramp hues (amber→blue-white vs rose→cyan). Halos keep constant ramps at
-                                                // their dim palette color so they don't outshine the disks in ramp mode.
-const DISK1_RAMP: ([f32; 3], [f32; 3]) = ([1.0, 0.35, 0.1], [0.55, 0.75, 1.0]);
-const DISK2_RAMP: ([f32; 3], [f32; 3]) = ([1.0, 0.3, 0.45], [0.4, 0.9, 0.9]);
-
-fn disk_scenario(quick: bool) -> Scenario {
-    let galaxy1 = ExponentialDisk::new(
-        DISK_M1,
-        DISK_RD1,
-        DISK_HZ_FRAC * DISK_RD1,
-        DISK_RMAX_FRAC * DISK_RD1,
-        Plummer::new(G, HALO_M1, HALO_A1),
-    )
-    .with_toomre_q(DISK_Q);
-    let galaxy2 = ExponentialDisk::new(
-        DISK_M2,
-        DISK_RD2,
-        DISK_HZ_FRAC * DISK_RD2,
-        DISK_RMAX_FRAC * DISK_RD2,
-        Plummer::new(G, HALO_M2, HALO_A2),
-    )
-    .with_toomre_q(DISK_Q);
-    let collision = DiskCollision::new(galaxy1, galaxy2, DISK_ECC, DISK_PERI, DISK_SEP);
-
-    // Halos need enough particles for a smooth stabilizing potential; disks get many
-    // for tail detail (disk flux is set by disk MASS, not count). Quick mode drops N.
-    let (nh1, nd1, nh2, nd2) = if quick {
-        (1500, 1500, 1000, 1000)
-    } else {
-        (5000, 5000, 3500, 3500)
-    };
-    let seed = 0x00C0_FFEE;
-    let state = collision.sample(nh1, nd1, nh2, nd2, seed);
-    let disk_particle_mass = DISK_M1 / nd1 as f64;
-
-    let (width, height) = if quick {
-        (QUICK_W, QUICK_H)
-    } else {
-        (FRAME_W, FRAME_H)
-    };
-    let info = format!(
-        "IC: {} particles (halo {}+{}, disk {}+{}), disk particle mass {disk_particle_mass:.3e}",
-        state.len(),
-        nh1,
-        nh2,
-        nd1,
-        nd2,
-    );
-
-    Scenario {
-        state,
-        prep: PrepConfig {
-            palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
-            brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
-            size: DISK_SPLAT_SIZE,
-            density: Some(DensityColoring {
-                k: DENSITY_K,
-                softening: DISK_EPS,
-                strength: DENSITY_STRENGTH,
-            }),
-            color: ColorMode::Progenitor, // --color may override in run_movie
-            size_by_density: Some(SizeByDensity {
-                k: DENSITY_K,
-                softening: DISK_EPS,
-                min_frac: SIZE_MIN_FRAC,
-                max_frac: SIZE_MAX_FRAC,
-            }),
-            compression: None, // filled by run_movie (rho0 needs snapshot 0)
-        },
-        eps: DISK_EPS,
-        dt: 0.02,
-        n_steps: 1500,
-        snapshot_every: 25, // → ~61 snapshots
-        subframes: SUBFRAMES,
-        seed,
-        width,
-        height,
-        frame_percentile: 0.98,
-        // The original M3 movie keeps its static face-on framing — the back-compat
-        // exemplar (same constants + deterministic pipeline ⇒ same frames).
-        rig: Rig::Static,
-        ramp: vec![
-            (HALO1_COLOR, HALO1_COLOR),
-            DISK1_RAMP,
-            (HALO2_COLOR, HALO2_COLOR),
-            DISK2_RAMP,
-        ],
-        sf_progenitors: vec![1, 3],
-        info,
-    }
-}
-
-// --- Scenario: cuspy-disk collision (the M5g payoff) --------------------------
-// The disk analogue of the `dm` merger and the cuspy analogue of the `disk` movie:
-// two rotating exponential disks, each embedded in a live *cuspy* exponentially-
-// truncated NFW halo (ρ∝r⁻¹), on a parabolic coplanar-PROGRADE encounter → thin
-// curved tidal tails riding on the realistic rising-to-flat rotation curve.
-//
-// The disks are COLD (no Toomre warmth). The warm knob the Plummer `disk` movie uses
-// to survive several orbits is deliberately unavailable here: the warm dispersions
-// read the halo density ρ(r), which diverges at an NFW cusp (DESIGN.md, M5f — warm-
-// in-a-cusp is a scoped follow-up). The stabilization is therefore *resolution*: a
-// cold cuspy disk over-rotates and flies apart if the live halo's inner N-body force
-// falls below the analytic G·M(<r)/r² the disk is placed on, so the halos get many
-// particles and a small softening (ε≈0.02·r_s), per the M5f cusp-resolution finding.
-// This makes the scenario markedly heavier than the cored `disk` movie — QUICK mode
-// keeps the halo N high enough to still resolve the cusp for a faithful preview.
-const CUSPY_HALO_MVIR1: f64 = 1.0;
-const CUSPY_HALO_RS1: f64 = 1.0;
-const CUSPY_HALO_C1: f64 = 10.0; // ⇒ r_vir = 10
-const CUSPY_HALO_RD1: f64 = 3.0; // exponential skirt scale
-const CUSPY_DISK_M1: f64 = 0.12;
-const CUSPY_DISK_RD1: f64 = 0.6;
-const CUSPY_HALO_MVIR2: f64 = 0.7;
-const CUSPY_HALO_RS2: f64 = 0.9;
-const CUSPY_HALO_C2: f64 = 10.0; // ⇒ r_vir = 9
-const CUSPY_HALO_RD2: f64 = 2.7;
-const CUSPY_DISK_M2: f64 = 0.08;
-const CUSPY_DISK_RD2: f64 = 0.5;
-const CUSPY_DISK_HZ_FRAC: f64 = 0.1;
-const CUSPY_DISK_RMAX_FRAC: f64 = 3.0;
-const CUSPY_ECC: f64 = 1.0; // parabolic — the classic Toomre encounter
-const CUSPY_PERI: f64 = 1.5;
-const CUSPY_SEP: f64 = 8.0;
-const CUSPY_EPS: f64 = 0.02; // 0.02·r_s — between the disk (0.05) and the M5f deep-cusp 0.01
-const CUSPY_SPLAT_SIZE: f32 = 0.15;
-
-fn cuspy_scenario(quick: bool) -> Scenario {
-    let halo1 = TruncatedNfw::new(
-        Nfw::new(G, CUSPY_HALO_MVIR1, CUSPY_HALO_RS1, CUSPY_HALO_C1),
-        CUSPY_HALO_RD1,
-    );
-    let halo2 = TruncatedNfw::new(
-        Nfw::new(G, CUSPY_HALO_MVIR2, CUSPY_HALO_RS2, CUSPY_HALO_C2),
-        CUSPY_HALO_RD2,
-    );
-    // COLD disks — no `with_toomre_q` (warm dispersion diverges at the cusp).
-    let galaxy1 = ExponentialDisk::new(
-        CUSPY_DISK_M1,
-        CUSPY_DISK_RD1,
-        CUSPY_DISK_HZ_FRAC * CUSPY_DISK_RD1,
-        CUSPY_DISK_RMAX_FRAC * CUSPY_DISK_RD1,
-        halo1,
-    );
-    let galaxy2 = ExponentialDisk::new(
-        CUSPY_DISK_M2,
-        CUSPY_DISK_RD2,
-        CUSPY_DISK_HZ_FRAC * CUSPY_DISK_RD2,
-        CUSPY_DISK_RMAX_FRAC * CUSPY_DISK_RD2,
-        halo2,
-    );
-    let collision = DiskCollision::new(galaxy1, galaxy2, CUSPY_ECC, CUSPY_PERI, CUSPY_SEP);
-
-    // The cusp must be RESOLVED (M5f), so the halos are particle-heavy even in QUICK
-    // mode (a low-N halo under-resolves the inner force and the cold disk blows out —
-    // that would make a QUICK preview a false negative). Disks get many for tail detail.
-    let (nh1, nd1, nh2, nd2) = if quick {
-        (5000, 3000, 4000, 2000)
-    } else {
-        (10000, 5000, 8000, 4000)
-    };
-    let seed = 0x0CA5_D15C;
-    let state = collision.sample(nh1, nd1, nh2, nd2, seed);
-    let disk_particle_mass = CUSPY_DISK_M1 / nd1 as f64;
-
-    let (width, height) = if quick {
-        (QUICK_W, QUICK_H)
-    } else {
-        (FRAME_W, FRAME_H)
-    };
-    let info = format!(
-        "IC: {} particles (cuspy halo {}+{}, cold disk {}+{}), disk particle mass \
-         {disk_particle_mass:.3e}; parabolic peri={CUSPY_PERI} sep={CUSPY_SEP}, eps={CUSPY_EPS}",
-        state.len(),
-        nh1,
-        nh2,
-        nd1,
-        nd2,
-    );
-
-    Scenario {
-        state,
-        prep: PrepConfig {
-            palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
-            brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
-            size: CUSPY_SPLAT_SIZE,
-            density: Some(DensityColoring {
-                k: DENSITY_K,
-                softening: CUSPY_EPS,
-                strength: DENSITY_STRENGTH,
-            }),
-            color: ColorMode::Progenitor, // --color may override in run_movie
-            size_by_density: Some(SizeByDensity {
-                k: DENSITY_K,
-                softening: CUSPY_EPS,
-                min_frac: SIZE_MIN_FRAC,
-                max_frac: SIZE_MAX_FRAC,
-            }),
-            compression: None, // filled by run_movie (rho0 needs snapshot 0)
-        },
-        eps: CUSPY_EPS,
-        dt: 0.02,
-        n_steps: 1500,
-        snapshot_every: 25, // → ~61 snapshots
-        subframes: SUBFRAMES,
-        seed,
-        width,
-        height,
-        // The cuspy halo is far larger than the disk (r_vir=10 vs disk r_max≈1.8), so a
-        // high percentile would frame on the diffuse halo and shrink the tails to dots.
-        // A lower percentile crops the halo skirt and keeps the disk + tails filling the
-        // frame (the dim halo still glows underneath).
-        frame_percentile: 0.7,
-        // The M6d choreography: start ¾-inclined (the 3-D structure face-on
-        // flattens away), orbit slowly through first pericenter, and settle
-        // toward face-on as the tails extend (tails read best face-on). The
-        // zoom breathes via the ±8-snapshot envelope as the tails fling out.
-        rig: Rig::OrbitTilt {
-            azimuth_deg: (-90.0, 40.0),
-            tilt_deg: (55.0, 25.0),
-            window: 8,
-        },
-        ramp: vec![
-            (HALO1_COLOR, HALO1_COLOR),
-            DISK1_RAMP,
-            (HALO2_COLOR, HALO2_COLOR),
-            DISK2_RAMP,
-        ],
-        sf_progenitors: vec![1, 3],
-        info,
-    }
 }
 
 /// The M6a look loop: re-grade a directory of retained linear-HDR EXRs into PNGs

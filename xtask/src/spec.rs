@@ -18,7 +18,16 @@
 use serde::Deserialize;
 
 use galaxy_core::State;
-use galaxy_renderprep::PrepConfig;
+use galaxy_ic::{
+    DiskCollision, ExponentialDisk, Nfw, NfwCollision, Orientation, Plummer, SphericalHalo,
+    TruncatedNfw,
+};
+use galaxy_renderprep::{ColorMode, DensityColoring, PrepConfig, SizeByDensity};
+
+use crate::{
+    DENSITY_K, DENSITY_STRENGTH, FRAME_H, FRAME_W, G, PEAK_BRIGHTNESS, QUICK_H, QUICK_W,
+    SIZE_MAX_FRAC, SIZE_MIN_FRAC, SUBFRAMES,
+};
 
 /// A parsed, validated scenario description — everything a movie needs that is
 /// *data*: the IC (galaxy models + spin-orbit orientations + particle counts),
@@ -45,8 +54,12 @@ pub struct ScenarioSpec {
 /// Which collision IC the scenario builds. The variants mirror the three IC
 /// families the engine has: warm/cold exponential disks in cored Plummer halos,
 /// disks in cuspy truncated-NFW halos, and the pure dark-matter NFW merger.
+///
+/// Deserialized via [`ModelTable`] rather than serde's internal tagging: tagged
+/// enums cannot `deny_unknown_fields`, and a typo'd knob inside `[model]` must
+/// fail loudly, not silently do nothing.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(try_from = "ModelTable")]
 pub enum ModelSpec {
     /// Two exponential disks in live Plummer halos (`DiskCollision<Plummer>`).
     DiskPlummer {
@@ -212,9 +225,10 @@ pub struct RampSpec {
     pub outer: [f32; 3],
 }
 
-/// Camera choreography (the M6d rig), as data.
+/// Camera choreography (the M6d rig), as data. Deserialized via [`RigTable`]
+/// (same strict-table rationale as [`ModelSpec`]).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(try_from = "RigTable")]
 pub enum RigSpec {
     /// One static face-on framing over the whole run (pre-M6d, bit-exact).
     Static,
@@ -225,6 +239,79 @@ pub enum RigSpec {
         tilt_deg: [f32; 2],
         window: usize,
     },
+}
+
+/// The raw `[model]` table: a strict superset of every model kind's keys, so an
+/// unknown key is rejected here and each kind then checks it got exactly the
+/// keys it needs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelTable {
+    kind: String,
+    galaxy1: toml::Value,
+    galaxy2: toml::Value,
+    counts: toml::Value,
+}
+
+impl TryFrom<ModelTable> for ModelSpec {
+    type Error = String;
+
+    fn try_from(t: ModelTable) -> Result<Self, String> {
+        fn field<T: serde::de::DeserializeOwned>(v: toml::Value, what: &str) -> Result<T, String> {
+            v.try_into().map_err(|e| format!("model {what}: {e}"))
+        }
+        match t.kind.as_str() {
+            "disk-plummer" => Ok(ModelSpec::DiskPlummer {
+                galaxy1: field(t.galaxy1, "galaxy1")?,
+                galaxy2: field(t.galaxy2, "galaxy2")?,
+                counts: field(t.counts, "counts")?,
+            }),
+            "disk-nfw" => Ok(ModelSpec::DiskNfw {
+                galaxy1: field(t.galaxy1, "galaxy1")?,
+                galaxy2: field(t.galaxy2, "galaxy2")?,
+                counts: field(t.counts, "counts")?,
+            }),
+            "nfw-merger" => Ok(ModelSpec::NfwMerger {
+                galaxy1: field(t.galaxy1, "galaxy1")?,
+                galaxy2: field(t.galaxy2, "galaxy2")?,
+                counts: field(t.counts, "counts")?,
+            }),
+            other => Err(format!(
+                "unknown model kind `{other}` (disk-plummer|disk-nfw|nfw-merger)"
+            )),
+        }
+    }
+}
+
+/// The raw `[rig]` table (strict superset of both rig kinds' keys).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RigTable {
+    kind: String,
+    azimuth_deg: Option<[f32; 2]>,
+    tilt_deg: Option<[f32; 2]>,
+    window: Option<usize>,
+}
+
+impl TryFrom<RigTable> for RigSpec {
+    type Error = String;
+
+    fn try_from(t: RigTable) -> Result<Self, String> {
+        match t.kind.as_str() {
+            "static" => {
+                if t.azimuth_deg.is_some() || t.tilt_deg.is_some() || t.window.is_some() {
+                    return Err("rig kind `static` takes no orbit-tilt knobs".into());
+                }
+                Ok(RigSpec::Static)
+            }
+            "orbit-tilt" => Ok(RigSpec::OrbitTilt {
+                azimuth_deg: t.azimuth_deg.ok_or("rig orbit-tilt needs azimuth_deg")?,
+                tilt_deg: t.tilt_deg.ok_or("rig orbit-tilt needs tilt_deg")?,
+                window: t.window.ok_or("rig orbit-tilt needs window")?,
+            }),
+            other => Err(format!("unknown rig kind `{other}` (static|orbit-tilt)")),
+        }
+    }
 }
 
 /// The checked-in scenario presets, embedded at compile time so `cargo run -p
@@ -240,15 +327,201 @@ pub const PRESETS: &[(&str, &str)] = &[
 ];
 
 /// Look up a checked-in preset's toml text by canonical name.
-pub fn preset(_name: &str) -> Option<&'static str> {
-    todo!("M6f: preset registry lookup")
+pub fn preset(name: &str) -> Option<&'static str> {
+    PRESETS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, text)| *text)
 }
 
 /// Parse and validate a `scenario.toml`. All errors — toml syntax, unknown
 /// keys/kinds, and every physics/look invariant the pipeline relies on — come
 /// back as a single human-readable message.
-pub fn parse_scenario_toml(_text: &str) -> Result<ScenarioSpec, String> {
-    todo!("M6f: toml parsing + validation")
+pub fn parse_scenario_toml(text: &str) -> Result<ScenarioSpec, String> {
+    let spec: ScenarioSpec = toml::from_str(text).map_err(|e| format!("scenario.toml: {e}"))?;
+    validate(&spec)?;
+    Ok(spec)
+}
+
+/// Every invariant the IC constructors would `assert!` on (turned into readable
+/// errors — a toml is user input, not a programming-time contract), plus the
+/// cross-field rules the pipeline relies on.
+fn validate(s: &ScenarioSpec) -> Result<(), String> {
+    // Model: positive scales/masses, sane fractions, per-galaxy orientation.
+    let n_prog: u16 = match &s.model {
+        ModelSpec::DiskPlummer {
+            galaxy1,
+            galaxy2,
+            counts,
+        } => {
+            for (g, which) in [(galaxy1, "galaxy1"), (galaxy2, "galaxy2")] {
+                validate_disk(g, which)?;
+                positive(g.halo.mass, &format!("{which} halo mass"))?;
+                positive(g.halo.scale, &format!("{which} halo scale"))?;
+            }
+            validate_counts(&[
+                ("halo1", counts.full.halo1, counts.quick.halo1),
+                ("disk1", counts.full.disk1, counts.quick.disk1),
+                ("halo2", counts.full.halo2, counts.quick.halo2),
+                ("disk2", counts.full.disk2, counts.quick.disk2),
+            ])?;
+            4
+        }
+        ModelSpec::DiskNfw {
+            galaxy1,
+            galaxy2,
+            counts,
+        } => {
+            for (g, which) in [(galaxy1, "galaxy1"), (galaxy2, "galaxy2")] {
+                validate_disk(g, which)?;
+                validate_nfw(&g.halo, which)?;
+            }
+            validate_counts(&[
+                ("halo1", counts.full.halo1, counts.quick.halo1),
+                ("disk1", counts.full.disk1, counts.quick.disk1),
+                ("halo2", counts.full.halo2, counts.quick.halo2),
+                ("disk2", counts.full.disk2, counts.quick.disk2),
+            ])?;
+            4
+        }
+        ModelSpec::NfwMerger {
+            galaxy1,
+            galaxy2,
+            counts,
+        } => {
+            validate_nfw(galaxy1, "galaxy1")?;
+            validate_nfw(galaxy2, "galaxy2")?;
+            validate_counts(&[
+                ("halo1", counts.full.halo1, counts.quick.halo1),
+                ("halo2", counts.full.halo2, counts.quick.halo2),
+            ])?;
+            2
+        }
+    };
+
+    // Orbit: `encounter::validate_orbit`, as a Result.
+    let OrbitSpec {
+        eccentricity: e,
+        pericenter: peri,
+        separation: sep,
+    } = s.orbit;
+    positive(e, "orbit eccentricity")?;
+    positive(peri, "orbit pericenter")?;
+    if sep < peri {
+        return Err(format!(
+            "orbit separation ({sep}) must be >= the pericenter ({peri})"
+        ));
+    }
+    if e < 1.0 {
+        let apo = peri * (1.0 + e) / (1.0 - e);
+        if sep > apo * (1.0 + 1e-12) {
+            return Err(format!(
+                "orbit separation ({sep}) exceeds the apocenter ({apo}) of the bound orbit (e={e})"
+            ));
+        }
+    }
+
+    // Sim timing.
+    positive(s.sim.dt, "sim dt")?;
+    positive(s.sim.eps, "sim eps")?;
+    if s.sim.n_steps == 0 {
+        return Err("sim n_steps must be positive".into());
+    }
+    if s.sim.snapshot_every == 0 || s.sim.snapshot_every_quick == Some(0) {
+        return Err("sim snapshot cadence must be positive".into());
+    }
+
+    // Look: splat/framing knobs + palette/ramp lengths tied to the model.
+    positive(f64::from(s.look.splat_size), "look splat_size")?;
+    if !(s.look.frame_percentile > 0.0 && s.look.frame_percentile <= 1.0) {
+        return Err(format!(
+            "look frame_percentile must be in (0, 1], got {}",
+            s.look.frame_percentile
+        ));
+    }
+    if s.look.palette.len() != n_prog as usize {
+        return Err(format!(
+            "look palette has {} colors but the model has {n_prog} progenitors",
+            s.look.palette.len()
+        ));
+    }
+    if s.look.ramps.len() != n_prog as usize {
+        return Err(format!(
+            "look has {} ramps but the model has {n_prog} progenitors",
+            s.look.ramps.len()
+        ));
+    }
+    if let Some(p) = s.look.sf_progenitors.iter().find(|p| **p >= n_prog) {
+        return Err(format!(
+            "look sf_progenitors names progenitor {p} but the model has only {n_prog}"
+        ));
+    }
+
+    // Rig.
+    if let RigSpec::OrbitTilt {
+        azimuth_deg,
+        tilt_deg,
+        window,
+    } = &s.rig
+    {
+        if *window == 0 {
+            return Err("rig window must be positive (snapshots of envelope smoothing)".into());
+        }
+        if !azimuth_deg.iter().chain(tilt_deg).all(|a| a.is_finite()) {
+            return Err("rig angles must be finite".into());
+        }
+    }
+    Ok(())
+}
+
+/// The halo-independent disk-galaxy invariants.
+fn validate_disk<H>(g: &DiskGalaxySpec<H>, which: &str) -> Result<(), String> {
+    positive(g.disk_mass, &format!("{which} disk_mass"))?;
+    positive(g.scale_length, &format!("{which} scale_length"))?;
+    positive(g.hz_frac, &format!("{which} hz_frac"))?;
+    if !(g.rmax_frac.is_finite() && g.rmax_frac > 1.0) {
+        return Err(format!(
+            "{which} rmax_frac must exceed 1 (truncation beyond the scale length), got {}",
+            g.rmax_frac
+        ));
+    }
+    if let Some(q) = g.toomre_q {
+        positive(q, &format!("{which} toomre_q"))?;
+    }
+    if !(g.inclination_deg.is_finite() && g.argument_deg.is_finite()) {
+        return Err(format!("{which} orientation angles must be finite"));
+    }
+    Ok(())
+}
+
+fn validate_nfw(h: &NfwSpec, which: &str) -> Result<(), String> {
+    positive(h.mvir, &format!("{which} halo mvir"))?;
+    positive(h.rs, &format!("{which} halo rs"))?;
+    positive(h.skirt, &format!("{which} halo skirt"))?;
+    if !(h.c.is_finite() && h.c > 1.0) {
+        return Err(format!(
+            "{which} halo concentration must exceed 1, got {}",
+            h.c
+        ));
+    }
+    Ok(())
+}
+
+fn validate_counts(counts: &[(&str, usize, usize)]) -> Result<(), String> {
+    for (what, full, quick) in counts {
+        if *full == 0 || *quick == 0 {
+            return Err(format!("counts.{what} must be positive (full and quick)"));
+        }
+    }
+    Ok(())
+}
+
+fn positive(v: f64, what: &str) -> Result<(), String> {
+    if v.is_finite() && v > 0.0 {
+        Ok(())
+    } else {
+        Err(format!("{what} must be positive and finite, got {v}"))
+    }
 }
 
 // --- The runtime bundle -------------------------------------------------------
@@ -295,8 +568,200 @@ pub enum Rig {
 /// size, and assemble the prep config (palette + the always-on M6a/M6e density
 /// features, keyed to the scenario's ε). Same spec + same seed + same `quick`
 /// ⇒ bit-identical `State`.
-pub fn build_scenario(_spec: &ScenarioSpec, _quick: bool) -> Scenario {
-    todo!("M6f: spec-driven scenario construction")
+pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
+    let orbit = &spec.orbit;
+    // `unit_mass` is the mass whose particle carries PEAK_BRIGHTNESS: the disk
+    // particle for disk models (disk flux is set by disk MASS, not count), the
+    // (equal-by-design) halo particle for the merger.
+    let (state, unit_mass, info) = match &spec.model {
+        ModelSpec::DiskPlummer {
+            galaxy1,
+            galaxy2,
+            counts,
+        } => {
+            let c = if quick { counts.quick } else { counts.full };
+            let h1 = Plummer::new(G, galaxy1.halo.mass, galaxy1.halo.scale);
+            let h2 = Plummer::new(G, galaxy2.halo.mass, galaxy2.halo.scale);
+            let (state, unit_mass) = sample_disks(galaxy1, galaxy2, h1, h2, orbit, c, spec.seed);
+            let info = disk_info("halo", &state, &c, unit_mass, orbit, spec.sim.eps);
+            (state, unit_mass, info)
+        }
+        ModelSpec::DiskNfw {
+            galaxy1,
+            galaxy2,
+            counts,
+        } => {
+            let c = if quick { counts.quick } else { counts.full };
+            let h1 = truncated_nfw(&galaxy1.halo);
+            let h2 = truncated_nfw(&galaxy2.halo);
+            let (state, unit_mass) = sample_disks(galaxy1, galaxy2, h1, h2, orbit, c, spec.seed);
+            let info = disk_info("cuspy halo", &state, &c, unit_mass, orbit, spec.sim.eps);
+            (state, unit_mass, info)
+        }
+        ModelSpec::NfwMerger {
+            galaxy1,
+            galaxy2,
+            counts,
+        } => {
+            let c = if quick { counts.quick } else { counts.full };
+            let g1 = truncated_nfw(galaxy1);
+            let g2 = truncated_nfw(galaxy2);
+            let collision = NfwCollision::new(
+                g1,
+                g2,
+                orbit.eccentricity,
+                orbit.pericenter,
+                orbit.separation,
+            );
+            let state = collision.sample(c.halo1, c.halo2, spec.seed);
+            let unit_mass = g1.total_mass() / c.halo1 as f64;
+            let info = format!(
+                "IC: {} particles (halo1 {} + halo2 {}), particle mass {unit_mass:.3e}; \
+                 e={} peri={} sep={}, T={:.0}",
+                state.len(),
+                c.halo1,
+                c.halo2,
+                orbit.eccentricity,
+                orbit.pericenter,
+                orbit.separation,
+                spec.sim.n_steps as f64 * spec.sim.dt,
+            );
+            (state, unit_mass, info)
+        }
+    };
+
+    let eps = spec.sim.eps;
+    let (width, height) = if quick {
+        (QUICK_W, QUICK_H)
+    } else {
+        (FRAME_W, FRAME_H)
+    };
+    let snapshot_every = if quick {
+        spec.sim
+            .snapshot_every_quick
+            .unwrap_or(spec.sim.snapshot_every)
+    } else {
+        spec.sim.snapshot_every
+    };
+
+    Scenario {
+        state,
+        prep: PrepConfig {
+            palette: spec.look.palette.clone(),
+            brightness_per_mass: PEAK_BRIGHTNESS / unit_mass as f32,
+            size: spec.look.splat_size,
+            density: Some(DensityColoring {
+                k: DENSITY_K,
+                softening: eps,
+                strength: DENSITY_STRENGTH,
+            }),
+            color: ColorMode::Progenitor, // --color may override in run_movie
+            size_by_density: Some(SizeByDensity {
+                k: DENSITY_K,
+                softening: eps,
+                min_frac: SIZE_MIN_FRAC,
+                max_frac: SIZE_MAX_FRAC,
+            }),
+            compression: None, // filled by run_movie (rho0 needs snapshot 0)
+        },
+        eps,
+        dt: spec.sim.dt,
+        n_steps: spec.sim.n_steps,
+        snapshot_every,
+        subframes: SUBFRAMES,
+        seed: spec.seed,
+        width,
+        height,
+        frame_percentile: spec.look.frame_percentile,
+        rig: match &spec.rig {
+            RigSpec::Static => Rig::Static,
+            RigSpec::OrbitTilt {
+                azimuth_deg,
+                tilt_deg,
+                window,
+            } => Rig::OrbitTilt {
+                azimuth_deg: (azimuth_deg[0], azimuth_deg[1]),
+                tilt_deg: (tilt_deg[0], tilt_deg[1]),
+                window: *window,
+            },
+        },
+        ramp: spec.look.ramps.iter().map(|r| (r.inner, r.outer)).collect(),
+        sf_progenitors: spec.look.sf_progenitors.clone(),
+        info,
+    }
+}
+
+/// Instantiate one disk galaxy from its spec on the given halo (the fractions
+/// scale with Rd; warmth applies only when the spec asks for it).
+fn disk_galaxy<H: SphericalHalo, S>(g: &DiskGalaxySpec<S>, halo: H) -> ExponentialDisk<H> {
+    let disk = ExponentialDisk::new(
+        g.disk_mass,
+        g.scale_length,
+        g.hz_frac * g.scale_length,
+        g.rmax_frac * g.scale_length,
+        halo,
+    );
+    match g.toomre_q {
+        Some(q) => disk.with_toomre_q(q),
+        None => disk,
+    }
+}
+
+/// Sample a two-disk-galaxy encounter with each galaxy's Toomre orientation
+/// applied. Returns the realization and the disk-1 particle mass (the
+/// brightness unit).
+fn sample_disks<H: SphericalHalo, S>(
+    g1: &DiskGalaxySpec<S>,
+    g2: &DiskGalaxySpec<S>,
+    halo1: H,
+    halo2: H,
+    orbit: &OrbitSpec,
+    c: DiskCounts,
+    seed: u64,
+) -> (State, f64) {
+    let mut collision = DiskCollision::new(
+        disk_galaxy(g1, halo1),
+        disk_galaxy(g2, halo2),
+        orbit.eccentricity,
+        orbit.pericenter,
+        orbit.separation,
+    );
+    collision.orient1 = Orientation::from_angles(
+        g1.inclination_deg.to_radians(),
+        g1.argument_deg.to_radians(),
+    );
+    collision.orient2 = Orientation::from_angles(
+        g2.inclination_deg.to_radians(),
+        g2.argument_deg.to_radians(),
+    );
+    let state = collision.sample(c.halo1, c.disk1, c.halo2, c.disk2, seed);
+    (state, g1.disk_mass / c.disk1 as f64)
+}
+
+fn truncated_nfw(h: &NfwSpec) -> TruncatedNfw {
+    TruncatedNfw::new(Nfw::new(G, h.mvir, h.rs, h.c), h.skirt)
+}
+
+fn disk_info(
+    halo_word: &str,
+    state: &State,
+    c: &DiskCounts,
+    disk_particle_mass: f64,
+    orbit: &OrbitSpec,
+    eps: f64,
+) -> String {
+    format!(
+        "IC: {} particles ({halo_word} {}+{}, disk {}+{}), disk particle mass \
+         {disk_particle_mass:.3e}; e={} peri={} sep={}, eps={eps}",
+        state.len(),
+        c.halo1,
+        c.halo2,
+        c.disk1,
+        c.disk2,
+        orbit.eccentricity,
+        orbit.pericenter,
+        orbit.separation,
+    )
 }
 
 #[cfg(test)]

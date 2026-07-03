@@ -190,8 +190,18 @@ pub fn framing_radius(frames: &[FrameData], percentile: f32) -> f32 {
 /// `r` in every orthographic view. Same percentile-index convention as
 /// [`framing_radius`]; an empty frame contributes `0.0`.
 pub fn per_frame_radii(frames: &[FrameData], percentile: f32) -> Vec<f32> {
-    let _ = (frames, percentile);
-    todo!("M6d")
+    frames
+        .iter()
+        .map(|f| {
+            let mut radii: Vec<f32> = f.pos.iter().map(|p| p.length()).collect();
+            if radii.is_empty() {
+                return 0.0;
+            }
+            radii.sort_by(|a, b| a.total_cmp(b));
+            let idx = (((radii.len() - 1) as f32) * percentile.clamp(0.0, 1.0)).round() as usize;
+            radii[idx]
+        })
+        .collect()
 }
 
 #[cfg(test)]

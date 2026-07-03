@@ -23,16 +23,28 @@
 use galaxy_core::{DVec3, ParticleId, Progenitor, State};
 
 use crate::encounter;
-use crate::{ExponentialDisk, Orientation};
+use crate::{ExponentialDisk, Orientation, Plummer, SphericalHalo};
 
 /// A two-body Kepler encounter between two rotating disk galaxies, each with its
 /// own spin-orbit [`Orientation`].
+///
+/// Generic over the [`SphericalHalo`] `H` both disks are embedded in — a cored
+/// [`Plummer`] (the default, so every existing `DiskCollision` mention still means
+/// `DiskCollision<Plummer>` and compiles unchanged) or a cuspy
+/// [`Nfw`](crate::Nfw)/[`Hernquist`](crate::Hernquist)/[`TruncatedNfw`](crate::TruncatedNfw).
+/// Swapping `H` turns the coplanar tidal encounter into a cuspy-halo collision with a
+/// realistic rising-to-flat rotation curve, with no change to the placement code — it
+/// reads only `ExponentialDisk`'s generic surface (`g`, `total_mass`, `sample`), and
+/// [`place_galaxy`] operates on the sampled `State`. Mirrors the swappable-`H` design
+/// of [`ExponentialDisk`] itself (see `DESIGN.md`, M5f). Both galaxies share the same
+/// `H` (an NFW–NFW or Plummer–Plummer pairing), exactly as [`crate::NfwCollision`]
+/// pairs two `TruncatedNfw` halos.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DiskCollision {
+pub struct DiskCollision<H = Plummer> {
     /// The first galaxy — halo `Progenitor(0)`, disk `Progenitor(1)`.
-    pub galaxy1: ExponentialDisk,
+    pub galaxy1: ExponentialDisk<H>,
     /// The second galaxy — halo `Progenitor(2)`, disk `Progenitor(3)`.
-    pub galaxy2: ExponentialDisk,
+    pub galaxy2: ExponentialDisk<H>,
     /// Spin-orbit orientation of galaxy 1 (default `prograde`).
     pub orient1: Orientation,
     /// Spin-orbit orientation of galaxy 2 (default `prograde`).
@@ -45,15 +57,15 @@ pub struct DiskCollision {
     pub separation: f64,
 }
 
-impl DiskCollision {
+impl<H: SphericalHalo> DiskCollision<H> {
     /// Construct a disk-disk encounter. Both galaxies must share the same `G`; the
     /// eccentricity and pericenter must be strictly positive and the initial
     /// separation must be at least the pericenter (and at most the apocenter for a
     /// bound orbit). Both disks start `prograde` (coplanar, spin +Z); set
     /// [`orient1`](Self::orient1) / [`orient2`](Self::orient2) for other geometries.
     pub fn new(
-        galaxy1: ExponentialDisk,
-        galaxy2: ExponentialDisk,
+        galaxy1: ExponentialDisk<H>,
+        galaxy2: ExponentialDisk<H>,
         eccentricity: f64,
         pericenter: f64,
         separation: f64,

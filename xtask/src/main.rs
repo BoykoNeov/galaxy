@@ -6,10 +6,14 @@
 //!     galaxies in live Plummer halos → thin curved **tidal tails** (the M3 demo).
 //!   * `dm` — a 2:1 major **dark-matter merger** of two exponentially-truncated NFW
 //!     halos (ρ∝r⁻¹ cusps) → a single triaxial remnant (the M5e payoff).
+//!   * `cuspy` — the M5g payoff: a parabolic prograde encounter of two *cold* disks in
+//!     live **cuspy** (exponentially-truncated NFW) halos → tidal tails on the
+//!     realistic rising-to-flat rotation curve (the disk analogue of `dm`, and the
+//!     cuspy analogue of `disk`).
 //!
-//! Usage: `cargo run -p galaxy-xtask --release [disk|dm] [out_dir]`
-//!   * A bare first arg that is neither `disk` nor `dm` is taken as `out_dir` with the
-//!     `disk` scenario (back-compat with the original single-scenario CLI).
+//! Usage: `cargo run -p galaxy-xtask --release [disk|dm|cuspy] [out_dir]`
+//!   * A bare first arg that is none of `disk`/`dm`/`cuspy` is taken as `out_dir` with
+//!     the `disk` scenario (back-compat with the original single-scenario CLI).
 //!   * Set `GALAXY_MOVIE_QUICK=1` for a fast low-N, low-res preview (same physical
 //!     time and dt, so the trajectory is faithful — only particle count, frame size,
 //!     and frame cadence are reduced). Use it to sanity-check a scenario before a
@@ -71,12 +75,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (scenario_name, out_arg): (&str, Option<&str>) = match args.first().map(String::as_str) {
         Some("disk") => ("disk", args.get(1).map(String::as_str)),
         Some("dm") | Some("nfw") => ("dm", args.get(1).map(String::as_str)),
+        Some("cuspy") | Some("disk-nfw") => ("cuspy", args.get(1).map(String::as_str)),
         Some(other) => ("disk", Some(other)),
         None => ("disk", None),
     };
     let out: PathBuf = out_arg.map(PathBuf::from).unwrap_or_else(|| {
         std::env::temp_dir().join(match scenario_name {
             "dm" => "galaxy_dm_merger",
+            "cuspy" => "galaxy_cuspy_disk",
             _ => "galaxy_movie",
         })
     });
@@ -89,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scenario = match scenario_name {
         "dm" => dm_scenario(quick),
+        "cuspy" => cuspy_scenario(quick),
         _ => disk_scenario(quick),
     };
     println!("{}", scenario.info);
@@ -257,6 +264,118 @@ fn disk_scenario(quick: bool) -> Scenario {
         width,
         height,
         frame_percentile: 0.98,
+        info,
+    }
+}
+
+// --- Scenario: cuspy-disk collision (the M5g payoff) --------------------------
+// The disk analogue of the `dm` merger and the cuspy analogue of the `disk` movie:
+// two rotating exponential disks, each embedded in a live *cuspy* exponentially-
+// truncated NFW halo (ρ∝r⁻¹), on a parabolic coplanar-PROGRADE encounter → thin
+// curved tidal tails riding on the realistic rising-to-flat rotation curve.
+//
+// The disks are COLD (no Toomre warmth). The warm knob the Plummer `disk` movie uses
+// to survive several orbits is deliberately unavailable here: the warm dispersions
+// read the halo density ρ(r), which diverges at an NFW cusp (DESIGN.md, M5f — warm-
+// in-a-cusp is a scoped follow-up). The stabilization is therefore *resolution*: a
+// cold cuspy disk over-rotates and flies apart if the live halo's inner N-body force
+// falls below the analytic G·M(<r)/r² the disk is placed on, so the halos get many
+// particles and a small softening (ε≈0.02·r_s), per the M5f cusp-resolution finding.
+// This makes the scenario markedly heavier than the cored `disk` movie — QUICK mode
+// keeps the halo N high enough to still resolve the cusp for a faithful preview.
+const CUSPY_HALO_MVIR1: f64 = 1.0;
+const CUSPY_HALO_RS1: f64 = 1.0;
+const CUSPY_HALO_C1: f64 = 10.0; // ⇒ r_vir = 10
+const CUSPY_HALO_RD1: f64 = 3.0; // exponential skirt scale
+const CUSPY_DISK_M1: f64 = 0.12;
+const CUSPY_DISK_RD1: f64 = 0.6;
+const CUSPY_HALO_MVIR2: f64 = 0.7;
+const CUSPY_HALO_RS2: f64 = 0.9;
+const CUSPY_HALO_C2: f64 = 10.0; // ⇒ r_vir = 9
+const CUSPY_HALO_RD2: f64 = 2.7;
+const CUSPY_DISK_M2: f64 = 0.08;
+const CUSPY_DISK_RD2: f64 = 0.5;
+const CUSPY_DISK_HZ_FRAC: f64 = 0.1;
+const CUSPY_DISK_RMAX_FRAC: f64 = 3.0;
+const CUSPY_ECC: f64 = 1.0; // parabolic — the classic Toomre encounter
+const CUSPY_PERI: f64 = 1.5;
+const CUSPY_SEP: f64 = 8.0;
+const CUSPY_EPS: f64 = 0.02; // 0.02·r_s — between the disk (0.05) and the M5f deep-cusp 0.01
+const CUSPY_SPLAT_SIZE: f32 = 0.15;
+
+fn cuspy_scenario(quick: bool) -> Scenario {
+    let halo1 = TruncatedNfw::new(
+        Nfw::new(G, CUSPY_HALO_MVIR1, CUSPY_HALO_RS1, CUSPY_HALO_C1),
+        CUSPY_HALO_RD1,
+    );
+    let halo2 = TruncatedNfw::new(
+        Nfw::new(G, CUSPY_HALO_MVIR2, CUSPY_HALO_RS2, CUSPY_HALO_C2),
+        CUSPY_HALO_RD2,
+    );
+    // COLD disks — no `with_toomre_q` (warm dispersion diverges at the cusp).
+    let galaxy1 = ExponentialDisk::new(
+        CUSPY_DISK_M1,
+        CUSPY_DISK_RD1,
+        CUSPY_DISK_HZ_FRAC * CUSPY_DISK_RD1,
+        CUSPY_DISK_RMAX_FRAC * CUSPY_DISK_RD1,
+        halo1,
+    );
+    let galaxy2 = ExponentialDisk::new(
+        CUSPY_DISK_M2,
+        CUSPY_DISK_RD2,
+        CUSPY_DISK_HZ_FRAC * CUSPY_DISK_RD2,
+        CUSPY_DISK_RMAX_FRAC * CUSPY_DISK_RD2,
+        halo2,
+    );
+    let collision = DiskCollision::new(galaxy1, galaxy2, CUSPY_ECC, CUSPY_PERI, CUSPY_SEP);
+
+    // The cusp must be RESOLVED (M5f), so the halos are particle-heavy even in QUICK
+    // mode (a low-N halo under-resolves the inner force and the cold disk blows out —
+    // that would make a QUICK preview a false negative). Disks get many for tail detail.
+    let (nh1, nd1, nh2, nd2) = if quick {
+        (5000, 3000, 4000, 2000)
+    } else {
+        (10000, 5000, 8000, 4000)
+    };
+    let seed = 0x0CA5_D15C;
+    let state = collision.sample(nh1, nd1, nh2, nd2, seed);
+    let disk_particle_mass = CUSPY_DISK_M1 / nd1 as f64;
+
+    let (width, height) = if quick {
+        (QUICK_W, QUICK_H)
+    } else {
+        (FRAME_W, FRAME_H)
+    };
+    let info = format!(
+        "IC: {} particles (cuspy halo {}+{}, cold disk {}+{}), disk particle mass \
+         {disk_particle_mass:.3e}; parabolic peri={CUSPY_PERI} sep={CUSPY_SEP}, eps={CUSPY_EPS}",
+        state.len(),
+        nh1,
+        nh2,
+        nd1,
+        nd2,
+    );
+
+    Scenario {
+        state,
+        prep: PrepConfig {
+            palette: vec![HALO1_COLOR, DISK1_COLOR, HALO2_COLOR, DISK2_COLOR],
+            brightness_per_mass: PEAK_BRIGHTNESS / disk_particle_mass as f32,
+            size: CUSPY_SPLAT_SIZE,
+            density: None,
+        },
+        eps: CUSPY_EPS,
+        dt: 0.02,
+        n_steps: 1500,
+        snapshot_every: 25, // → ~61 frames
+        seed,
+        width,
+        height,
+        // The cuspy halo is far larger than the disk (r_vir=10 vs disk r_max≈1.8), so a
+        // high percentile would frame on the diffuse halo and shrink the tails to dots.
+        // A lower percentile crops the halo skirt and keeps the disk + tails filling the
+        // frame (the dim halo still glows underneath).
+        frame_percentile: 0.7,
         info,
     }
 }

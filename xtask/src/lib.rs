@@ -58,8 +58,66 @@ pub struct MovieArgs {
 /// in any order. Errors (human-readable) on a third positional, unknown flags,
 /// unknown color names, or `--color` without a value.
 pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
-    let _ = args;
-    todo!("M6e: movie arg parsing")
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut color = ColorModeArg::default();
+    let mut reuse_snapshots = false;
+
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--color" => {
+                let name = it
+                    .next()
+                    .ok_or("--color needs a value: progenitor|initial-radius|dispersion")?;
+                color = match name.as_str() {
+                    "progenitor" => ColorModeArg::Progenitor,
+                    "initial-radius" => ColorModeArg::InitialRadius,
+                    "dispersion" => ColorModeArg::Dispersion,
+                    other => {
+                        return Err(format!(
+                            "unknown color mode `{other}` (progenitor|initial-radius|dispersion)"
+                        ))
+                    }
+                };
+            }
+            "--reuse-snapshots" => reuse_snapshots = true,
+            flag if flag.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag `{flag}` (expected --color, --reuse-snapshots)"
+                ));
+            }
+            positional => positionals.push(positional),
+        }
+    }
+
+    // First positional: a scenario name/alias, else the out dir under the original
+    // single-scenario CLI (`xtask <out_dir>` defaulted to the disk movie).
+    let (scenario, out_dir) = match positionals.as_slice() {
+        [] => ("disk", None),
+        [one] => match *one {
+            "disk" | "dm" | "nfw" | "cuspy" | "disk-nfw" => (*one, None),
+            other => ("disk", Some(other)),
+        },
+        [scenario, out] => (*scenario, Some(*out)),
+        more => {
+            return Err(format!(
+                "at most two positionals [scenario] [out_dir], got {more:?}"
+            ))
+        }
+    };
+    let scenario = match scenario {
+        "disk" => "disk",
+        "dm" | "nfw" => "dm",
+        "cuspy" | "disk-nfw" => "cuspy",
+        other => return Err(format!("unknown scenario `{other}` (disk|dm|cuspy)")),
+    };
+
+    Ok(MovieArgs {
+        scenario: scenario.to_string(),
+        out_dir: out_dir.map(PathBuf::from),
+        color,
+        reuse_snapshots,
+    })
 }
 
 /// A parsed `regrade` invocation: which EXR frames to read, where the PNGs go, and

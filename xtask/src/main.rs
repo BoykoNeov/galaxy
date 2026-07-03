@@ -11,7 +11,8 @@
 //!     realistic rising-to-flat rotation curve (the disk analogue of `dm`, and the
 //!     cuspy analogue of `disk`).
 //!
-//! Usage: `cargo run -p galaxy-xtask --release [disk|dm|cuspy] [out_dir]`
+//! Usage: `cargo run -p galaxy-xtask --release [disk|dm|cuspy] [out_dir]
+//! [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]`
 //!   * A bare first arg that is none of `disk`/`dm`/`cuspy` is taken as `out_dir` with
 //!     the `disk` scenario (back-compat with the original single-scenario CLI).
 //!   * `regrade <exr_dir> <png_dir> [--exposure E] [--tonemap aces|reinhard|asinh]
@@ -34,6 +35,16 @@
 //! Camera (M6d): each scenario picks a `Rig` — `Static` (the pre-M6d face-on
 //! framing, bit-exact) or `OrbitTilt` (eased azimuth/tilt sweep with the zoom
 //! breathing along a smoothed per-snapshot framing envelope).
+//!
+//! Coloring (M6e): `--color` picks what the colors *mean* — the progenitor palette
+//! (default), a frozen initial-radius ramp (per-progenitor provenance gradient,
+//! computed once from snapshot 0), or a per-frame σ_v ramp. Independently, every
+//! scenario keys a hue shift toward blue-white on density *compression* vs each
+//! particle's t=0 neighbourhood (the star-formation proxy — a visualization
+//! stand-in, the sim is collisionless) and drives splat size off the same density
+//! estimate (tight cores, soft diffuse splats). `--reuse-snapshots` re-preps and
+//! re-renders retained snapshots without re-simulating (color modes iterate in
+//! render time, not sim time).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,11 +55,14 @@ use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, Trun
 use galaxy_render::camera::DEFAULT_MARGIN;
 use galaxy_render::{smooth_envelope, write_exr, Camera, CameraPath, RenderConfig, Renderer};
 use galaxy_renderprep::{
-    prepare, subframe, ColorMode, DensityColoring, FrameData, HermiteSpan, PrepConfig,
+    initial_radius_colors, knn_density, prepare, subframe, ColorMode, CompressionHue,
+    DensityColoring, DispersionColoring, FrameData, HermiteSpan, PrepConfig, RadialRamp,
+    SizeByDensity,
 };
 use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_xtask::{
-    framing_radius, parse_regrade_args, per_frame_radii, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS,
+    framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii, ColorModeArg,
+    DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS,
 };
 use glam::Vec3;
 
@@ -69,6 +83,22 @@ const PEAK_BRIGHTNESS: f32 = 0.3; // per-particle peak, so dense cores additivel
 // separation the sim itself resolves.
 const DENSITY_K: usize = 32;
 const DENSITY_STRENGTH: f32 = 3.0;
+// M6e coloring. All kNN consumers reuse (DENSITY_K, scenario ε) so the O(N²)
+// estimate runs once per snapshot no matter how many passes are on.
+//   * Star-formation proxy (ON in every scenario): hue shift toward a young-
+//     population blue-white, keyed on density compression ρ(t)/ρ(0) — only
+//     tidally-compressed material lights up; undisturbed cores keep their color.
+//     (A proxy: the sim is collisionless — see DESIGN M6e.)
+//   * Size-by-density (ON): splat radius follows the local spacing (ρ_ref/ρ)^⅓,
+//     clamped — tight cores, soft diffuse splats.
+//   * σ_v ramp (--color dispersion): dynamically cold → blue, hot → red-orange
+//     (the astro convention: cold thin disks are young/blue, hot spheroids old/red).
+const SF_YOUNG: [f32; 3] = [0.7, 0.8, 1.0];
+const SF_STRENGTH: f32 = 0.8;
+const SIZE_MIN_FRAC: f32 = 0.6;
+const SIZE_MAX_FRAC: f32 = 1.6;
+const DISPERSION_COLD: [f32; 3] = [0.35, 0.55, 1.0];
+const DISPERSION_HOT: [f32; 3] = [1.0, 0.5, 0.25];
 const EXPOSURE: f32 = 1.0;
 const TONEMAP: ToneMap = ToneMap::AcesApprox;
 // Bloom (M6b), ON by default in all three scenarios. Strength tuned by A/B regrades
@@ -106,6 +136,10 @@ struct Scenario {
     height: u32,
     frame_percentile: f32,
     rig: Rig,
+    /// Per-progenitor `(inner, outer)` ramp for `--color initial-radius` (M6e):
+    /// halos keep constant ramps (their dim palette color at both ends), disks get
+    /// a provenance gradient.
+    ramp: Vec<([f32; 3], [f32; 3])>,
     info: String,
 }
 
@@ -132,17 +166,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
 
-    // First positional selects the scenario; anything else is treated as the out dir
-    // (back-compat with the original `... [out_dir]` CLI, which defaulted to disk).
-    let (scenario_name, out_arg): (&str, Option<&str>) = match args.first().map(String::as_str) {
-        Some("disk") => ("disk", args.get(1).map(String::as_str)),
-        Some("dm") | Some("nfw") => ("dm", args.get(1).map(String::as_str)),
-        Some("cuspy") | Some("disk-nfw") => ("cuspy", args.get(1).map(String::as_str)),
-        Some(other) => ("disk", Some(other)),
-        None => ("disk", None),
-    };
-    let out: PathBuf = out_arg.map(PathBuf::from).unwrap_or_else(|| {
-        std::env::temp_dir().join(match scenario_name {
+    let movie = parse_movie_args(&args).map_err(|e| {
+        format!(
+            "{e}\nusage: [disk|dm|cuspy] [out_dir] \
+             [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]"
+        )
+    })?;
+    let out: PathBuf = movie.out_dir.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join(match movie.scenario.as_str() {
             "dm" => "galaxy_dm_merger",
             "cuspy" => "galaxy_cuspy_disk",
             _ => "galaxy_movie",
@@ -150,18 +181,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     println!(
-        "scenario = {scenario_name}{}",
+        "scenario = {} (color: {:?}){}",
+        movie.scenario,
+        movie.color,
         if quick { " (quick preview)" } else { "" }
     );
     println!("output → {}", out.display());
 
-    let scenario = match scenario_name {
+    let scenario = match movie.scenario.as_str() {
         "dm" => dm_scenario(quick),
         "cuspy" => cuspy_scenario(quick),
         _ => disk_scenario(quick),
     };
     println!("{}", scenario.info);
-    run_movie(&scenario, &out)
+    run_movie(&scenario, &out, movie.color, movie.reuse_snapshots)
 }
 
 // --- Scenario: DM merger ------------------------------------------------------
@@ -173,6 +206,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 // marginally-bound (e=1) pair into a single remnant on the first passage.
 const DM_HALO1_COLOR: [f32; 3] = [1.0, 0.55, 0.3]; // warm (primary)
 const DM_HALO2_COLOR: [f32; 3] = [0.35, 0.6, 1.0]; // cool (secondary)
+                                                   // M6e initial-radius ramps: inner keeps the halo identity color, outer pales
+                                                   // toward white — the remnant then wears its provenance (deep-cusp material vs
+                                                   // skirt material) as a radial gradient that survives the scrambling.
+const DM_HALO1_RAMP: ([f32; 3], [f32; 3]) = (DM_HALO1_COLOR, [1.0, 0.85, 0.65]);
+const DM_HALO2_RAMP: ([f32; 3], [f32; 3]) = (DM_HALO2_COLOR, [0.7, 0.85, 1.0]);
 const DM_SPLAT_SIZE: f32 = 0.6; // world units — the NFW scene (~40u) is ~8× the disk scene
 const DM_ECC: f64 = 1.0; // parabolic — the classic Toomre encounter
 const DM_PERI: f64 = 3.0;
@@ -228,9 +266,14 @@ fn dm_scenario(quick: bool) -> Scenario {
                 softening: DM_EPS,
                 strength: DENSITY_STRENGTH,
             }),
-            color: ColorMode::Progenitor,
-            size_by_density: None,
-            compression: None,
+            color: ColorMode::Progenitor, // --color may override in run_movie
+            size_by_density: Some(SizeByDensity {
+                k: DENSITY_K,
+                softening: DM_EPS,
+                min_frac: SIZE_MIN_FRAC,
+                max_frac: SIZE_MAX_FRAC,
+            }),
+            compression: None, // filled by run_movie (rho0 needs snapshot 0)
         },
         eps: DM_EPS,
         dt,
@@ -252,6 +295,7 @@ fn dm_scenario(quick: bool) -> Scenario {
             tilt_deg: (60.0, 60.0),
             window: 6,
         },
+        ramp: vec![DM_HALO1_RAMP, DM_HALO2_RAMP],
         info,
     }
 }
@@ -282,6 +326,12 @@ const HALO1_COLOR: [f32; 3] = [0.05, 0.035, 0.025];
 const DISK1_COLOR: [f32; 3] = [1.0, 0.5, 0.25]; // warm
 const HALO2_COLOR: [f32; 3] = [0.025, 0.035, 0.05];
 const DISK2_COLOR: [f32; 3] = [0.35, 0.6, 1.0]; // cool
+                                                // M6e initial-radius ramps (shared by `disk` and `cuspy`): inner = warm/old →
+                                                // outer = blue/young, like real disks; the two galaxies stay tellable apart by
+                                                // their ramp hues (amber→blue-white vs rose→cyan). Halos keep constant ramps at
+                                                // their dim palette color so they don't outshine the disks in ramp mode.
+const DISK1_RAMP: ([f32; 3], [f32; 3]) = ([1.0, 0.35, 0.1], [0.55, 0.75, 1.0]);
+const DISK2_RAMP: ([f32; 3], [f32; 3]) = ([1.0, 0.3, 0.45], [0.4, 0.9, 0.9]);
 
 fn disk_scenario(quick: bool) -> Scenario {
     let galaxy1 = ExponentialDisk::new(
@@ -338,9 +388,14 @@ fn disk_scenario(quick: bool) -> Scenario {
                 softening: DISK_EPS,
                 strength: DENSITY_STRENGTH,
             }),
-            color: ColorMode::Progenitor,
-            size_by_density: None,
-            compression: None,
+            color: ColorMode::Progenitor, // --color may override in run_movie
+            size_by_density: Some(SizeByDensity {
+                k: DENSITY_K,
+                softening: DISK_EPS,
+                min_frac: SIZE_MIN_FRAC,
+                max_frac: SIZE_MAX_FRAC,
+            }),
+            compression: None, // filled by run_movie (rho0 needs snapshot 0)
         },
         eps: DISK_EPS,
         dt: 0.02,
@@ -354,6 +409,12 @@ fn disk_scenario(quick: bool) -> Scenario {
         // The original M3 movie keeps its static face-on framing — the back-compat
         // exemplar (same constants + deterministic pipeline ⇒ same frames).
         rig: Rig::Static,
+        ramp: vec![
+            (HALO1_COLOR, HALO1_COLOR),
+            DISK1_RAMP,
+            (HALO2_COLOR, HALO2_COLOR),
+            DISK2_RAMP,
+        ],
         info,
     }
 }
@@ -457,9 +518,14 @@ fn cuspy_scenario(quick: bool) -> Scenario {
                 softening: CUSPY_EPS,
                 strength: DENSITY_STRENGTH,
             }),
-            color: ColorMode::Progenitor,
-            size_by_density: None,
-            compression: None,
+            color: ColorMode::Progenitor, // --color may override in run_movie
+            size_by_density: Some(SizeByDensity {
+                k: DENSITY_K,
+                softening: CUSPY_EPS,
+                min_frac: SIZE_MIN_FRAC,
+                max_frac: SIZE_MAX_FRAC,
+            }),
+            compression: None, // filled by run_movie (rho0 needs snapshot 0)
         },
         eps: CUSPY_EPS,
         dt: 0.02,
@@ -483,6 +549,12 @@ fn cuspy_scenario(quick: bool) -> Scenario {
             tilt_deg: (55.0, 25.0),
             window: 8,
         },
+        ramp: vec![
+            (HALO1_COLOR, HALO1_COLOR),
+            DISK1_RAMP,
+            (HALO2_COLOR, HALO2_COLOR),
+            DISK2_RAMP,
+        ],
         info,
     }
 }
@@ -526,11 +598,17 @@ fn regrade(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The scenario-independent pipeline: simulate the IC to snapshots, renderprep every
-/// snapshot to frame-data, build the scenario's camera path (static framing or the
-/// M6d orbit/tilt rig), then render + grade each frame and (optionally) ffmpeg them
+/// The scenario-independent pipeline: simulate the IC to snapshots (or reuse
+/// retained ones), renderprep every snapshot to frame-data under the requested
+/// coloring mode, build the scenario's camera path (static framing or the M6d
+/// orbit/tilt rig), then render + grade each frame and (optionally) ffmpeg them
 /// into a movie.
-fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn run_movie(
+    s: &Scenario,
+    out: &Path,
+    color: ColorModeArg,
+    reuse_snapshots: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let snap_dir = out.join("snapshots");
     let exr_dir = out.join("exr");
     let frame_dir = out.join("frames");
@@ -538,26 +616,29 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
         std::fs::create_dir_all(d)?;
     }
 
-    // 1. Simulate → snapshots.
-    let mut state = s.state.clone();
-    let mut solver = galaxy_solvers::BarnesHut::new(G, s.eps, THETA);
-    let mut integ = LeapfrogKdk::new();
-    let bg = StaticBackground;
-    let cfg = SimConfig {
-        dt: s.dt,
-        n_steps: s.n_steps,
-        snapshot_every: s.snapshot_every,
-        softening: s.eps,
-        rng_seed: s.seed,
-        config_hash: 0,
-        units: "nbody-G1".to_string(),
-    };
-    let mut sink = DirectorySink::new(&snap_dir)?;
-    let summary = run(&mut state, &mut solver, &mut integ, &bg, &cfg, &mut sink)?;
-    println!(
-        "simulated {} steps → {} snapshots (t_final = {:.2})",
-        summary.steps, summary.snapshots_emitted, summary.final_time
-    );
+    // 1. Simulate → snapshots — unless the caller asked to reuse retained ones
+    //    (M6e: coloring modes iterate in render time, not sim time).
+    if !reuse_snapshots {
+        let mut state = s.state.clone();
+        let mut solver = galaxy_solvers::BarnesHut::new(G, s.eps, THETA);
+        let mut integ = LeapfrogKdk::new();
+        let bg = StaticBackground;
+        let cfg = SimConfig {
+            dt: s.dt,
+            n_steps: s.n_steps,
+            snapshot_every: s.snapshot_every,
+            softening: s.eps,
+            rng_seed: s.seed,
+            config_hash: 0,
+            units: "nbody-G1".to_string(),
+        };
+        let mut sink = DirectorySink::new(&snap_dir)?;
+        let summary = run(&mut state, &mut solver, &mut integ, &bg, &cfg, &mut sink)?;
+        println!(
+            "simulated {} steps → {} snapshots (t_final = {:.2})",
+            summary.steps, summary.snapshots_emitted, summary.final_time
+        );
+    }
 
     // 2. Renderprep on the SNAPSHOT cadence: the full prepare (including the O(N²)
     //    kNN density pass) runs only on snapshot states; the Hermite subframes below
@@ -568,11 +649,40 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
         .filter(|p| p.extension().is_some_and(|x| x == "snap"))
         .collect();
     snaps.sort(); // snapshot_<step:08>.snap → lexicographic == step order
+    if reuse_snapshots && snaps.is_empty() {
+        return Err(format!(
+            "--reuse-snapshots: no .snap files in {} (run the scenario once without it)",
+            snap_dir.display()
+        )
+        .into());
+    }
     let states: Vec<State> = snaps
         .iter()
         .map(|p| galaxy_io::read_file(p).map(|(_, st)| st))
         .collect::<Result<Vec<_>, _>>()?;
-    let frames: Vec<_> = states.iter().map(|st| prepare(st, &s.prep)).collect();
+    if states.is_empty() {
+        return Err(format!("no snapshots under {}", snap_dir.display()).into());
+    }
+    if reuse_snapshots {
+        // Brightness/palette weighting and QUICK sizing are derived from the
+        // scenario's own particle counts — retained snapshots from a different
+        // N (a QUICK/full mix-up) would silently mis-weight every frame.
+        let (found, expect) = (states[0].len(), s.state.len());
+        if found != expect {
+            return Err(format!(
+                "--reuse-snapshots: snapshots hold {found} particles but the scenario \
+                 builds {expect} — QUICK/full mismatch? (GALAXY_MOVIE_QUICK)"
+            )
+            .into());
+        }
+        println!("reusing {} retained snapshots (no re-sim)", states.len());
+    }
+
+    // The effective prep config (M6e): the scenario's base look + the requested
+    // coloring mode + the star-formation compression proxy, both anchored to THIS
+    // run's snapshot 0 (frozen ramp colors; reference densities ρ0).
+    let prep = effective_prep(s, color, &states[0]);
+    let frames: Vec<_> = states.iter().map(|st| prepare(st, &prep)).collect();
     println!("prepared {} endpoint frames", frames.len());
 
     // 3. The camera path (M6d). Static: one face-on framing over the whole run
@@ -682,6 +792,39 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
     // 4. ffmpeg → movie (optional; leaves PNGs if ffmpeg is absent).
     encode_movie(&frame_dir, &out.join("movie.mp4"));
     Ok(())
+}
+
+/// The effective prep config for one movie run (M6e): the scenario's base look,
+/// the `--color` mode mapped onto a concrete `ColorMode`, and the star-formation
+/// compression proxy — the last two anchored to this run's own snapshot 0 (frozen
+/// initial-radius colors; reference densities ρ0). Everything reuses
+/// `(DENSITY_K, s.eps)`, so `prepare`'s shared cache runs ONE O(N²) pass per
+/// snapshot however many features are on.
+fn effective_prep(s: &Scenario, color: ColorModeArg, snap0: &State) -> PrepConfig {
+    let mut prep = s.prep.clone();
+    prep.color = match color {
+        ColorModeArg::Progenitor => ColorMode::Progenitor,
+        ColorModeArg::InitialRadius => ColorMode::Frozen(initial_radius_colors(
+            snap0,
+            &RadialRamp {
+                ramps: s.ramp.clone(),
+            },
+        )),
+        ColorModeArg::Dispersion => ColorMode::Dispersion(DispersionColoring {
+            k: DENSITY_K,
+            softening: s.eps,
+            cold: DISPERSION_COLD,
+            hot: DISPERSION_HOT,
+        }),
+    };
+    prep.compression = Some(CompressionHue {
+        k: DENSITY_K,
+        softening: s.eps,
+        rho0: knn_density(&snap0.pos, DENSITY_K, s.eps),
+        young: SF_YOUNG,
+        strength: SF_STRENGTH,
+    });
+    prep
 }
 
 /// Invoke ffmpeg to mux the PNG sequence into an H.264 movie. ffmpeg is an external

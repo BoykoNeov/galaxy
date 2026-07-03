@@ -174,7 +174,10 @@ fn total_grid_mass_recovers_deposited_mass() {
     let total: f64 = grid.data.iter().map(|&d| d as f64 * vol).sum();
     let expect = 2.0 * n as f64;
     let rel = (total - expect).abs() / expect;
-    assert!(rel < 0.01, "grid mass {total} vs deposited {expect} (rel {rel})");
+    assert!(
+        rel < 0.01,
+        "grid mass {total} vs deposited {expect} (rel {rel})"
+    );
 }
 
 #[test]
@@ -226,11 +229,17 @@ fn uniform_slab_interior_is_flat_at_the_analytic_density() {
                 checked += 1;
                 let got = grid.data[grid.index(ix, iy, iz)] as f64;
                 let rel = (got - expect).abs() / expect;
-                assert!(rel < 0.02, "interior cell ({ix},{iy},{iz}): ρ {got} vs {expect}");
+                assert!(
+                    rel < 0.02,
+                    "interior cell ({ix},{iy},{iz}): ρ {got} vs {expect}"
+                );
             }
         }
     }
-    assert!(checked > 100, "slab too small: only {checked} interior cells checked");
+    assert!(
+        checked > 100,
+        "slab too small: only {checked} interior cells checked"
+    );
 }
 
 // ---------- determinism ----------
@@ -337,7 +346,10 @@ fn deposit_gas_bounds_contain_the_percentile_radius() {
             let q = p.as_vec3();
             q.cmpgt(grid.bounds_min).all() && q.cmplt(grid.bounds_max).all()
         });
-    assert!(inside, "a percentile-radius particle fell outside the bounds");
+    assert!(
+        inside,
+        "a percentile-radius particle fell outside the bounds"
+    );
 }
 
 #[test]
@@ -374,12 +386,16 @@ fn deposit_gas_handles_single_and_coincident_particles() {
 
 #[test]
 fn sample_returns_cell_values_at_centers_exactly() {
+    // Exactness at cell centers requires the centers to be f32-representable
+    // (cell edges 0.5/1.0/2.0 below); non-representable geometry can only be
+    // exact to rounding — for any implementation, the GPU's included. The
+    // per-axis dims stay distinct so an x/y/z index mix-up still fails.
     let pos = random_cloud(100, 1.5, 3);
     let h = vec![0.5; 100];
     let mass = vec![1.0; 100];
-    let dims = [9, 7, 5];
+    let dims = [8, 4, 2];
     let grid = deposit_fixed(&pos, &mass, &h, dims, Vec3::splat(-2.0), Vec3::splat(2.0));
-    for &(ix, iy, iz) in &[(0u32, 0u32, 0u32), (4, 3, 2), (8, 6, 4), (1, 5, 3)] {
+    for &(ix, iy, iz) in &[(0u32, 0u32, 0u32), (4, 3, 1), (7, 0, 1), (1, 2, 0)] {
         let c = grid.cell_center(ix, iy, iz).as_vec3();
         assert_eq!(
             grid.sample(c),
@@ -417,8 +433,22 @@ fn sample_mix_endpoints_reproduce_the_grids_bit_exact() {
     let pos1 = random_cloud(150, 2.0, 200);
     let h = vec![0.6; 150];
     let mass = vec![1.0; 150];
-    let g0 = deposit_fixed(&pos0, &mass, &h, [12; 3], Vec3::splat(-3.0), Vec3::splat(3.0));
-    let g1 = deposit_fixed(&pos1, &mass, &h, [12; 3], Vec3::splat(-2.5), Vec3::splat(3.5));
+    let g0 = deposit_fixed(
+        &pos0,
+        &mass,
+        &h,
+        [12; 3],
+        Vec3::splat(-3.0),
+        Vec3::splat(3.0),
+    );
+    let g1 = deposit_fixed(
+        &pos1,
+        &mass,
+        &h,
+        [12; 3],
+        Vec3::splat(-2.5),
+        Vec3::splat(3.5),
+    );
 
     let mut seed = 55u64;
     for _ in 0..50 {

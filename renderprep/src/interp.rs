@@ -14,7 +14,7 @@
 //! re-running k-NN per subframe would multiply prep cost by the upsampling
 //! factor for no visible gain.
 
-use galaxy_core::{DVec3, State};
+use galaxy_core::{DVec3, Species, State};
 use glam::Vec3;
 
 use crate::frame::FrameData;
@@ -121,16 +121,42 @@ impl<'a> HermiteSpan<'a> {
 /// *prepared* endpoint frames. `u = 0` reproduces `f0` bit-exact, `u = 1`
 /// reproduces `f1`.
 ///
-/// Panics if `f0`/`f1` particle counts disagree with the span — that is a
-/// caller contract violation (the frames must be `prepare`d from the span's own
-/// endpoint snapshots), not a data condition.
+/// The frames may be full-length (one splat per span particle) or
+/// species-routed (M7d: `prepare`'s default filters `Species::Gas` out of the
+/// splat list) — a filtered frame's rows pair with the span's collisionless
+/// particles, in order.
+///
+/// Panics if `f0`/`f1` particle counts match neither the span's length nor its
+/// collisionless count — a caller contract violation (the frames must be
+/// `prepare`d from the span's own endpoint snapshots), not a data condition.
 pub fn subframe(span: &HermiteSpan, f0: &FrameData, f1: &FrameData, u: f64) -> FrameData {
     let n = span.s0.len();
-    assert_eq!(f0.len(), n, "f0 is not a prepared frame of the span's s0");
-    assert_eq!(f1.len(), n, "f1 is not a prepared frame of the span's s1");
+    let n_star = span
+        .s0
+        .kind
+        .iter()
+        .filter(|k| **k == Species::Collisionless)
+        .count();
+    let filtered = f0.len() == n_star && n_star != n;
+    if !filtered {
+        assert_eq!(f0.len(), n, "f0 is not a prepared frame of the span's s0");
+    }
+    assert_eq!(
+        f1.len(),
+        f0.len(),
+        "f1 is not a prepared frame of the span's s1"
+    );
 
     let (hpos, _) = span.sample(u);
-    let pos: Vec<Vec3> = hpos.iter().map(|p| p.as_vec3()).collect();
+    let pos: Vec<Vec3> = if filtered {
+        hpos.iter()
+            .zip(&span.s0.kind)
+            .filter(|(_, k)| **k == Species::Collisionless)
+            .map(|(p, _)| p.as_vec3())
+            .collect()
+    } else {
+        hpos.iter().map(|p| p.as_vec3()).collect()
+    };
 
     // Two-product lerp (1-w)·a + w·b, NOT a + w·(b-a): the former is bit-exact at
     // BOTH endpoints (w=0 ⇒ 1·a + 0·b, w=1 ⇒ 0·a + 1·b), which is what lets

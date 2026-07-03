@@ -138,8 +138,60 @@ pub fn to_writer<W: Write>(
     data: &FrameData,
     gas: Option<&GasGrid>,
 ) -> Result<(), FrameError> {
-    let _ = (writer, header, data, gas);
-    todo!()
+    let n = data.len();
+    // Typed error rather than an index panic if the SoA columns disagree.
+    if data.color.len() != n || data.size.len() != n || data.brightness.len() != n {
+        return Err(FrameError::Corrupt(
+            "FrameData columns have mismatched lengths".to_string(),
+        ));
+    }
+    if let Some(g) = gas {
+        let cells = g.dims.iter().map(|&d| d as usize).product::<usize>();
+        if g.data.len() != cells || g.dims.contains(&0) {
+            return Err(FrameError::Corrupt(format!(
+                "GasGrid holds {} cells but dims {:?} require {cells}",
+                g.data.len(),
+                g.dims
+            )));
+        }
+    }
+
+    writer.write_all(&MAGIC)?;
+    write_u32(writer, FRAME_VERSION)?;
+
+    let (bmin, bmax) = data.bounds(); // authoritative bounds, from the data
+    write_f64(writer, header.time)?;
+    write_u64(writer, n as u64)?; // authoritative count, from the data
+    write_vec3(writer, bmin)?;
+    write_vec3(writer, bmax)?;
+    write_u32(writer, if gas.is_some() { FLAG_GAS } else { 0 })?;
+
+    for &p in &data.pos {
+        write_vec3(writer, p)?;
+    }
+    for &c in &data.color {
+        write_f32(writer, c[0])?;
+        write_f32(writer, c[1])?;
+        write_f32(writer, c[2])?;
+    }
+    for &s in &data.size {
+        write_f32(writer, s)?;
+    }
+    for &b in &data.brightness {
+        write_f32(writer, b)?;
+    }
+
+    if let Some(g) = gas {
+        for &d in &g.dims {
+            write_u32(writer, d)?;
+        }
+        write_vec3(writer, g.bounds_min)?;
+        write_vec3(writer, g.bounds_max)?;
+        for &v in &g.data {
+            write_f32(writer, v)?;
+        }
+    }
+    Ok(())
 }
 
 /// Read frame-data from any source, reconstructing
@@ -148,8 +200,94 @@ pub fn to_writer<W: Write>(
 pub fn from_reader<R: Read>(
     reader: &mut R,
 ) -> Result<(FrameHeader, FrameData, Option<GasGrid>), FrameError> {
-    let _ = reader;
-    todo!()
+    let magic: [u8; 8] = read_array(reader)?;
+    if magic != MAGIC {
+        return Err(FrameError::BadMagic);
+    }
+    let version = read_u32(reader)?;
+    if !(MIN_READ_VERSION..=FRAME_VERSION).contains(&version) {
+        return Err(FrameError::UnsupportedVersion {
+            found: version,
+            expected: FRAME_VERSION,
+        });
+    }
+
+    let time = read_f64(reader)?;
+    let n_particles = read_u64(reader)?;
+    let bounds_min = read_vec3(reader)?;
+    let bounds_max = read_vec3(reader)?;
+    // v1 predates the flags word (and with it any gas block): treat it as 0.
+    let flags = if version >= 2 { read_u32(reader)? } else { 0 };
+    if flags & !FLAG_GAS != 0 {
+        return Err(FrameError::Corrupt(format!(
+            "unknown frame flags {flags:#x} (this build understands {FLAG_GAS:#x})"
+        )));
+    }
+
+    let n = usize::try_from(n_particles)
+        .map_err(|_| FrameError::Corrupt(format!("n_particles {n_particles} too large")))?;
+    // Capacity is only a hint — capped so a garbage count cannot trigger a huge
+    // allocation; the read loops grow the vectors and error out on a short stream.
+    let cap = n.min(1 << 20);
+
+    let mut pos = Vec::with_capacity(cap);
+    for _ in 0..n {
+        pos.push(read_vec3(reader)?);
+    }
+    let mut color = Vec::with_capacity(cap);
+    for _ in 0..n {
+        color.push([read_f32(reader)?, read_f32(reader)?, read_f32(reader)?]);
+    }
+    let mut size = Vec::with_capacity(cap);
+    for _ in 0..n {
+        size.push(read_f32(reader)?);
+    }
+    let mut brightness = Vec::with_capacity(cap);
+    for _ in 0..n {
+        brightness.push(read_f32(reader)?);
+    }
+
+    let gas = if flags & FLAG_GAS != 0 {
+        let dims = [read_u32(reader)?, read_u32(reader)?, read_u32(reader)?];
+        let gmin = read_vec3(reader)?;
+        let gmax = read_vec3(reader)?;
+        let cells = dims
+            .iter()
+            .try_fold(1u64, |a, &d| a.checked_mul(u64::from(d)))
+            .and_then(|c| usize::try_from(c).ok())
+            .ok_or_else(|| FrameError::Corrupt(format!("gas dims {dims:?} overflow")))?;
+        if dims.contains(&0) {
+            return Err(FrameError::Corrupt(format!(
+                "gas dims {dims:?} contain zero"
+            )));
+        }
+        let mut cells_data = Vec::with_capacity(cells.min(1 << 24));
+        for _ in 0..cells {
+            cells_data.push(read_f32(reader)?);
+        }
+        Some(GasGrid {
+            dims,
+            bounds_min: gmin,
+            bounds_max: gmax,
+            data: cells_data,
+        })
+    } else {
+        None
+    };
+
+    let header = FrameHeader {
+        time,
+        n_particles,
+        bounds_min,
+        bounds_max,
+    };
+    let data = FrameData {
+        pos,
+        color,
+        size,
+        brightness,
+    };
+    Ok((header, data, gas))
 }
 
 /// Convenience: write frame-data to a file (buffered).

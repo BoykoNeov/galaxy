@@ -515,8 +515,8 @@ fn full_length_frames_still_interpolate_all_rows() {
     let u = 0.5;
     let sub = subframe(&span, &f0, &f1, u);
     let (hpos, _) = span.sample(u);
-    for i in 0..4 {
-        assert_eq!(sub.pos[i], hpos[i].as_vec3());
+    for (i, hp) in hpos.iter().enumerate() {
+        assert_eq!(sub.pos[i], hp.as_vec3());
     }
 }
 

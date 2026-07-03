@@ -20,10 +20,11 @@
 //! The grid carries ρ only: emission/absorption/color are renderer uniforms, so
 //! the look iterates at re-render cost, not re-prep (plan D8).
 
-use galaxy_core::{DVec3, State};
+use galaxy_core::{DVec3, Species, State};
 use glam::Vec3;
+use rayon::prelude::*;
 
-use galaxy_solvers::sph::DensityConfig;
+use galaxy_solvers::sph::{density_adaptive, w, DensityConfig, HashGrid, SUPPORT};
 
 /// A single-channel gas density voxel grid.
 ///
@@ -46,23 +47,35 @@ pub struct GasGrid {
 impl GasGrid {
     /// Total number of cells (`dims[0]·dims[1]·dims[2]`).
     pub fn cell_count(&self) -> usize {
-        todo!()
+        self.dims.iter().map(|&d| d as usize).product()
     }
 
     /// Flat index of cell `(ix, iy, iz)` in `data` (x-fastest).
     pub fn index(&self, ix: u32, iy: u32, iz: u32) -> usize {
-        todo!()
+        debug_assert!(ix < self.dims[0] && iy < self.dims[1] && iz < self.dims[2]);
+        ix as usize + self.dims[0] as usize * (iy as usize + self.dims[1] as usize * iz as usize)
     }
 
     /// World-space cell edge lengths (extent / dims), in f64 — the deposition
     /// and sampling both derive cell centers from this one definition.
     pub fn cell_size(&self) -> DVec3 {
-        todo!()
+        let extent = self.bounds_max.as_dvec3() - self.bounds_min.as_dvec3();
+        DVec3::new(
+            extent.x / self.dims[0] as f64,
+            extent.y / self.dims[1] as f64,
+            extent.z / self.dims[2] as f64,
+        )
     }
 
     /// World-space center of cell `(ix, iy, iz)`.
     pub fn cell_center(&self, ix: u32, iy: u32, iz: u32) -> DVec3 {
-        todo!()
+        let cell = self.cell_size();
+        self.bounds_min.as_dvec3()
+            + DVec3::new(
+                (ix as f64 + 0.5) * cell.x,
+                (iy as f64 + 0.5) * cell.y,
+                (iz as f64 + 0.5) * cell.z,
+            )
     }
 
     /// Trilinear density sample at world point `p`: exact cell values at cell
@@ -73,7 +86,41 @@ impl GasGrid {
     /// AT a cell center returns that cell's value bit-exactly — this function is
     /// the CPU reference for the M7e shader's texture sampling.
     pub fn sample(&self, p: Vec3) -> f32 {
-        todo!()
+        if p.cmplt(self.bounds_min).any() || p.cmpgt(self.bounds_max).any() {
+            return 0.0;
+        }
+        let cell = self.cell_size();
+        let q = p.as_dvec3() - self.bounds_min.as_dvec3();
+        // Continuous cell coordinate: cell center i sits at coordinate i.
+        let cx = q.x / cell.x - 0.5;
+        let cy = q.y / cell.y - 0.5;
+        let cz = q.z / cell.z - 0.5;
+
+        // Per-axis floor index + fraction, edge-clamped (clamp-to-edge): within
+        // the outer half-cell ring the fraction pins to the boundary cell.
+        let axis = |c: f64, d: u32| -> (u32, u32, f32) {
+            let max = (d - 1) as f64;
+            let c = c.clamp(0.0, max);
+            let i0 = c.floor().min(max - 1.0).max(0.0) as u32; // d = 1 ⇒ i0 = 0
+            let i1 = (i0 + 1).min(d - 1);
+            let t = (c - i0 as f64) as f32;
+            (i0, i1, t)
+        };
+        let (x0, x1, tx) = axis(cx, self.dims[0]);
+        let (y0, y1, ty) = axis(cy, self.dims[1]);
+        let (z0, z1, tz) = axis(cz, self.dims[2]);
+
+        // Two-product lerp: bit-exact at t = 0 and t = 1 (1·a + 0·b).
+        let lerp = |a: f32, b: f32, t: f32| (1.0 - t) * a + t * b;
+        let at = |ix: u32, iy: u32, iz: u32| self.data[self.index(ix, iy, iz)];
+
+        let c00 = lerp(at(x0, y0, z0), at(x1, y0, z0), tx);
+        let c10 = lerp(at(x0, y1, z0), at(x1, y1, z0), tx);
+        let c01 = lerp(at(x0, y0, z1), at(x1, y0, z1), tx);
+        let c11 = lerp(at(x0, y1, z1), at(x1, y1, z1), tx);
+        let c0 = lerp(c00, c10, ty);
+        let c1 = lerp(c01, c11, ty);
+        lerp(c0, c1, tz)
     }
 }
 
@@ -81,8 +128,7 @@ impl GasGrid {
 /// `(1−u)·g0.sample(p) + u·g1.sample(p)` (two-product lerp, so `u = 0` returns
 /// `g0`'s sample and `u = 1` returns `g1`'s sample bit-exactly).
 pub fn sample_mix(g0: &GasGrid, g1: &GasGrid, u: f32, p: Vec3) -> f32 {
-    let _ = (g0, g1, u, p);
-    todo!()
+    (1.0 - u) * g0.sample(p) + u * g1.sample(p)
 }
 
 /// Configuration for [`deposit_gas`].
@@ -127,8 +173,7 @@ pub fn deposit_fixed(
     bounds_min: Vec3,
     bounds_max: Vec3,
 ) -> GasGrid {
-    let _ = (pos, mass, h, dims, bounds_min, bounds_max);
-    todo!()
+    deposit_impl(pos, mass, h, dims, bounds_min, bounds_max, true)
 }
 
 /// Serial twin of [`deposit_fixed`]: the same per-cell computation without the
@@ -141,8 +186,74 @@ pub fn deposit_fixed_serial(
     bounds_min: Vec3,
     bounds_max: Vec3,
 ) -> GasGrid {
-    let _ = (pos, mass, h, dims, bounds_min, bounds_max);
-    todo!()
+    deposit_impl(pos, mass, h, dims, bounds_min, bounds_max, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deposit_impl(
+    pos: &[DVec3],
+    mass: &[f64],
+    h: &[f64],
+    dims: [u32; 3],
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+    parallel: bool,
+) -> GasGrid {
+    assert_eq!(mass.len(), pos.len(), "mass length must match pos");
+    assert_eq!(h.len(), pos.len(), "h length must match pos");
+    assert!(
+        dims.iter().all(|&d| d >= 1),
+        "grid dims must be ≥ 1, got {dims:?}"
+    );
+    assert!(
+        bounds_max.cmpgt(bounds_min).all(),
+        "grid bounds must have positive extent: {bounds_min:?}..{bounds_max:?}"
+    );
+
+    let mut grid = GasGrid {
+        dims,
+        bounds_min,
+        bounds_max,
+        data: Vec::new(),
+    };
+    let n_cells = grid.cell_count();
+    if pos.is_empty() {
+        grid.data = vec![0.0; n_cells];
+        return grid;
+    }
+
+    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+    assert!(
+        h_max.is_finite() && h_max > 0.0 && h.iter().all(|&x| x.is_finite() && x > 0.0),
+        "deposition needs positive finite smoothing lengths"
+    );
+    let r_gather = SUPPORT * h_max;
+    let bins = HashGrid::build(pos, r_gather);
+
+    let (dx, dy) = (dims[0] as usize, dims[1] as usize);
+    // One independent kernel sum per cell, neighbors gathered in ascending
+    // index (HashGrid contract): fixed association order ⇒ parallel ≡ serial
+    // bit-exact. Out-of-support neighbors of smaller-h particles contribute an
+    // exact +0.0, so gathering at the global 2·h_max radius changes nothing.
+    let cell_rho = |flat: usize| -> f32 {
+        let ix = (flat % dx) as u32;
+        let iy = ((flat / dx) % dy) as u32;
+        let iz = (flat / (dx * dy)) as u32;
+        let center = grid.cell_center(ix, iy, iz);
+        let mut rho = 0.0_f64;
+        for j in bins.neighbours_within(pos, center, r_gather) {
+            rho += mass[j] * w((center - pos[j]).length(), h[j]);
+        }
+        rho as f32
+    };
+
+    let data: Vec<f32> = if parallel {
+        (0..n_cells).into_par_iter().map(cell_rho).collect()
+    } else {
+        (0..n_cells).map(cell_rho).collect()
+    };
+    grid.data = data;
+    grid
 }
 
 /// Voxelize the gas population of `state`: select `Species::Gas` rows, derive
@@ -153,6 +264,35 @@ pub fn deposit_fixed_serial(
 /// Returns `None` when the state holds no gas — a gas-free run has no grid and
 /// its frame-data v2 carries no gas block.
 pub fn deposit_gas(state: &State, cfg: &GasGridConfig) -> Option<GasGrid> {
-    let _ = (state, cfg);
-    todo!()
+    let mut pos = Vec::new();
+    let mut mass = Vec::new();
+    for i in 0..state.len() {
+        if state.kind[i] == Species::Gas {
+            pos.push(state.pos[i]);
+            mass.push(state.mass[i]);
+        }
+    }
+    if pos.is_empty() {
+        return None;
+    }
+
+    // h is a pure function of the gas positions (plan D2) — the same shared
+    // routine the force path uses, so render and physics smooth identically.
+    let h = density_adaptive(&pos, &mass, &cfg.density, None).h;
+    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+
+    // Cubic bounds: percentile radius about the (unweighted) gas centroid,
+    // padded by the full kernel support. f32 rounding of the corners is
+    // harmless — the pad dwarfs the f32 ulp at scene scale.
+    let centroid = pos.iter().fold(DVec3::ZERO, |a, &p| a + p) / pos.len() as f64;
+    let mut d: Vec<f64> = pos.iter().map(|p| (*p - centroid).length()).collect();
+    d.sort_by(|a, b| a.total_cmp(b));
+    let idx = ((d.len() - 1) as f64 * cfg.percentile.clamp(0.0, 1.0)).round() as usize;
+    let half = d[idx] + SUPPORT * h_max;
+    let bounds_min = (centroid - DVec3::splat(half)).as_vec3();
+    let bounds_max = (centroid + DVec3::splat(half)).as_vec3();
+
+    Some(deposit_fixed(
+        &pos, &mass, &h, cfg.dims, bounds_min, bounds_max,
+    ))
 }

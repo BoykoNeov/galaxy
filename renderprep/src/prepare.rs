@@ -17,7 +17,7 @@
 //! All k-NN consumers that agree on `(k, softening)` share **one** O(N²) pass per
 //! `prepare` call (the movie default wires them all to the scenario's `ε`).
 
-use galaxy_core::State;
+use galaxy_core::{Species, State};
 
 use crate::coloring::{compression_colors, dispersion_colors};
 use crate::density::{density_boost, density_sizes, knn_neighbourhood, velocity_dispersion};
@@ -192,7 +192,7 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
     }
 
     // Splat sizes: the configured constant, or density-driven (M6e).
-    let size = match &config.size_by_density {
+    let mut size = match &config.size_by_density {
         None => vec![config.size; n],
         Some(sd) => density_sizes(
             knn.density(sd.k, sd.softening),
@@ -202,12 +202,35 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
         ),
     };
 
+    // Species routing (M7d): gas renders through the volumetric grid, not the
+    // additive star path, so by default it leaves the splat list here — AFTER
+    // all attribute math (the k-NN passes above see all particles; gas is
+    // mass), so stellar rows are identical with or without the filter. A
+    // gas-free state never enters this branch: bit-compatible with the
+    // pre-M7d map by construction.
+    if !config.gas_as_splats && state.kind.contains(&Species::Gas) {
+        let keep = |i: &usize| state.kind[*i] == Species::Collisionless;
+        pos = filter_by(pos, keep);
+        color = filter_by(color, keep);
+        brightness = filter_by(brightness, keep);
+        size = filter_by(size, keep);
+    }
+
     FrameData {
         pos,
         color,
         brightness,
         size,
     }
+}
+
+/// Keep the elements whose index passes `keep`, preserving order.
+fn filter_by<T>(v: Vec<T>, keep: impl Fn(&usize) -> bool) -> Vec<T> {
+    v.into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep(i))
+        .map(|(_, x)| x)
+        .collect()
 }
 
 /// A `(k, softening-bits)` cache key — the softening's bit pattern makes the

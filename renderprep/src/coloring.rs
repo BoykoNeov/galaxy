@@ -117,11 +117,18 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-/// σ_v color ramp: `t = σ / (σ + σ_ref)` from `cold` toward `hot`, with `σ_ref`
-/// the mean over the *positive* dispersions. Monotone, bounded in `[0, 1)`,
-/// exactly `cold` at `σ = 0` (including the degenerate-neighbourhood sentinel)
-/// and exactly the midpoint mix at `σ = σ_ref`. All-zero dispersions (no
-/// reference) yield all-`cold`.
+/// σ_v color ramp: `t = σ² / (σ² + σ_ref²)` from `cold` toward `hot`, with
+/// `σ_ref` the mean over the *positive* dispersions. Monotone, bounded in
+/// `[0, 1)`, exactly `cold` at `σ = 0` (including the degenerate-neighbourhood
+/// sentinel) and exactly the midpoint mix at `σ = σ_ref`. All-zero dispersions
+/// (no reference) yield all-`cold`.
+///
+/// The map is quadratic in σ — the specific kinetic energy of the random
+/// motions — rather than linear: in a self-gravitating body σ varies only by a
+/// factor ~2–3 across the visible radii, and the linear ratio compressed that
+/// onto a mushy `t ≈ 0.4–0.6` band (every particle the same midpoint gray in
+/// the first rendered A/B); squaring doubles the contrast around the reference
+/// while preserving every endpoint/midpoint/monotonicity guarantee.
 pub fn dispersion_colors(sigma: &[f64], cold: [f32; 3], hot: [f32; 3]) -> Vec<[f32; 3]> {
     // Reference dispersion: the mean over the positive values — the same
     // discipline as the density boost's ρ_ref (0.0 is the degenerate sentinel).
@@ -133,13 +140,14 @@ pub fn dispersion_colors(sigma: &[f64], cold: [f32; 3], hot: [f32; 3]) -> Vec<[f
         return vec![cold; sigma.len()]; // no reference: everything is cold
     }
     let sigma_ref = sum / count as f64;
+    let ref2 = sigma_ref * sigma_ref;
     sigma
         .iter()
         .map(|&s| {
-            // t = σ/(σ + σ_ref): exactly 0 at σ = 0 (bit-exact cold via the
+            // t = σ²/(σ² + σ_ref²): exactly 0 at σ = 0 (bit-exact cold via the
             // two-product lerp), exactly ½ at σ = σ_ref, → 1 as σ → ∞.
             let t = if s > 0.0 {
-                (s / (s + sigma_ref)) as f32
+                (s * s / (s * s + ref2)) as f32
             } else {
                 0.0
             };

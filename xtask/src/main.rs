@@ -93,12 +93,18 @@ const DENSITY_STRENGTH: f32 = 3.0;
 //     clamped — tight cores, soft diffuse splats.
 //   * σ_v ramp (--color dispersion): dynamically cold → blue, hot → red-orange
 //     (the astro convention: cold thin disks are young/blue, hot spheroids old/red).
+//     Scoped to SINGLE-POPULATION subjects (the dm merger): the ramp replaces the
+//     palette, and with it the 20× halo/disk brightness compensation — on the
+//     disk scenarios the ~5×-heavier, ~2×-more-numerous halo particles swamp the
+//     frame white at any ramp brightness that still shows the disks (the first
+//     rendered A/B). A palette-luminance-weighted σ_v ramp is the named follow-up
+//     if the mode is ever wanted on a disk+halo scene.
 const SF_YOUNG: [f32; 3] = [0.7, 0.8, 1.0];
 const SF_STRENGTH: f32 = 0.8;
 const SIZE_MIN_FRAC: f32 = 0.6;
 const SIZE_MAX_FRAC: f32 = 1.6;
-const DISPERSION_COLD: [f32; 3] = [0.35, 0.55, 1.0];
-const DISPERSION_HOT: [f32; 3] = [1.0, 0.5, 0.25];
+const DISPERSION_COLD: [f32; 3] = [0.25, 0.4, 1.0];
+const DISPERSION_HOT: [f32; 3] = [1.0, 0.5, 0.2];
 const EXPOSURE: f32 = 1.0;
 const TONEMAP: ToneMap = ToneMap::AcesApprox;
 // Bloom (M6b), ON by default in all three scenarios. Strength tuned by A/B regrades
@@ -140,6 +146,14 @@ struct Scenario {
     /// halos keep constant ramps (their dim palette color at both ends), disks get
     /// a provenance gradient.
     ramp: Vec<([f32; 3], [f32; 3])>,
+    /// Progenitors the star-formation compression proxy applies to (M6e). Disk
+    /// scenarios list only the disks: their halos are dark-matter stand-ins (no
+    /// gas ⇒ no star formation), and — the practical teeth of that physics — a
+    /// bright compression tint on the numerous heavy halo particles washes the
+    /// whole frame white once the halos overlap (the first rendered A/B). The dm
+    /// merger lists both halos: they are the luminous subject there, and the tint
+    /// is an honest "shocked overlap" diagnostic, not an SF claim.
+    sf_progenitors: Vec<u16>,
     info: String,
 }
 
@@ -296,6 +310,7 @@ fn dm_scenario(quick: bool) -> Scenario {
             window: 6,
         },
         ramp: vec![DM_HALO1_RAMP, DM_HALO2_RAMP],
+        sf_progenitors: vec![0, 1],
         info,
     }
 }
@@ -415,6 +430,7 @@ fn disk_scenario(quick: bool) -> Scenario {
             (HALO2_COLOR, HALO2_COLOR),
             DISK2_RAMP,
         ],
+        sf_progenitors: vec![1, 3],
         info,
     }
 }
@@ -555,6 +571,7 @@ fn cuspy_scenario(quick: bool) -> Scenario {
             (HALO2_COLOR, HALO2_COLOR),
             DISK2_RAMP,
         ],
+        sf_progenitors: vec![1, 3],
         info,
     }
 }
@@ -817,10 +834,19 @@ fn effective_prep(s: &Scenario, color: ColorModeArg, snap0: &State) -> PrepConfi
             hot: DISPERSION_HOT,
         }),
     };
+    // Star-formation proxy, masked to the scenario's luminous progenitors: a 0.0
+    // reference density is the gated "no estimate" sentinel, so masked particles
+    // keep their base color bit-exactly whatever their compression.
+    let mut rho0 = knn_density(&snap0.pos, DENSITY_K, s.eps);
+    for (r0, p) in rho0.iter_mut().zip(&snap0.progenitor) {
+        if !s.sf_progenitors.contains(&p.0) {
+            *r0 = 0.0;
+        }
+    }
     prep.compression = Some(CompressionHue {
         k: DENSITY_K,
         softening: s.eps,
-        rho0: knn_density(&snap0.pos, DENSITY_K, s.eps),
+        rho0,
         young: SF_YOUNG,
         strength: SF_STRENGTH,
     });

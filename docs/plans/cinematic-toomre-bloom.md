@@ -330,7 +330,24 @@ Scope:
 
 Demo: the zoo contact sheet — four new movies + a DESIGN scenario table.
 
-## M6g — perspective camera + world-space vertex projection (Session 7, L, optional)
+## M6g — perspective camera + world-space vertex projection (Session 7, L, optional) — LANDED
+
+*(Landed 2026-07; see the DESIGN.md M6g entry. As scoped below: instances carry
+world-space pos/radius, the camera rides a uniform, projection runs in the
+vertex shader; ortho pinned by a golden gate (flux + six probe pixels captured
+from the pre-swap CPU-projection renderer). The three deferred decisions were
+settled by physics: fixed peak surface intensity × size ∝ 1/d ⇒ flux ∝ 1/d²
+automatically (real optics, no attenuation factor, gated as a 4.00× ratio at
+2× depth); sub-pixel clamp dims by (true/clamped)² so the law survives the
+point-source regime, while the fill-rate max clamp saturates without boosting;
+near-plane CULLS the whole quad in the vertex shader (splats have no depth
+extent — the 1/z pole is never evaluated). Beyond scope as planned: a
+`CameraPath::dolly` (fixed direction, constant fov, eased distance) +
+`dolly` scenario preset (the cuspy realization flown through the remnant,
+distances as fractions of the final framing radius). Perspective `Camera`
+shares the ortho framing parameterization — `half_extent` at the target
+plane — so the target plane reproduces ortho exactly and rigs swap projection
+freely.)*
 
 **Goal:** the render-architecture upgrade `render.rs` already names ("the
 world-space vertex-shader path is the 10⁸ swap"), plus perspective for

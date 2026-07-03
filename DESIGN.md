@@ -1350,12 +1350,58 @@ late-time positions — N-body is chaotic).
     from the same presets.
   - [next: perspective camera + world-space vertex-shader projection — the 10⁸
     swap (M6g, optional).]
-- **M6 (in progress) — "the beautiful": visual/cinematic series.** Asinh grade +
+- **Perspective camera + world-space vertex projection (landed, M6g) — the 10⁸
+  swap.** Instances now carry **world-space** pos/radius (camera-independent);
+  the camera basis + projection parameters ride a uniform and projection runs
+  in the vertex shader — the per-frame CPU projection loop is gone, which is
+  the render-architecture prerequisite for 10⁷–10⁸ particles. Plus the
+  perspective `Camera` variant for inside-the-scene drama.
+  - **Ortho is bit-compatible in formula and golden-gated in pixels:** the
+    shader's ortho branch is the exact arithmetic of the retired CPU path, and
+    `tests/vertex_path.rs` pins total flux + the six brightest probe pixels
+    captured from the pre-swap renderer at 1e-3 relative — every pre-M6g movie
+    reproduces.
+  - **The three deferred decisions, settled by physics rather than tuning:**
+    - *Brightness attenuation is the real optics law, for free.* Peak surface
+      intensity stays fixed; screen size shrinks ∝ 1/depth; integrated flux
+      therefore falls as 1/d² automatically (surface brightness of a resolved
+      source is distance-invariant — no tuned attenuation factor, no semantics
+      fork with the additive ortho path). Gated: two identical particles at
+      depths d and 2d must show a 4.00× flux ratio.
+    - *Sub-pixel clamp = the point-source regime.* Below `min_splat_px` the
+      quad is drawn at the clamp size with emission dimmed by (true/clamped)²,
+      so flux keeps the 1/d² law while distant stars stop shimmering as
+      sub-pixel quads (gated: the ratio law survives clamping). The fill-rate
+      max clamp *saturates* — no brightness boost on close fly-bys. Clamp
+      window validated CPU-side (`RenderError::Config`): WGSL `clamp()` with
+      an empty interval is UB.
+    - *Near plane culls, never clips.* Splats have no depth extent, so a
+      view-depth ≤ near degenerates the whole quad in the vertex shader — the
+      1/z pole is never evaluated (gated: zero flux + all-finite pixels for
+      particles at the eye plane, inside near, and exactly at near).
+  - **Shared framing parameterization:** `Camera::perspective` takes
+    `half_extent` *at the target plane* (eye at `distance` behind the target),
+    so the pinhole reproduces the ortho projection exactly there (gated) and
+    the rig can swap projection without re-deriving its envelope.
+  - **Dolly rig (`CameraPath::dolly`) + `dolly` preset:** fixed spherical
+    direction (the M6d basis, gated equal to a parked orbit-tilt), quintic-
+    eased eye distance, **constant vertical fov** — a camera move, not a zoom
+    (`half_extent.y = d·tan(fov_y/2)` at every u, gated). Scenario knobs are
+    scene-scale-free: `distance_frac`/`near_frac` are fractions of the final
+    snapshot's framing radius (the dolly targets the remnant), anchored in
+    main.rs. The `dolly` preset is the cuspy realization bit-for-bit, flown
+    from 5× the framed radius down to 0.35× — inside the remnant — at 55° tilt.
+  - Notes for future GPU work: `target` is a WGSL reserved keyword; the shared
+    uniform needs `VERTEX_FRAGMENT` visibility; one unreproduced subpixel-gate
+    failure during a concurrent clippy build (8 clean re-runs — suspected GPU
+    contention flake, watch).
+  - Demo: the QUICK dolly movie under `M:\claud_projects\temp\m6g-dolly-quick\`.
+- **M6 (complete) — "the beautiful": visual/cinematic series.** Asinh grade +
   regrade loop + density boost ON (M6a) → bloom (M6b) → Hermite 60 fps
   upsampling (M6c) → animated camera rig (M6d) → coloring modes v2 incl. the
   density→blue star-formation proxy (M6e) → `scenario.toml` front-end + the
-  Toomre encounter zoo (M6f) — all landed above → perspective/vertex-path
-  render, the 10⁸ swap (M6g, optional). Session-by-session plan with gates and
+  Toomre encounter zoo (M6f) → perspective/vertex-path render, the 10⁸ swap +
+  dolly rig (M6g) — all landed above. Session-by-session plan with gates and
   decisions: `docs/plans/cinematic-toomre-bloom.md`.
 
 ## Validation strategy

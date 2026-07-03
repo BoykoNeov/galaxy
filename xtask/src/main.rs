@@ -325,7 +325,35 @@ fn run_movie(
                 rcfg.aspect(),
             )?
         }
-        Rig::Dolly { .. } => todo!("M6g: dolly rig wiring"),
+        Rig::Dolly {
+            direction_deg,
+            distance_frac,
+            fov_deg,
+            near_frac,
+        } => {
+            // Anchor the scene-scale-free fractions to the FINAL snapshot's
+            // framing radius: the dolly targets the end state (the remnant), so
+            // "outside the scene" and "inside the remnant" mean that frame.
+            let raw = per_frame_radii(&frames, s.frame_percentile);
+            let anchor = raw.last().copied().unwrap_or(1.0).max(1e-3);
+            println!(
+                "dolly anchor radius (p{:.0}, final snapshot) = {anchor:.2}; \
+                 eye {:.2} -> {:.2}, near {:.3}",
+                s.frame_percentile * 100.0,
+                distance_frac.0 * anchor,
+                distance_frac.1 * anchor,
+                near_frac * anchor,
+            );
+            CameraPath::dolly(
+                Vec3::ZERO,
+                direction_deg.0.to_radians(),
+                direction_deg.1.to_radians(),
+                (distance_frac.0 * anchor, distance_frac.1 * anchor),
+                fov_deg.to_radians(),
+                near_frac * anchor,
+                rcfg.aspect(),
+            )?
+        }
     };
     let gcfg = GradeConfig {
         exposure: EXPOSURE,

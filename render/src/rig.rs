@@ -166,8 +166,42 @@ impl CameraPath {
         near: f32,
         aspect: f32,
     ) -> Result<Self, RigError> {
-        let _ = (target, azimuth, tilt, distance, fov_y, near, aspect);
-        todo!("M6g: dolly path")
+        if ![distance.0, distance.1]
+            .iter()
+            .all(|d| d.is_finite() && *d > 0.0)
+        {
+            return Err(RigError::InvalidParam(
+                "dolly distances must be finite and positive",
+            ));
+        }
+        if !(fov_y.is_finite() && fov_y > 0.0 && fov_y < std::f32::consts::PI) {
+            return Err(RigError::InvalidParam(
+                "dolly fov_y must be finite in (0, \u{3c0})",
+            ));
+        }
+        // The eased distance is a convex combination of the endpoints, so
+        // near < min(distance) keeps every Camera::perspective along the path
+        // in its documented domain.
+        if !(near.is_finite() && near > 0.0 && near < distance.0.min(distance.1)) {
+            return Err(RigError::InvalidParam(
+                "dolly near must be finite with 0 < near < min(distance)",
+            ));
+        }
+        if !(aspect.is_finite() && aspect > 0.0) {
+            return Err(RigError::InvalidParam("aspect must be finite and positive"));
+        }
+        if !(azimuth.is_finite() && tilt.is_finite()) {
+            return Err(RigError::InvalidParam("angles must be finite"));
+        }
+        Ok(CameraPath(PathKind::Dolly {
+            target,
+            azimuth,
+            tilt,
+            distance,
+            fov_y,
+            near,
+            aspect,
+        }))
     }
 
     /// An eased orbit/tilt sweep about `target` with a breathing framing radius.
@@ -221,7 +255,37 @@ impl CameraPath {
     pub fn camera_at(&self, u: f32) -> Camera {
         match &self.0 {
             PathKind::Fixed(camera) => *camera,
-            PathKind::Dolly { .. } => todo!("M6g: dolly camera_at"),
+            PathKind::Dolly {
+                target,
+                azimuth,
+                tilt,
+                distance,
+                fov_y,
+                near,
+                aspect,
+            } => {
+                let u = u.clamp(0.0, 1.0);
+                let d = lerp(distance.0, distance.1, ease_in_out(u));
+
+                // Same documented spherical basis as OrbitTilt (gated equal).
+                let (sin_t, cos_t) = azimuth.sin_cos();
+                let (sin_p, cos_p) = tilt.sin_cos();
+                let r_hat = Vec3::new(sin_p * cos_t, sin_p * sin_t, cos_p);
+                let up_hint = Vec3::new(-cos_p * cos_t, -cos_p * sin_t, sin_p);
+
+                // Constant fov (a camera move, not a zoom): the half-extent at
+                // the target plane grows with distance so the subtended angle
+                // never changes. Vertical fov is the anchor; x follows aspect.
+                let he_y = d * (fov_y * 0.5).tan();
+                Camera::perspective(
+                    *target,
+                    -r_hat,
+                    up_hint,
+                    Vec2::new(he_y * aspect, he_y),
+                    d,
+                    *near,
+                )
+            }
             PathKind::OrbitTilt {
                 target,
                 azimuth,

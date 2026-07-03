@@ -344,7 +344,17 @@ impl TryFrom<RigTable> for RigSpec {
                     window: t.window.ok_or("rig orbit-tilt needs window")?,
                 })
             }
-            "dolly" => todo!("M6g: dolly rig table"),
+            "dolly" => {
+                if t.orbit_knobs() {
+                    return Err("rig kind `dolly` takes no orbit-tilt knobs".into());
+                }
+                Ok(RigSpec::Dolly {
+                    direction_deg: t.direction_deg.ok_or("rig dolly needs direction_deg")?,
+                    distance_frac: t.distance_frac.ok_or("rig dolly needs distance_frac")?,
+                    fov_deg: t.fov_deg.ok_or("rig dolly needs fov_deg")?,
+                    near_frac: t.near_frac.ok_or("rig dolly needs near_frac")?,
+                })
+            }
             other => Err(format!(
                 "unknown rig kind `{other}` (static|orbit-tilt|dolly)"
             )),
@@ -511,7 +521,33 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                 return Err("rig angles must be finite".into());
             }
         }
-        RigSpec::Dolly { .. } => todo!("M6g: dolly rig validation"),
+        RigSpec::Dolly {
+            direction_deg,
+            distance_frac,
+            fov_deg,
+            near_frac,
+        } => {
+            if !direction_deg.iter().all(|a| a.is_finite()) {
+                return Err("rig dolly direction_deg must be finite".into());
+            }
+            if !distance_frac.iter().all(|d| d.is_finite() && *d > 0.0) {
+                return Err("rig dolly distance_frac must be finite and positive".into());
+            }
+            if !(fov_deg.is_finite() && *fov_deg > 0.0 && *fov_deg < 180.0) {
+                return Err(format!(
+                    "rig dolly fov_deg must be in (0, 180), got {fov_deg}"
+                ));
+            }
+            // The eased distance never drops below the closer endpoint, so this
+            // keeps the near plane in front of the eye for the whole move.
+            let closest = distance_frac[0].min(distance_frac[1]);
+            if !(near_frac.is_finite() && *near_frac > 0.0 && *near_frac < closest) {
+                return Err(format!(
+                    "rig dolly near_frac must satisfy 0 < near_frac < min(distance_frac) = \
+                     {closest}, got {near_frac}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -735,7 +771,17 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                 tilt_deg: (tilt_deg[0], tilt_deg[1]),
                 window: *window,
             },
-            RigSpec::Dolly { .. } => todo!("M6g: dolly rig build"),
+            RigSpec::Dolly {
+                direction_deg,
+                distance_frac,
+                fov_deg,
+                near_frac,
+            } => Rig::Dolly {
+                direction_deg: (direction_deg[0], direction_deg[1]),
+                distance_frac: (distance_frac[0], distance_frac[1]),
+                fov_deg: *fov_deg,
+                near_frac: *near_frac,
+            },
         },
         ramp: spec.look.ramps.iter().map(|r| (r.inner, r.outer)).collect(),
         sf_progenitors: spec.look.sf_progenitors.clone(),

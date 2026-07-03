@@ -13,6 +13,11 @@
 //!     [--beta B] [--bloom S] [--bloom-levels N] [--bloom-radius R]` re-grades
 //!     retained linear EXRs into fresh PNGs (+ movie if ffmpeg is present) in seconds
 //!     — no re-simulation, no re-render (the M6a look loop; bloom added in M6b).
+//!   * `sph-demo <snapshot.snap> [--k N] [--n-ngb X]` runs the M7a SPH density
+//!     estimator over a retained snapshot and prints the O(N) win (grid gather
+//!     vs the O(N²) brute reference, swept over prefixes), the bit-exact match
+//!     between them, and the Spearman agreement of the SPH field with the M6
+//!     k-NN coloring — no sim, no GPU (the M7a density demo).
 //!   * Set `GALAXY_MOVIE_QUICK=1` for a fast low-N, low-res preview (same physical
 //!     time and dt, so the trajectory is faithful — only particle count, frame size,
 //!     and frame cadence are reduced). Use it to sanity-check a scenario before a
@@ -52,6 +57,7 @@ use galaxy_renderprep::{
     DispersionColoring, FrameData, HermiteSpan, PrepConfig, RadialRamp,
 };
 use galaxy_sim::{run, DirectorySink, SimConfig};
+use galaxy_solvers::sph::{density_adaptive, density_fixed, reference_density, DensityConfig};
 use galaxy_xtask::spec::{
     build_scenario, parse_scenario_toml, preset, Rig, Scenario, ScenarioSpec,
 };
@@ -104,6 +110,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `regrade` is a pure grade-stage pass over retained EXRs — no sim, no GPU.
     if args.first().map(String::as_str) == Some("regrade") {
         return regrade(&args[1..]);
+    }
+
+    // `sph-demo` is the M7a demo: run the grid-accelerated SPH density estimator
+    // over a retained snapshot and prove the O(N) win against the O(N²) brute
+    // reference — no sim, no GPU, no movie pipeline.
+    if args.first().map(String::as_str) == Some("sph-demo") {
+        return sph_demo(&args[1..]);
     }
 
     let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
@@ -186,6 +199,247 @@ fn regrade(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     );
     encode_movie(&cfg.png_dir, &cfg.png_dir.join("movie.mp4"));
     Ok(())
+}
+
+/// The M7a demo (density side, per docs/plans/deep-orbiting-sunbeam.md): run the
+/// SPH adaptive-h density estimator over a retained snapshot and prove the
+/// grid-accelerated path is bit-identical to — but O(N) faster than — the O(N²)
+/// brute reference. Three numbers carry the demo:
+///
+///   1. **The O(N) win.** With a fixed smoothing length (the one the adaptive
+///      pass converged to), the grid gather [`density_fixed`] and the brute sum
+///      [`reference_density`] compute the *same thing* two ways. Timing them
+///      side by side isolates the data-structure speedup — no algorithm
+///      difference to muddy the ratio.
+///   2. **Provably correct, not just fast.** Those two paths gather in ascending
+///      index and add exact `+0.0` for out-of-support terms, so they agree to
+///      the bit — the max relative difference is the M7a bit-exact gate re-run
+///      at snapshot scale, and it must print `0`.
+///   3. **The SPH field vs the existing coloring.** The M6 star coloring keys on
+///      an O(N²) k-NN density; the SPH field is a different estimator, so we
+///      report the Spearman rank correlation between the two (log space) — how
+///      closely a density *coloring* off the SPH field would track today's.
+///
+/// Usage: `sph-demo <snapshot.snap> [--k N] [--n-ngb X]`.
+fn sph_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+
+    const USAGE: &str = "usage: sph-demo <snapshot.snap> [--k N] [--n-ngb X]";
+    let mut path: Option<PathBuf> = None;
+    let mut k = DENSITY_K;
+    let mut n_ngb = DensityConfig::default().n_ngb;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--k" => {
+                k = it
+                    .next()
+                    .ok_or("--k needs a value")?
+                    .parse()
+                    .map_err(|_| "--k must be a positive integer")?;
+            }
+            "--n-ngb" => {
+                n_ngb = it
+                    .next()
+                    .ok_or("--n-ngb needs a value")?
+                    .parse()
+                    .map_err(|_| "--n-ngb must be a number")?;
+            }
+            other if path.is_none() => path = Some(PathBuf::from(other)),
+            other => return Err(format!("unexpected argument `{other}`\n{USAGE}").into()),
+        }
+    }
+    let path = path.ok_or_else(|| format!("no snapshot given\n{USAGE}"))?;
+
+    let (header, state) = galaxy_io::read_file(&path)?;
+    let n = state.len();
+    let n_gas = state
+        .kind
+        .iter()
+        .filter(|k| matches!(k, galaxy_core::Species::Gas))
+        .count();
+    println!(
+        "snapshot   {} (written by {})",
+        path.display(),
+        header.code_version
+    );
+    println!(
+        "N          {n} particles ({n_gas} gas, {} collisionless)",
+        n - n_gas
+    );
+    println!(
+        "estimator  SPH cubic-spline, adaptive h @ N_ngb = {n_ngb} (mass density of the point set)"
+    );
+    if n < 2 {
+        return Err("need at least two particles for a density demo".into());
+    }
+
+    // (1) Full adaptive-h SPH density via the grid path — the real per-snapshot
+    //     cost renderprep will pay, including the per-particle h bisection.
+    let cfg = DensityConfig {
+        n_ngb,
+        ..DensityConfig::default()
+    };
+    let t0 = Instant::now();
+    let sph = density_adaptive(&state.pos, &state.mass, &cfg, None);
+    let t_adaptive = t0.elapsed();
+
+    // (2) Same fixed h, two data structures — isolates the O(N) win, exact match.
+    //     Swept over prefixes of the snapshot so the *scaling* is visible: the
+    //     brute column ~quadruples per doubling of N, the grid column ~doubles.
+    let mut sweep: Vec<DensityTiming> = Vec::new();
+    for frac in [4usize, 2, 1] {
+        let m = n / frac;
+        if m >= 2 {
+            sweep.push(time_density(&state.pos[..m], &state.mass[..m], &cfg));
+        }
+    }
+    let max_rel = sweep.last().expect("full set has ≥2 particles").max_rel;
+
+    // (3) Agreement with the existing O(N²) k-NN coloring (a different estimator):
+    //     rank correlation in log space — a density coloring off the SPH field
+    //     would order particles this closely to today's.
+    let t0 = Instant::now();
+    let knn = knn_density(&state.pos, k, header.softening.max(1e-6));
+    let t_knn = t0.elapsed();
+    let rho_sph = &sph.rho;
+    let rank_corr = spearman_log(rho_sph, &knn);
+
+    let (lo, med, hi) = min_median_max(rho_sph);
+    println!();
+    println!("SPH density field   min {lo:.3e}  median {med:.3e}  max {hi:.3e}");
+    println!();
+    println!("--- the O(N) win (fixed h, identical output, different structure) ---");
+    println!("        N     grid O(N)     brute O(N²)    speedup   max rel diff");
+    for t in &sweep {
+        println!(
+            "  {:>7}   {:>8.1} ms    {:>9.1} ms    {:>5.1}×    {:.1e}",
+            t.n,
+            ms(t.t_grid),
+            ms(t.t_brute),
+            t.t_brute.as_secs_f64() / t.t_grid.as_secs_f64().max(f64::MIN_POSITIVE),
+            t.max_rel,
+        );
+    }
+    println!(
+        "  (brute ~quadruples per doubling of N; grid ~doubles — the O(N) win. \
+         max rel diff is the bit-exact gate: must be ~0.)"
+    );
+    println!();
+    println!("--- full SPH pass and the k-NN coloring reference ---");
+    println!(
+        "  adaptive-h SPH density (grid, incl. h bisection)  {:>8.1} ms",
+        ms(t_adaptive)
+    );
+    println!(
+        "  k-NN density (k={k}, the M6 O(N²) color oracle)   {:>8.1} ms",
+        ms(t_knn)
+    );
+    println!("  Spearman(log ρ_sph, log ρ_knn) = {rank_corr:.4}   (coloring agreement)");
+
+    if max_rel > 1e-12 {
+        return Err(format!(
+            "grid and brute SPH density disagree (max rel {max_rel:.2e}) — the M7a \
+             bit-exact invariant is broken"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn ms(d: std::time::Duration) -> f64 {
+    d.as_secs_f64() * 1e3
+}
+
+/// One row of the O(N)-win table: grid vs brute density at a fixed h, on `n`
+/// particles, and the (must-be-zero) relative difference between them.
+#[derive(Clone, Copy)]
+struct DensityTiming {
+    n: usize,
+    t_grid: std::time::Duration,
+    t_brute: std::time::Duration,
+    max_rel: f64,
+}
+
+/// Time the grid gather and the brute O(N²) sum at the *same* smoothing lengths
+/// (the ones the adaptive pass converges to for this exact point set), so the
+/// two compute the identical quantity and the timing ratio is a pure
+/// data-structure comparison. Returns both wall-clocks and their max relative
+/// difference (the bit-exact invariant, expected 0).
+fn time_density(pos: &[glam::DVec3], mass: &[f64], cfg: &DensityConfig) -> DensityTiming {
+    use std::time::Instant;
+    let h = density_adaptive(pos, mass, cfg, None).h;
+    let t0 = Instant::now();
+    let rho_grid = density_fixed(pos, mass, &h);
+    let t_grid = t0.elapsed();
+    let t0 = Instant::now();
+    let rho_brute = reference_density(pos, mass, &h);
+    let t_brute = t0.elapsed();
+    let max_rel = rho_grid
+        .iter()
+        .zip(&rho_brute)
+        .map(|(&a, &b)| (a - b).abs() / b.abs().max(f64::MIN_POSITIVE))
+        .fold(0.0_f64, f64::max);
+    DensityTiming {
+        n: pos.len(),
+        t_grid,
+        t_brute,
+        max_rel,
+    }
+}
+
+fn min_median_max(v: &[f64]) -> (f64, f64, f64) {
+    let mut s: Vec<f64> = v.to_vec();
+    s.sort_by(|a, b| a.total_cmp(b));
+    (s[0], s[s.len() / 2], s[s.len() - 1])
+}
+
+/// Spearman rank correlation of two positive fields (compared in log space, which
+/// is monotone so it does not change ranks — it just makes ties from the `0.0`
+/// k-NN sentinel explicit). Returns Pearson correlation of the fractional ranks;
+/// `NaN`-safe via `total_cmp`.
+fn spearman_log(a: &[f64], b: &[f64]) -> f64 {
+    let ra = fractional_ranks(a);
+    let rb = fractional_ranks(b);
+    let n = ra.len() as f64;
+    let (ma, mb) = (ra.iter().sum::<f64>() / n, rb.iter().sum::<f64>() / n);
+    let mut cov = 0.0;
+    let mut va = 0.0;
+    let mut vb = 0.0;
+    for (x, y) in ra.iter().zip(&rb) {
+        cov += (x - ma) * (y - mb);
+        va += (x - ma).powi(2);
+        vb += (y - mb).powi(2);
+    }
+    let denom = (va * vb).sqrt();
+    if denom > 0.0 {
+        cov / denom
+    } else {
+        0.0 // a constant field has no rank spread — correlation undefined → 0
+    }
+}
+
+/// Average ("fractional") ranks, so tied values share the mean of the ranks they
+/// span — the standard Spearman tie handling.
+fn fractional_ranks(v: &[f64]) -> Vec<f64> {
+    let n = v.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&i, &j| v[i].total_cmp(&v[j]));
+    let mut ranks = vec![0.0; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && v[idx[j]].total_cmp(&v[idx[i]]) == std::cmp::Ordering::Equal {
+            j += 1;
+        }
+        // ranks i..j (0-based) are tied → share their average (1-based mean).
+        let avg = ((i + j - 1) as f64) / 2.0 + 1.0;
+        for &k in &idx[i..j] {
+            ranks[k] = avg;
+        }
+        i = j;
+    }
+    ranks
 }
 
 /// The scenario-independent pipeline: simulate the IC to snapshots (or reuse

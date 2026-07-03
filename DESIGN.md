@@ -1465,8 +1465,17 @@ late-time positions — N-body is chaotic).
     adaptive-h recovers N_ngb ± 1 (bisection tol maps to ~0.07); scaling law;
     determinism + parallel ≡ serial bit-exact; warm-start invariance;
     under-populated clamp; snapshot v1 fixture/v2 round-trip/garbage rejection.
-  - Demo: deferred to the next session (density-coloring side-by-side on a
-    retained cuspy snapshot + O(N) timing vs the O(N²) kNN path).
+  - Demo (`xtask sph-demo <snapshot>`): the density side, landed. Over a
+    retained cuspy snapshot it (a) sweeps grid vs O(N²)-brute density at a
+    **fixed** h over N-prefixes — same computation, so the timing ratio is a
+    pure data-structure win (brute ~quadruples per doubling, grid stays
+    sub-quadratic; ~8× at 14k, and `max rel diff = 0` exactly re-runs the
+    bit-exact gate at snapshot scale); (b) reports the full adaptive-h pass
+    cost; (c) prints the Spearman rank correlation of the SPH field vs the M6
+    k-NN coloring (≈0.99) — the numeric stand-in for the side-by-side, since a
+    *rendered* dust-lane still is the M7d voxel/raymarch path's job (amendment
+    folds the visual there). The cuspy h-range inflates the grid's global cell
+    size, so the constant factor is honest, not hidden.
   - [next: SPH forces (pressure + Monaghan viscosity), `GravitySph` composite,
     CFL sentinel, isothermal shock tube vs the analytic Riemann solution
     (M7b).]

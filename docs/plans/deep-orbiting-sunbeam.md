@@ -225,6 +225,23 @@ against the CPU stack right after; otherwise it stays the M8-era opener.
 GPU SPH can never precede M7b — the CPU forces are its oracle.
 Long-horizon ordering beyond M7: `docs/plans/long-burning-beacon.md`.
 
+### Amendment 2026-07-03 — M7e landed; sampling is manual-trilinear always
+
+M7e landed (D9 implemented; M7a/M7d/M7e done, next M7b). One argued
+deviation from D9's sketch: the gas textures are sampled by **manual
+trilinear (8 `textureLoad`s) unconditionally**, not FLOAT32_FILTERABLE with
+a manual fallback. Hardware samplers interpolate with ~8-bit fixed-point
+subtexel weights, which would have made the "GPU march ≡ CPU reference"
+gate tolerance hardware-dependent; the manual path replicates
+`GasGrid::sample` in exact f32 arithmetic on every adapter, needs no
+optional feature, and costs nothing measurable (1080p composite over 128³
++ 90k-star prepass ≈ 16 ms on the dev GPU). The FLOAT32_FILTERABLE fast
+path is a named deferral if march time ever becomes the bottleneck. The
+feature-detection spike D9 asked for is kept as the `gpu_features` example
+(dev RTX 5090/Vulkan: both FLOAT32_BLENDABLE and FLOAT32_FILTERABLE
+present). run_movie's endpoint-grid wiring (owed by the M7d entry) landed
+with M7e; gas look constants stay hardcoded until `[look.gas]` (M7f).
+
 ---
 
 ## M7a — gas plumbing + SPH kernel + neighbors + density (Session 1, M)

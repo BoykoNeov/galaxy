@@ -1547,6 +1547,78 @@ late-time positions — N-body is chaotic).
   - [next: M7e — volumetric raymarch + per-star transmittance prepass; the
     gas-off ≡ M6g golden gate is the load-bearing regression.]
 
+- **Volumetric raymarch + full star attenuation (landed, M7e — view-first,
+  ahead of M7b/c).** The render model DESIGN owed from the start: the frame
+  is L = Σ_stars E·T(cam→star) + ∫ j(ρ)·T(cam→s) ds — both terms ADDITIVE
+  once each carries its own attenuation, so the order-independent
+  `Rgba32Float` additive target and grade-time bloom survive intact (bloom
+  applies to the star+gas composite for free). Three GPU stages per frame:
+  - **Transmittance prepass (compute):** one thread per star marches the
+    mixed endpoint density from star toward the camera (to the eye under
+    perspective, to the grid exit against the view axis under ortho),
+    τ summed then exponentiated once, `T = exp(−τ)` into a storage buffer.
+  - **Star pass:** the M6g splat pipeline with `emissive × T[instance]` in
+    the vertex shader (alpha stays the splat weight). Gas off ⇒ the buffer
+    holds 1.0 and ×1.0 is bit-exact: the M6g golden passes unchanged, and
+    the disk QUICK scenario re-rendered from retained snapshots is
+    **pixel-identical for all 481 frames** against the pre-M7e renderer
+    (EXR file hashes differ run-to-run — parallel compression in the `exr`
+    crate, pre-existing; pixels are the artifact. `exr_diff` example added.)
+  - **Gas pass:** fullscreen triangle; per-pixel camera ray in the splat
+    path's exact NDC convention (pixel centers, y-up); slab-clip against the
+    UNION AABB of both endpoint grids; front-to-back midpoint march at
+    Δs = ½·min cell edge, `C += T·j·ρ·Δs·color; T *= exp(−κρΔs)` (emit-then-
+    attenuate, first-order in the coupling — rel err ≈ ½κρΔs per step, gated
+    against the analytic slab), early exit below T = 1e-4; blends
+    `(radiance, 1−T)` additively. Ortho rays march the full chord (the splat
+    path draws at all depths — nothing is "behind" a camera at infinity);
+    perspective clamps t ≥ 0.
+  - **One march-rule definition, CPU-mirrored:** `render::volume` states the
+    rules and implements them on the CPU (`ray_for_pixel`, `march_gas`,
+    `star_transmittance`, `render_gas_cpu`); the WGSL mirrors them
+    operation-for-operation and the GPU ≡ CPU gates hold both projections to
+    1e-3 rel + 1e-5 abs per pixel. Density sampling delegates to
+    `GasGrid::sample`/`sample_mix` — the M7d functions documented as this
+    shader's oracle.
+  - **Sampling is manual-trilinear ALWAYS (D9 deviation, argued):** 8
+    `textureLoad`s + two-product lerps replicate `GasGrid::sample` in exact
+    f32, instead of a FLOAT32_FILTERABLE sampler whose ~8-bit fixed-point
+    subtexel weights would make the GPU ≡ CPU tolerance hardware-dependent.
+    Feature-detection spike kept (`gpu_features` example; the dev RTX 5090
+    has both FLOAT32_BLENDABLE and FLOAT32_FILTERABLE). The filtered-sampler
+    fast path is a named deferral if march time ever hurts — it doesn't:
+    a 1080p composite over a 128³ grid + 90k-star prepass is ~16 ms.
+  - **Look is renderer-side:** `GasLook { color, emissivity j, opacity κ }`
+    (j·ρ emission per unit length, κ·ρ extinction) are uniforms — the look
+    iterates at re-render cost (D8 held). κ = 0 is the emission-only limit
+    (T ≡ 1 exactly). run_movie deposits per snapshot endpoint (QUICK 64³ /
+    full 128³, None for gas-free states) and binds (grid0, grid1, subframe
+    u) — grids mix in-shader, nothing gas-related lerps on the CPU. Look
+    constants are placeholders until `[look.gas]` (M7f).
+  - Gates (18): gas-off ≡ M6g golden for BOTH `gas=None` and an inert grid
+    (κ = j = 0); analytic uniform slab — star T = exp(−κρL) (1e-5, ortho +
+    perspective + inside-slab + camera-side exactly 1), gas radiance =
+    (j/κ)(1−e^{−κρL}) (0.5% at dτ ≈ 0.005/step, tolerance argued from the
+    quadrature order); κ = 0 exact emission; high-τ early exit bounded
+    (quadrature + EXIT·(j/κ), documented); ray-gen hand oracles at corner
+    pixels (ortho + perspective, non-square); GPU ≡ CPU both projections
+    with different-bounds grids and mix 0.37; two-star depth ordering swaps
+    with the camera side; emissivity 2× ⇒ exactly 2× (fp-exact, CPU and
+    GPU); mix endpoints bit-exact (u = 0 ignores grid1, u = 1 ignores
+    grid0); same-device determinism; off-view and behind-eye gas add
+    exactly nothing; 1×1×1 grid edge.
+  - Demo (`xtask volume-demo`): the composite on static synthetic data (the
+    view-first amendment — no gas dynamics until M7b/c): the M7d inclined
+    sech² gas disk voxelized over a synthetic star field (2.5×-thicker
+    stellar disk + Plummer bulge, radius-ramped colors), A/B pair
+    attenuation ON (dark dust lane carving the upper bulge) vs κ = 0
+    (smooth bright ellipse) plus stars-only reference; retained under
+    `M:\claud_projects\temp\m7e_volume_demo_b\` (κ = 14, j = 0.4,
+    exposure 0.3). The dynamically-shocked merger dust lanes are M7c's demo,
+    rendered through this path.
+  - [next per the view-first reorder: M7b — SPH forces (pressure + Monaghan
+    viscosity), `GravitySph`, CFL sentinel, isothermal shock tube.]
+
 ## Validation strategy
 
 - Analytic: Kepler 2-body (period, eccentricity).

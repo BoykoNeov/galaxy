@@ -18,6 +18,11 @@
 //!     vs the O(N²) brute reference, swept over prefixes), the bit-exact match
 //!     between them, and the Spearman agreement of the SPH field with the M6
 //!     k-NN coloring — no sim, no GPU (the M7a density demo).
+//!   * `gas-demo [out_dir] [--n N] [--res R] [--seed S] [--incline DEG]` (M7d)
+//!     voxelizes a static synthetic sech² gas disk onto the renderprep density
+//!     grid, round-trips frame-data v2 (gas block) through disk, and grades a
+//!     3-panel column-density contact sheet — the dust-lane preview without a
+//!     raymarcher; no sim, no GPU.
 //!   * Set `GALAXY_MOVIE_QUICK=1` for a fast low-N, low-res preview (same physical
 //!     time and dt, so the trajectory is faithful — only particle count, frame size,
 //!     and frame cadence are reduced). Use it to sanity-check a scenario before a
@@ -117,6 +122,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // reference — no sim, no GPU, no movie pipeline.
     if args.first().map(String::as_str) == Some("sph-demo") {
         return sph_demo(&args[1..]);
+    }
+
+    // `gas-demo` is the M7d demo: voxelize a static synthetic gas disk, round-
+    // trip frame-data v2, and grade a column-density contact sheet — no sim.
+    if args.first().map(String::as_str) == Some("gas-demo") {
+        return gas_demo(&args[1..]);
     }
 
     let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
@@ -345,6 +356,245 @@ fn sph_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     Ok(())
+}
+
+/// The M7d demo (per the view-first amendment in docs/plans/deep-orbiting-
+/// sunbeam.md): voxelize a STATIC synthetic gas disk — no gas dynamics exists
+/// yet (M7b/M7c follow) — and show the dust-lane preview without a raymarcher:
+///
+///   1. Hand-roll an inclined sech²-thickness exponential gas disk
+///      (`Species::Gas`, progenitor 4) from a deterministic seed.
+///   2. `deposit_gas`: shared adaptive-h + kernel deposition onto the default
+///      grid, timed; report the grid-mass capture (the conservation gate at
+///      demo scale) and the chosen bounds.
+///   3. Round-trip frame-data v2 with the gas block through disk, bit-exact.
+///   4. Render the ρ-integral along each axis (column density) into a 3-panel
+///      contact sheet, EXR → PNG via the existing grade path.
+///
+/// Usage: `gas-demo [out_dir] [--n N] [--res R] [--seed S] [--incline DEG]`.
+fn gas_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use galaxy_renderprep::{deposit_gas, frame, GasGridConfig};
+    use std::time::Instant;
+
+    const USAGE: &str = "usage: gas-demo [out_dir] [--n N] [--res R] [--seed S] [--incline DEG]";
+    let mut out: Option<PathBuf> = None;
+    let mut n: usize = 40_000;
+    let mut res: u32 = 128;
+    let mut seed: u64 = 42;
+    let mut incline_deg: f64 = 60.0;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut num = |flag: &str| -> Result<String, String> {
+            it.next().cloned().ok_or(format!("{flag} needs a value"))
+        };
+        match a.as_str() {
+            "--n" => n = num("--n")?.parse().map_err(|_| "--n must be an integer")?,
+            "--res" => {
+                res = num("--res")?
+                    .parse()
+                    .map_err(|_| "--res must be an integer")?
+            }
+            "--seed" => {
+                seed = num("--seed")?
+                    .parse()
+                    .map_err(|_| "--seed must be an integer")?
+            }
+            "--incline" => {
+                incline_deg = num("--incline")?
+                    .parse()
+                    .map_err(|_| "--incline must be a number")?
+            }
+            other if out.is_none() => out = Some(PathBuf::from(other)),
+            other => return Err(format!("unexpected argument `{other}`\n{USAGE}").into()),
+        }
+    }
+    let out = out.unwrap_or_else(|| std::env::temp_dir().join("galaxy_gas_demo"));
+    std::fs::create_dir_all(&out)?;
+
+    // 1. Static synthetic gas: inclined exponential disk with sech² thickness.
+    let state = synthetic_gas_disk(n, seed, incline_deg.to_radians());
+    let m_gas: f64 = state.mass.iter().sum();
+    println!(
+        "synthetic gas disk: {n} particles, incline {incline_deg}°, seed {seed} (total mass {m_gas})"
+    );
+
+    // 2. Voxelize (the real per-snapshot cost run_movie will pay in M7e).
+    let cfg = GasGridConfig {
+        dims: [res; 3],
+        ..Default::default()
+    };
+    let t0 = Instant::now();
+    let grid = deposit_gas(&state, &cfg).expect("all particles are gas");
+    let t_dep = t0.elapsed();
+    let cell = grid.cell_size();
+    let vol = cell.x * cell.y * cell.z;
+    let total: f64 = grid.data.iter().map(|&d| d as f64 * vol).sum();
+    let peak = grid.data.iter().fold(0.0_f32, |a, &b| a.max(b));
+    println!(
+        "deposited {res}³ grid in {:.1} ms  (bounds {:.2}..{:.2}, cell {:.3})",
+        ms(t_dep),
+        grid.bounds_min.x,
+        grid.bounds_max.x,
+        cell.x,
+    );
+    println!(
+        "grid mass ∫ρ dV = {total:.4} of {m_gas} deposited ({:.2}% captured); peak ρ {peak:.3}",
+        100.0 * total / m_gas
+    );
+
+    // 3. Frame-data v2 round-trip on disk: the default prepare routes gas out
+    //    of the splat list (empty stars), the grid rides the gas block.
+    let prep_default = PrepConfig::default();
+    let stars = prepare(&state, &prep_default);
+    let header = galaxy_renderprep::FrameHeader::for_data(&stars, state.time);
+    let frame_path = out.join("gas_frame.bin");
+    frame::write_file(&frame_path, &header, &stars, Some(&grid))?;
+    let (_, back_stars, back_gas) = frame::read_file(&frame_path)?;
+    if back_stars != stars || back_gas.as_ref() != Some(&grid) {
+        return Err("frame-data v2 round-trip is not bit-exact".into());
+    }
+    println!(
+        "frame v2 round-trip OK: {} ({} splats + {res}³ gas block, {:.1} MB)",
+        frame_path.display(),
+        stars.len(),
+        std::fs::metadata(&frame_path)?.len() as f64 / (1024.0 * 1024.0),
+    );
+
+    // 4. Contact sheet of axis-aligned column densities (∫ρ ds per pixel).
+    let img = column_density_sheet(&grid);
+    let exr = out.join("gas_slices.exr");
+    let png = out.join("gas_slices.png");
+    write_exr(&exr, &img)?;
+    grade_file(
+        &exr,
+        &png,
+        &GradeConfig {
+            exposure: 1.0,
+            tonemap: ToneMap::AcesApprox,
+            bloom: None,
+        },
+    )?;
+    println!("contact sheet (∫ρ dz | ∫ρ dy | ∫ρ dx) → {}", png.display());
+    Ok(())
+}
+
+/// An inclined exponential gas disk with sech² vertical structure — STATIC
+/// synthetic positions only (no dynamics: M7b/M7c land the physics). Radii by
+/// inverse-CDF bisection of Σ ∝ e^(−R/Rd) truncated at 5 Rd; z by the exact
+/// sech² inverse CDF z = z₀·atanh(2u−1); then the whole disk is rotated about
+/// x so the projections show the dust-lane geometry. Deterministic in `seed`
+/// (splitmix64, one stream).
+fn synthetic_gas_disk(n: usize, seed: u64, incline: f64) -> State {
+    let mut s = seed;
+    let mut rand = move || -> f64 {
+        s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z = z ^ (z >> 31);
+        (z >> 11) as f64 / (1u64 << 53) as f64
+    };
+
+    let rd = 1.0;
+    let rmax = 5.0 * rd;
+    let z0 = 0.12 * rd;
+    // Exponential-disk enclosed-mass CDF, normalized to the truncation radius.
+    let cdf = |x: f64| 1.0 - (1.0 + x) * (-x).exp();
+    let norm = cdf(rmax / rd);
+    let (sin_i, cos_i) = incline.sin_cos();
+
+    let mut pos = Vec::with_capacity(n);
+    for _ in 0..n {
+        // Invert the radial CDF by bisection (monotone, deterministic).
+        let target = rand() * norm;
+        let (mut lo, mut hi) = (0.0, rmax / rd);
+        while hi - lo > 1e-12 * (rmax / rd) {
+            let mid = 0.5 * (lo + hi);
+            if cdf(mid) < target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let r = 0.5 * (lo + hi) * rd;
+        let phi = rand() * std::f64::consts::TAU;
+        let u = rand().clamp(1e-9, 1.0 - 1e-9);
+        let z = z0 * (2.0 * u - 1.0).atanh();
+        let (x, y) = (r * phi.cos(), r * phi.sin());
+        // Incline about the x axis.
+        pos.push(galaxy_core::DVec3::new(
+            x,
+            y * cos_i - z * sin_i,
+            y * sin_i + z * cos_i,
+        ));
+    }
+
+    State {
+        vel: vec![galaxy_core::DVec3::ZERO; n],
+        mass: vec![1.0 / n as f64; n],
+        id: (0..n as u64).map(galaxy_core::ParticleId).collect(),
+        progenitor: vec![galaxy_core::Progenitor(4); n], // gas1 tag (plan D1)
+        kind: vec![galaxy_core::Species::Gas; n],
+        time: 0.0,
+        a: 1.0,
+        pos,
+    }
+}
+
+/// Integrate the grid along each axis into three column-density panels
+/// (z | y | x views), normalized to a shared robust peak so the panels are
+/// comparable, side by side in one linear HDR image (rows flipped so +vertical
+/// is up, the render convention).
+fn column_density_sheet(grid: &galaxy_renderprep::GasGrid) -> galaxy_render::HdrImage {
+    let [nx, ny, nz] = grid.dims;
+    let cell = grid.cell_size();
+    let res = nx.max(ny).max(nz) as usize; // panels are dims-sized; cubic in practice
+    let gap = 8usize;
+    let width = 3 * res + 2 * gap;
+    let mut panels = vec![vec![0.0f64; res * res]; 3];
+
+    for iz in 0..nz {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let rho = grid.data[grid.index(ix, iy, iz)] as f64;
+                // ∫ρ dz → (x, y); ∫ρ dy → (x, z); ∫ρ dx → (y, z).
+                panels[0][(iy as usize) * res + ix as usize] += rho * cell.z;
+                panels[1][(iz as usize) * res + ix as usize] += rho * cell.y;
+                panels[2][(iz as usize) * res + iy as usize] += rho * cell.x;
+            }
+        }
+    }
+
+    // Shared normalization: the 99.5th percentile of nonzero column densities,
+    // so a lone peak cannot crush the lanes to black.
+    let mut all: Vec<f64> = panels
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|&v| v > 0.0)
+        .collect();
+    all.sort_by(|a, b| a.total_cmp(b));
+    let scale = if all.is_empty() {
+        1.0
+    } else {
+        1.0 / all[(all.len() - 1) * 995 / 1000].max(f64::MIN_POSITIVE)
+    };
+
+    let mut pixels = vec![[0.0f32, 0.0, 0.0, 1.0]; width * res];
+    for (p, panel) in panels.iter().enumerate() {
+        let x_off = p * (res + gap);
+        for row in 0..res {
+            for col in 0..res {
+                let v = (panel[(res - 1 - row) * res + col] * scale) as f32;
+                pixels[row * width + x_off + col] = [v, v, v, 1.0];
+            }
+        }
+    }
+    galaxy_render::HdrImage {
+        width: width as u32,
+        height: res as u32,
+        pixels,
+    }
 }
 
 fn ms(d: std::time::Duration) -> f64 {

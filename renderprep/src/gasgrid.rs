@@ -13,9 +13,11 @@
 //! source of truth for all smoothing math. Smoothing lengths are DERIVED per
 //! snapshot via the shared adaptive-h routine (plan D2: `h` is never stored).
 //!
-//! Determinism: cells GATHER from a hash grid over the particles (neighbor lists
-//! ascending, one independent sum per cell), so the result is bit-identical
-//! serial vs parallel — the same discipline as `density_adaptive`.
+//! Determinism: deposition scatters by z-plane — each plane walks the particles
+//! in ascending index and adds each kernel over the cell box its support covers,
+//! so every cell's sum associates in ascending particle order and planes are
+//! disjoint units of parallel work. The result is bit-identical serial vs
+//! parallel — the same discipline as `density_adaptive`.
 //!
 //! The grid carries ρ only: emission/absorption/color are renderer uniforms, so
 //! the look iterates at re-render cost, not re-prep (plan D8).
@@ -24,7 +26,7 @@ use galaxy_core::{DVec3, Species, State};
 use glam::Vec3;
 use rayon::prelude::*;
 
-use galaxy_solvers::sph::{density_adaptive, w, DensityConfig, HashGrid, SUPPORT};
+use galaxy_solvers::sph::{density_adaptive, w, DensityConfig, SUPPORT};
 
 /// A single-channel gas density voxel grid.
 ///
@@ -159,8 +161,8 @@ impl Default for GasGridConfig {
 
 /// Deposit gas density with CALLER-SUPPLIED smoothing lengths onto the given
 /// grid geometry (the fixed-h primitive the unit gates pin; [`deposit_gas`] is
-/// the adaptive-h state-level wrapper). Parallel over cells; bit-identical to
-/// [`deposit_fixed_serial`] (gated).
+/// the adaptive-h state-level wrapper). Parallel over z-planes; bit-identical
+/// to [`deposit_fixed_serial`] (gated).
 ///
 /// Panics on malformed inputs (zero dims, non-positive bounds extent,
 /// non-finite/non-positive `h`, mismatched lengths) — caller contract, not a
@@ -222,36 +224,69 @@ fn deposit_impl(
         return grid;
     }
 
-    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
     assert!(
-        h_max.is_finite() && h_max > 0.0 && h.iter().all(|&x| x.is_finite() && x > 0.0),
+        h.iter().all(|&x| x.is_finite() && x > 0.0),
         "deposition needs positive finite smoothing lengths"
     );
-    let r_gather = SUPPORT * h_max;
-    let bins = HashGrid::build(pos, r_gather);
 
+    // Scatter-by-plane: each z-plane walks the particles in ASCENDING index and
+    // adds every particle's kernel over the cell box its support covers. Per
+    // cell that is the same ascending-index association order as a gather —
+    // terms a global gather would also visit but that lie outside this
+    // particle's own support are exact `+0.0`s and cannot change the partial
+    // sums — while doing only O(support volume) kernel work per particle
+    // instead of O(2·h_max-ball candidates) per cell (adaptive h makes h_max a
+    // far-outskirts value, which turned the naive gather quadratic in dense
+    // regions). Planes are disjoint, so rayon over planes is race-free and
+    // bit-identical to the serial loop.
+    let cell = grid.cell_size();
+    let bmin = bounds_min.as_dvec3();
     let (dx, dy) = (dims[0] as usize, dims[1] as usize);
-    // One independent kernel sum per cell, neighbors gathered in ascending
-    // index (HashGrid contract): fixed association order ⇒ parallel ≡ serial
-    // bit-exact. Out-of-support neighbors of smaller-h particles contribute an
-    // exact +0.0, so gathering at the global 2·h_max radius changes nothing.
-    let cell_rho = |flat: usize| -> f32 {
-        let ix = (flat % dx) as u32;
-        let iy = ((flat / dx) % dy) as u32;
-        let iz = (flat / (dx * dy)) as u32;
-        let center = grid.cell_center(ix, iy, iz);
-        let mut rho = 0.0_f64;
-        for j in bins.neighbours_within(pos, center, r_gather) {
-            rho += mass[j] * w((center - pos[j]).length(), h[j]);
-        }
-        rho as f32
+
+    // Inclusive index range of cell centers within `±r` of `x` on one axis,
+    // padded by one cell against fp boundary rounding (an extra cell is a
+    // kernel evaluation at q ≥ 2 → exact 0.0). `None` when the support misses
+    // the axis entirely.
+    let axis_range = |x: f64, r: f64, min: f64, step: f64, n: u32| -> Option<(u32, u32)> {
+        let lo = (((x - r - min) / step - 0.5).ceil() as i64 - 1).max(0);
+        let hi = (((x + r - min) / step - 0.5).floor() as i64 + 1).min(n as i64 - 1);
+        (lo <= hi).then_some((lo as u32, hi as u32))
     };
 
-    let data: Vec<f32> = if parallel {
-        (0..n_cells).into_par_iter().map(cell_rho).collect()
-    } else {
-        (0..n_cells).map(cell_rho).collect()
+    let plane = |iz: u32| -> Vec<f64> {
+        let mut acc = vec![0.0_f64; dx * dy];
+        let cz = bmin.z + (iz as f64 + 0.5) * cell.z;
+        for j in 0..pos.len() {
+            let r = SUPPORT * h[j];
+            if (cz - pos[j].z).abs() > r + cell.z {
+                continue; // whole plane outside this particle's support (+pad)
+            }
+            let Some((x_lo, x_hi)) = axis_range(pos[j].x, r, bmin.x, cell.x, dims[0]) else {
+                continue;
+            };
+            let Some((y_lo, y_hi)) = axis_range(pos[j].y, r, bmin.y, cell.y, dims[1]) else {
+                continue;
+            };
+            for iy in y_lo..=y_hi {
+                let cy = bmin.y + (iy as f64 + 0.5) * cell.y;
+                let row = iy as usize * dx;
+                for ix in x_lo..=x_hi {
+                    let cx = bmin.x + (ix as f64 + 0.5) * cell.x;
+                    let d = DVec3::new(cx, cy, cz) - pos[j];
+                    acc[row + ix as usize] += mass[j] * w(d.length(), h[j]);
+                }
+            }
+        }
+        acc
     };
+
+    let planes: Vec<Vec<f64>> = if parallel {
+        (0..dims[2]).into_par_iter().map(plane).collect()
+    } else {
+        (0..dims[2]).map(plane).collect()
+    };
+    let mut data = Vec::with_capacity(n_cells);
+    data.extend(planes.iter().flatten().map(|&v| v as f32));
     grid.data = data;
     grid
 }

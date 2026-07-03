@@ -47,8 +47,33 @@ pub struct HermiteSpan<'a> {
 impl<'a> HermiteSpan<'a> {
     /// Validate `(s0, s1)` as an interpolation span. See [`InterpError`].
     pub fn new(s0: &'a State, s1: &'a State) -> Result<Self, InterpError> {
-        let _ = (s0, s1);
-        todo!("M6c red phase")
+        if s0.len() != s1.len() {
+            return Err(InterpError::LengthMismatch {
+                n0: s0.len(),
+                n1: s1.len(),
+            });
+        }
+        // Order stability is *expected* from the in-place integrator, but a silent
+        // mismatch would pair unrelated particles — check every id, fail with the
+        // first offender.
+        for (index, (a, b)) in s0.id.iter().zip(&s1.id).enumerate() {
+            if a != b {
+                return Err(InterpError::IdMismatch {
+                    index,
+                    id0: a.0,
+                    id1: b.0,
+                });
+            }
+        }
+        let dt = s1.time - s0.time;
+        // `is_finite` also rejects NaN times, which `dt <= 0.0` alone would let through.
+        if !dt.is_finite() || dt <= 0.0 {
+            return Err(InterpError::NonIncreasingTime {
+                t0: s0.time,
+                t1: s1.time,
+            });
+        }
+        Ok(HermiteSpan { s0, s1, dt })
     }
 
     /// The span's time extent `s1.time - s0.time` (strictly positive).
@@ -60,8 +85,34 @@ impl<'a> HermiteSpan<'a> {
     /// both reproduced bit-exact). Velocities are the cubic's analytic
     /// derivative — C¹ at the joins, and the later Doppler-coloring input.
     pub fn sample(&self, u: f64) -> (Vec<DVec3>, Vec<DVec3>) {
-        let _ = u;
-        todo!("M6c red phase")
+        // Hermite basis on [0,1]. These forms hit the endpoint values EXACTLY
+        // (h00(0)=1, h01(1)=1, g10(0)=1, g11(1)=1, all others 0), which is what
+        // makes u=0/u=1 reproduce the snapshots bit-for-bit: the sums degenerate
+        // to `x·1 + 0 + 0 + 0`.
+        let u2 = u * u;
+        let u3 = u2 * u;
+        let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+        let h10 = u3 - 2.0 * u2 + u;
+        let h01 = 3.0 * u2 - 2.0 * u3;
+        let h11 = u3 - u2;
+        // Basis derivatives d/du; velocity picks up the 1/Δt chain-rule factor on
+        // the POSITION terms only (the v0/v1 terms carry Δt·(1/Δt) = 1, kept
+        // unscaled so endpoint velocities come back bit-exact, not v·Δt/Δt).
+        let g00 = 6.0 * u2 - 6.0 * u;
+        let g10 = 3.0 * u2 - 4.0 * u + 1.0;
+        let g01 = 6.0 * u - 6.0 * u2;
+        let g11 = 3.0 * u2 - 2.0 * u;
+
+        let n = self.s0.len();
+        let mut pos = Vec::with_capacity(n);
+        let mut vel = Vec::with_capacity(n);
+        for i in 0..n {
+            let (p0, p1) = (self.s0.pos[i], self.s1.pos[i]);
+            let (v0, v1) = (self.s0.vel[i], self.s1.vel[i]);
+            pos.push(p0 * h00 + p1 * h01 + (v0 * h10 + v1 * h11) * self.dt);
+            vel.push((p0 * g00 + p1 * g01) / self.dt + v0 * g10 + v1 * g11);
+        }
+        (pos, vel)
     }
 }
 
@@ -74,6 +125,43 @@ impl<'a> HermiteSpan<'a> {
 /// caller contract violation (the frames must be `prepare`d from the span's own
 /// endpoint snapshots), not a data condition.
 pub fn subframe(span: &HermiteSpan, f0: &FrameData, f1: &FrameData, u: f64) -> FrameData {
-    let _ = (span, f0, f1, u, Vec3::ZERO);
-    todo!("M6c red phase")
+    let n = span.s0.len();
+    assert_eq!(f0.len(), n, "f0 is not a prepared frame of the span's s0");
+    assert_eq!(f1.len(), n, "f1 is not a prepared frame of the span's s1");
+
+    let (hpos, _) = span.sample(u);
+    let pos: Vec<Vec3> = hpos.iter().map(|p| p.as_vec3()).collect();
+
+    // Two-product lerp (1-w)·a + w·b, NOT a + w·(b-a): the former is bit-exact at
+    // BOTH endpoints (w=0 ⇒ 1·a + 0·b, w=1 ⇒ 0·a + 1·b), which is what lets
+    // u=0/u=1 reproduce the prepared frames exactly.
+    let w1 = u as f32;
+    let w0 = 1.0 - w1;
+    let lerp = |a: f32, b: f32| w0 * a + w1 * b;
+
+    let color = f0
+        .color
+        .iter()
+        .zip(&f1.color)
+        .map(|(c0, c1)| [lerp(c0[0], c1[0]), lerp(c0[1], c1[1]), lerp(c0[2], c1[2])])
+        .collect();
+    let brightness = f0
+        .brightness
+        .iter()
+        .zip(&f1.brightness)
+        .map(|(&a, &b)| lerp(a, b))
+        .collect();
+    let size = f0
+        .size
+        .iter()
+        .zip(&f1.size)
+        .map(|(&a, &b)| lerp(a, b))
+        .collect();
+
+    FrameData {
+        pos,
+        color,
+        brightness,
+        size,
+    }
 }

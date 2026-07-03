@@ -213,9 +213,8 @@ fn kepler_eccentric_orbit_oracle() {
         let u = i as f64 / 16.0;
         let t = t0 + u * dt;
         let (p, _) = span.sample(u);
-        for c in 0..3 {
-            close(p[0][c], pos_at(t)[c], tol, "Kepler eccentric position");
-        }
+        let err = (p[0] - pos_at(t)).abs().max_element();
+        assert!(err <= tol, "Kepler eccentric position: err {err} > tol {tol}");
     }
 }
 

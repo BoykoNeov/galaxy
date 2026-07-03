@@ -114,6 +114,13 @@ const TONEMAP: ToneMap = ToneMap::AcesApprox;
 // tails and halo dots stay resolved. Levels/radius are the documented CLI defaults.
 const BLOOM_STRENGTH: f32 = 0.45;
 const FPS: u32 = 60;
+// M7e volumetric gas look — PLACEHOLDERS until `[look.gas]` lands in M7f.
+// Values from the volume-demo A/B pass on the static synthetic disk (κ = 14
+// carves an opaque lane there; real merger gas re-tunes in M7f). Inert for
+// every gas-free scenario (deposit_gas returns None → the star-only path).
+const GAS_COLOR: [f32; 3] = [0.55, 0.62, 0.95];
+const GAS_EMISSIVITY: f32 = 0.4;
+const GAS_KAPPA: f32 = 14.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1003,6 +1010,36 @@ fn run_movie(
     let frames: Vec<_> = states.iter().map(|st| prepare(st, &prep)).collect();
     println!("prepared {} endpoint frames", frames.len());
 
+    // 2b. Gas voxelization (M7e, plan D8): one density grid per SNAPSHOT
+    //     endpoint — `None` for gas-free states, i.e. every pre-M7c scenario,
+    //     which keeps this a no-op today. Subframes bind BOTH endpoint grids
+    //     and mix in-shader (the M6c endpoint argument; nothing gas-related is
+    //     lerped on the CPU). Look values are placeholders until `[look.gas]`
+    //     lands in M7f.
+    let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
+    let gas_cfg = galaxy_renderprep::GasGridConfig {
+        dims: [if quick { 64 } else { 128 }; 3],
+        ..Default::default()
+    };
+    let t_gas = std::time::Instant::now();
+    let gas_grids: Vec<Option<galaxy_renderprep::GasGrid>> = states
+        .iter()
+        .map(|st| galaxy_renderprep::deposit_gas(st, &gas_cfg))
+        .collect();
+    let gas_look = galaxy_render::GasLook {
+        color: GAS_COLOR,
+        emissivity: GAS_EMISSIVITY,
+        opacity: GAS_KAPPA,
+    };
+    if gas_grids.iter().any(Option::is_some) {
+        println!(
+            "voxelized gas ({}³) for {} snapshots in {:.1} s",
+            gas_cfg.dims[0],
+            gas_grids.len(),
+            t_gas.elapsed().as_secs_f64()
+        );
+    }
+
     // 3. The camera path (M6d). Static: one face-on framing over the whole run
     //    (centered on the zero-COM barycenter, sized to a robust percentile radius
     //    so a few escapers don't shrink the galaxies to dots) — bit-exact with the
@@ -1100,11 +1137,14 @@ fn run_movie(
         0 | 1 => states.len(),
         n => (n - 1) * s.subframes as usize + 1,
     };
-    let emit = |i: usize, frame: &FrameData| -> Result<(), Box<dyn std::error::Error>> {
+    let emit = |i: usize,
+                frame: &FrameData,
+                gas: Option<galaxy_render::GasFrame>|
+     -> Result<(), Box<dyn std::error::Error>> {
         // The movie's unit timeline: frame i of `total` (a single-frame movie
         // sits at u = 0, the path start).
         let u = i as f32 / total.saturating_sub(1).max(1) as f32;
-        let img = renderer.render_frame(frame, &path.camera_at(u), &rcfg)?;
+        let img = renderer.render_frame_with_gas(frame, gas.as_ref(), &path.camera_at(u), &rcfg)?;
         if i == total / 2 {
             let flux = img.total_flux();
             let peak = img
@@ -1127,12 +1167,31 @@ fn run_movie(
         let span = HermiteSpan::new(&states[w], &states[w + 1])?;
         for j in 0..s.subframes {
             let u = f64::from(j) / f64::from(s.subframes);
-            emit(i, &subframe(&span, &frames[w], &frames[w + 1], u))?;
+            // Gas rides as the two endpoint grids + the subframe mix u.
+            let gas = match (&gas_grids[w], &gas_grids[w + 1]) {
+                (Some(g0), Some(g1)) => Some(galaxy_render::GasFrame {
+                    grid0: g0,
+                    grid1: g1,
+                    mix: u as f32,
+                    look: gas_look,
+                }),
+                _ => None,
+            };
+            emit(i, &subframe(&span, &frames[w], &frames[w + 1], u), gas)?;
             i += 1;
         }
     }
     if let Some(last) = frames.last() {
-        emit(i, last)?;
+        let gas = gas_grids
+            .last()
+            .and_then(Option::as_ref)
+            .map(|g| galaxy_render::GasFrame {
+                grid0: g,
+                grid1: g,
+                mix: 0.0,
+                look: gas_look,
+            });
+        emit(i, last, gas)?;
         i += 1;
     }
     println!("rendered + graded {i} frames → {}", frame_dir.display());

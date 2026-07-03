@@ -90,10 +90,10 @@ fn grad_w_matches_central_differences() {
     let norm = 1.0 / (PI * h * h * h);
     let delta = 1e-6 * h;
     let probes = [
-        DVec3::new(0.3, -0.2, 0.1) * h,  // q ≈ 0.37
-        DVec3::new(0.9, 0.4, -0.3) * h,  // q ≈ 1.03
-        DVec3::new(-1.2, 0.8, 0.6) * h,  // q ≈ 1.56
-        DVec3::new(2.0, 1.0, -1.5) * h,  // q ≈ 2.7 → exactly zero
+        DVec3::new(0.3, -0.2, 0.1) * h, // q ≈ 0.37
+        DVec3::new(0.9, 0.4, -0.3) * h, // q ≈ 1.03
+        DVec3::new(-1.2, 0.8, 0.6) * h, // q ≈ 1.56
+        DVec3::new(2.0, 1.0, -1.5) * h, // q ≈ 2.7 → exactly zero
     ];
     for r_ij in probes {
         let analytic = grad_w(r_ij, h);

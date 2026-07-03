@@ -6,8 +6,8 @@
 
 use galaxy_core::DVec3;
 use galaxy_solvers::sph::{
-    density_adaptive, density_adaptive_serial, density_fixed, reference_density, w,
-    DensityConfig, SUPPORT,
+    density_adaptive, density_adaptive_serial, density_fixed, reference_density, w, DensityConfig,
+    SUPPORT,
 };
 
 const PI: f64 = std::f64::consts::PI;
@@ -81,7 +81,10 @@ fn uniform_lattice_recovers_analytic_density() {
             checked += 1;
         }
     }
-    assert!(checked > 0, "lattice too small: no interior particles checked");
+    assert!(
+        checked > 0,
+        "lattice too small: no interior particles checked"
+    );
 }
 
 #[test]
@@ -100,7 +103,8 @@ fn adaptive_h_recovers_the_target_neighbor_count() {
         let n = weighted_count(&pos, i, result.h[i]);
         assert!(
             (n - cfg.n_ngb).abs() <= 1.0,
-            "particle {i}: N(h) = {n}, want {} ± 1", cfg.n_ngb
+            "particle {i}: N(h) = {n}, want {} ± 1",
+            cfg.n_ngb
         );
         assert!(result.rho[i] > 0.0 && result.rho[i].is_finite());
     }
@@ -119,8 +123,8 @@ fn adaptive_density_obeys_the_scaling_law() {
     let base = density_adaptive(&pos, &mass, &cfg, None);
     let big = density_adaptive(&scaled, &mass, &cfg, None);
     for i in (0..pos.len()).step_by(53) {
-        let rho_rel = (big.rho[i] - base.rho[i] / lambda.powi(3)).abs()
-            / (base.rho[i] / lambda.powi(3));
+        let rho_rel =
+            (big.rho[i] - base.rho[i] / lambda.powi(3)).abs() / (base.rho[i] / lambda.powi(3));
         let h_rel = (big.h[i] - lambda * base.h[i]).abs() / (lambda * base.h[i]);
         assert!(rho_rel < 1e-2, "ρ scaling broken at {i}: rel {rho_rel}");
         assert!(h_rel < 5e-3, "h scaling broken at {i}: rel {h_rel}");
@@ -157,7 +161,10 @@ fn warm_start_cannot_move_the_converged_h() {
         let h_rel = (warm.h[i] - cold.h[i]).abs() / cold.h[i];
         assert!(h_rel <= 2.0 * cfg.h_tol_rel, "h moved by {h_rel} at {i}");
         let rho_rel = (warm.rho[i] - cold.rho[i]).abs() / cold.rho[i];
-        assert!(rho_rel <= 8.0 * cfg.h_tol_rel, "ρ moved by {rho_rel} at {i}");
+        assert!(
+            rho_rel <= 8.0 * cfg.h_tol_rel,
+            "ρ moved by {rho_rel} at {i}"
+        );
     }
 }
 

@@ -35,11 +35,7 @@ fn sample_state() -> State {
         mass,
         id: vec![ParticleId(10), ParticleId(20), ParticleId(30)],
         progenitor: vec![Progenitor(0), Progenitor(1), Progenitor(0)],
-        kind: vec![
-            Species::Collisionless,
-            Species::Gas,
-            Species::Collisionless,
-        ],
+        kind: vec![Species::Collisionless, Species::Gas, Species::Collisionless],
         time: 12.5,
         a: 1.0,
     }

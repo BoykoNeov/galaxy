@@ -1,7 +1,7 @@
 //! The Rust-native snapshot format: a versioned header followed by per-particle
 //! Structure-of-Arrays columns, all little-endian.
 //!
-//! On-disk layout (version 1):
+//! On-disk layout (version 2):
 //! ```text
 //!   magic   : 8 bytes  = b"GLXYSNAP"
 //!   version : u32       = FORMAT_VERSION
@@ -9,11 +9,16 @@
 //!             n_particles u64, rng_seed u64, config_hash u64,
 //!             units String, code_version String         (Strings: u32 len + UTF-8)
 //!   columns : pos[n] (3×f64), vel[n] (3×f64), mass[n] (f32),
-//!             id[n] (u64), progenitor[n] (u16)
+//!             id[n] (u64), progenitor[n] (u16), kind[n] (u8)
 //! ```
 //! Columns are stored SoA (all of one field, then the next) so a consumer can
 //! read only the fields it needs. `n_particles` is authoritative on write — it is
 //! always taken from the `State`, never from a caller-supplied header field.
+//!
+//! Version history: v2 (M7a) appended the `kind` species column. The reader
+//! accepts v1 streams (the retained pre-gas scenario zoo) and defaults every v1
+//! particle to `Species::Collisionless` — v1 predates gas. The writer always
+//! emits the current version.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -26,8 +31,12 @@ const MAX_STR_LEN: usize = 1 << 16;
 
 /// Magic bytes identifying a galaxy snapshot stream.
 pub const MAGIC: [u8; 8] = *b"GLXYSNAP";
-/// On-disk format version. Bumped when the layout changes incompatibly.
-pub const FORMAT_VERSION: u32 = 1;
+/// On-disk format version written by this build. Bumped when the layout
+/// changes; older versions remain readable back to v1 (see the module docs).
+pub const FORMAT_VERSION: u32 = 2;
+
+/// Oldest on-disk format version this build can still read.
+pub const MIN_READ_VERSION: u32 = 1;
 
 /// Errors from reading or writing a snapshot.
 #[derive(thiserror::Error, Debug)]
@@ -40,7 +49,7 @@ pub enum SnapshotError {
     #[error("not a galaxy snapshot (bad magic)")]
     BadMagic,
     /// The format version on disk is not one this build can read.
-    #[error("unsupported snapshot format version {found} (this build reads {expected})")]
+    #[error("unsupported snapshot format version {found} (this build reads up to {expected})")]
     UnsupportedVersion { found: u32, expected: u32 },
     /// The stream is structurally invalid (e.g. an impossible length).
     #[error("corrupt snapshot: {0}")]
@@ -114,6 +123,7 @@ pub fn to_writer<W: Write>(
         || state.mass.len() != n
         || state.id.len() != n
         || state.progenitor.len() != n
+        || state.kind.len() != n
     {
         return Err(SnapshotError::Corrupt(
             "State SoA columns have mismatched lengths".to_string(),
@@ -149,6 +159,9 @@ pub fn to_writer<W: Write>(
     for pr in &state.progenitor {
         write_u16(writer, pr.0)?;
     }
+    for k in &state.kind {
+        write_u8(writer, *k as u8)?;
+    }
     Ok(())
 }
 
@@ -161,7 +174,7 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         return Err(SnapshotError::BadMagic);
     }
     let version = read_u32(reader)?;
-    if version != FORMAT_VERSION {
+    if !(MIN_READ_VERSION..=FORMAT_VERSION).contains(&version) {
         return Err(SnapshotError::UnsupportedVersion {
             found: version,
             expected: FORMAT_VERSION,
@@ -204,6 +217,25 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
     for _ in 0..n {
         progenitor.push(Progenitor(read_u16(reader)?));
     }
+    // The species column arrived in v2; v1 predates gas, so every v1 particle
+    // is collisionless by construction.
+    let kind = if version >= 2 {
+        let mut kind = Vec::with_capacity(cap);
+        for _ in 0..n {
+            kind.push(match read_u8(reader)? {
+                0 => Species::Collisionless,
+                1 => Species::Gas,
+                other => {
+                    return Err(SnapshotError::Corrupt(format!(
+                        "unknown species byte {other:#04x}"
+                    )))
+                }
+            });
+        }
+        kind
+    } else {
+        vec![Species::Collisionless; n]
+    };
 
     let header = Header {
         time,
@@ -222,7 +254,7 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         mass,
         id,
         progenitor,
-        kind: vec![Species::Collisionless; n],
+        kind,
         time,
         a: scale_factor,
     };
@@ -249,6 +281,9 @@ pub fn read_file<P: AsRef<Path>>(path: P) -> Result<(Header, State), SnapshotErr
 
 // ---------- little-endian primitive (de)serialization ----------
 
+fn write_u8<W: Write>(w: &mut W, v: u8) -> io::Result<()> {
+    w.write_all(&[v])
+}
 fn write_u16<W: Write>(w: &mut W, v: u16) -> io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
@@ -285,6 +320,9 @@ fn read_array<R: Read, const N: usize>(r: &mut R) -> io::Result<[u8; N]> {
     let mut buf = [0u8; N];
     r.read_exact(&mut buf)?;
     Ok(buf)
+}
+fn read_u8<R: Read>(r: &mut R) -> io::Result<u8> {
+    Ok(read_array::<R, 1>(r)?[0])
 }
 fn read_u16<R: Read>(r: &mut R) -> io::Result<u16> {
     Ok(u16::from_le_bytes(read_array(r)?))

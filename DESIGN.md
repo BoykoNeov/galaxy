@@ -1408,6 +1408,68 @@ late-time positions — N-body is chaotic).
   Toomre encounter zoo (M6f) → perspective/vertex-path render, the 10⁸ swap +
   dolly rig (M6g) — all landed above. Session-by-session plan with gates and
   decisions: `docs/plans/cinematic-toomre-bloom.md`.
+- **M7 (in progress) — "the breathing": isothermal SPH gas + volumetric
+  dust-lane render series.** v1 physics is isothermal SPH (fixed c_s, no
+  energy equation); render is raymarched emission+absorption with **full star
+  attenuation** (per-star exp(−τ) to the camera — dust lanes over the cores).
+  Session plan with the argued design decisions (D1–D10):
+  `docs/plans/deep-orbiting-sunbeam.md`. CPU + rayon at 10⁴–2·10⁵ gas
+  particles; GPU SPH stays a named follow-up.
+- **Gas plumbing + SPH kernel/neighbors/density (landed, M7a).** The
+  foundations everything else in M7 stands on.
+  - **`Species` column (D1):** `State` gains ONE column,
+    `kind: Vec<Species>` (`#[repr(u8)] Collisionless | Gas`). `progenitor`
+    stays a pure identity tag (gas will take new tags 4/5 in `DiskCollision`);
+    physics/render routing keys on `kind`, never on progenitor. The default is
+    `Collisionless` everywhere (`from_phase_space`, every IC, the snapshot
+    reader for v1 streams) — chosen over a NaN-style sentinel because `State`
+    derives `PartialEq` and the M6f build-vs-IC equality gates would silently
+    never match again with NaN anywhere in the struct.
+  - **Snapshot v2 (D3):** one appended `kind[n] (u8)` column;
+    `FORMAT_VERSION = 2` with `MIN_READ_VERSION = 1` — the reader accepts
+    {1, 2}, defaulting v1 particles to `Collisionless` (v1 predates gas, and
+    the retained scenario-zoo snapshots stay re-preppable), the writer always
+    emits v2. Unknown species bytes are `Corrupt`, not a transmute; the v1
+    layout is pinned by an independent byte-level fixture writer in the tests.
+  - **Smoothing length h is DERIVED, never stored (D2).** `ForceSolver` takes
+    `&State`, so a stored h column could never be kept fresh — it would go
+    stale after step 1 and renderprep would deposit with wrong h. Instead h is
+    a deterministic function of positions: bisection to a fixed relative
+    tolerance (1e-3) on the **kernel-weighted neighbor count**
+    N(h) = (4π/3)(2h)³·Σ_j W(|x_ij|, h), which is monotone nondecreasing in h,
+    rises from the self-term floor 32/3 (h→0) to the plateau (32/3)·n (whole
+    cloud inside support) — so a root exists iff n ≳ 4.5 at the default target
+    N_ngb = 48 (kept < ~57, the cubic-spline pairing-instability guard).
+    Rootless solves (under-populated, coincident knots) clamp
+    deterministically: finite h, finite positive ρ, never a panic. A
+    warm-start only seeds the bisection bracket and cannot move the converged
+    value beyond the tolerance (gated cold ≡ warm).
+  - **SPH toolkit in `solvers::sph` (D5):** M4 cubic-spline kernel (compact
+    support 2h, 1/(πh³) normalization, analytic gradient); **sparse hash-grid**
+    neighbor search — HashMap-keyed cells, NOT a dense array (a far outlier at
+    small cell size is a 10¹⁰-cell box), queries return ascending indices so
+    consumers sum in a fixed order (parallel ≡ serial bit-exact); O(N²)
+    `reference_neighbours`/`reference_density` oracles per the `reference_*`
+    house pattern. renderprep will consume this same module for deposition
+    (M7d) — single source of truth for all smoothing math.
+  - **Bit-exactness trick:** the fast density path skips out-of-support
+    particles the oracle includes; those terms are an exact `+0.0` and rho
+    stays ≥ +0.0, so both sums associate identically — the gate is exact f64
+    equality, not a tolerance.
+  - Gates: kernel normalization by piecewise-aligned Simpson (1e-9, error
+    O(n⁻⁴) argued), hand value W(0) = 1/(πh³), support, gradient vs central
+    differences (O(δ²) argued), h/λ³ scaling; grid ≡ oracle bit-exact on
+    lattice/random/clustered/wall-straddler/coincident clouds + a proptest
+    sweep; fixed-h density bit-exact vs oracle; uniform-lattice ρ = m/s³ to 2%
+    (lattice quadrature at h = 1.25 s, wrong normalization misses by ≥ 25%);
+    adaptive-h recovers N_ngb ± 1 (bisection tol maps to ~0.07); scaling law;
+    determinism + parallel ≡ serial bit-exact; warm-start invariance;
+    under-populated clamp; snapshot v1 fixture/v2 round-trip/garbage rejection.
+  - Demo: deferred to the next session (density-coloring side-by-side on a
+    retained cuspy snapshot + O(N) timing vs the O(N²) kNN path).
+  - [next: SPH forces (pressure + Monaghan viscosity), `GravitySph` composite,
+    CFL sentinel, isothermal shock tube vs the analytic Riemann solution
+    (M7b).]
 
 ## Validation strategy
 

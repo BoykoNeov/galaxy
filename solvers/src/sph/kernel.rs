@@ -13,19 +13,41 @@
 
 use galaxy_core::DVec3;
 
+const PI: f64 = std::f64::consts::PI;
+
 /// Kernel support radius in units of `h`: `W(r, h) = 0` for `r ≥ SUPPORT * h`.
 pub const SUPPORT: f64 = 2.0;
 
 /// Kernel value `W(r, h)` (r ≥ 0, h > 0).
 pub fn w(r: f64, h: f64) -> f64 {
-    let _ = (r, h);
-    todo!("M7a: cubic-spline kernel value")
+    let q = r / h;
+    let norm = 1.0 / (PI * h * h * h);
+    if q < 1.0 {
+        norm * (1.0 - 1.5 * q * q + 0.75 * q * q * q)
+    } else if q < 2.0 {
+        let t = 2.0 - q;
+        norm * 0.25 * t * t * t
+    } else {
+        0.0
+    }
 }
 
 /// Kernel gradient `∇_i W(|x_i − x_j|, h)` for the separation `r_ij = x_i − x_j`,
 /// i.e. the gradient with respect to the first particle's position. Zero at
 /// `r_ij = 0` (the kernel is smooth at the origin) and outside the support.
 pub fn grad_w(r_ij: DVec3, h: f64) -> DVec3 {
-    let _ = (r_ij, h);
-    todo!("M7a: cubic-spline kernel gradient")
+    let r = r_ij.length();
+    let q = r / h;
+    if r == 0.0 || q >= 2.0 {
+        return DVec3::ZERO;
+    }
+    // dW/dr = norm/h · dP/dq with P the dimensionless spline; ∇_i W = (dW/dr)·r̂.
+    let norm = 1.0 / (PI * h * h * h);
+    let dp = if q < 1.0 {
+        -3.0 * q + 2.25 * q * q
+    } else {
+        let t = 2.0 - q;
+        -0.75 * t * t
+    };
+    r_ij * (norm * dp / (h * r))
 }

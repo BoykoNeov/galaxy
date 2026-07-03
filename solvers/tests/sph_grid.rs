@@ -55,7 +55,11 @@ fn oracle_is_sorted_ascending_and_inclusive() {
         DVec3::new(0.5, 0.0, 0.0),
     ];
     let got = reference_neighbours(&pos, pos[0], 1.0);
-    assert_eq!(got, vec![0, 1, 3], "≤ r inclusive, self included, ascending");
+    assert_eq!(
+        got,
+        vec![0, 1, 3],
+        "≤ r inclusive, self included, ascending"
+    );
 }
 
 #[test]

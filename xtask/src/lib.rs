@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use galaxy_grade::{GradeConfig, ToneMap};
+use galaxy_grade::{BloomConfig, GradeConfig, ToneMap};
 use galaxy_renderprep::FrameData;
 use glam::Vec3;
 
@@ -33,15 +33,20 @@ pub struct RegradeArgs {
 
 /// Map `regrade` CLI arguments (everything after the `regrade` selector) to a
 /// [`RegradeArgs`]: `<exr_dir> <png_dir> [--exposure E] [--tonemap
-/// aces|reinhard|asinh] [--beta B]`. Flags may come in any order. Errors (as a
-/// human-readable message) on missing/extra positionals, unknown flags or tonemap
-/// names, malformed or non-positive numbers, and `--beta` without `asinh` (β only
-/// exists on the asinh curve — anything else is a typo worth failing fast on).
+/// aces|reinhard|asinh] [--beta B] [--bloom S] [--bloom-levels N]
+/// [--bloom-radius R]`. Flags may come in any order. Errors (as a human-readable
+/// message) on missing/extra positionals, unknown flags or tonemap names,
+/// malformed or non-positive numbers, `--beta` without `asinh`, and
+/// `--bloom-levels`/`--bloom-radius` without `--bloom` (sub-knobs of a feature
+/// that is off are a typo worth failing fast on, exactly like β).
 pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut exposure = 1.0f32;
     let mut tonemap_name: Option<&str> = None;
     let mut beta: Option<f32> = None;
+    let mut bloom_strength: Option<f32> = None;
+    let mut bloom_levels: Option<u32> = None;
+    let mut bloom_radius: Option<f32> = None;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -54,9 +59,17 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
                         .ok_or("--tonemap needs a value: aces|reinhard|asinh")?,
                 )
             }
+            "--bloom" => bloom_strength = Some(positive_flag_value("--bloom", it.next())?),
+            "--bloom-levels" => {
+                bloom_levels = Some(positive_int_flag_value("--bloom-levels", it.next())?)
+            }
+            "--bloom-radius" => {
+                bloom_radius = Some(positive_flag_value("--bloom-radius", it.next())?)
+            }
             flag if flag.starts_with("--") => {
                 return Err(format!(
-                    "unknown flag `{flag}` (expected --exposure, --tonemap, --beta)"
+                    "unknown flag `{flag}` (expected --exposure, --tonemap, --beta, \
+                     --bloom, --bloom-levels, --bloom-radius)"
                 ));
             }
             positional => positionals.push(positional),
@@ -83,15 +96,45 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
         return Err("--beta only applies to `--tonemap asinh`".to_string());
     }
 
+    let bloom = match bloom_strength {
+        Some(strength) => Some(BloomConfig {
+            strength,
+            levels: bloom_levels.take().unwrap_or(DEFAULT_BLOOM_LEVELS),
+            radius: bloom_radius.take().unwrap_or(DEFAULT_BLOOM_RADIUS),
+        }),
+        None => {
+            // Bloom sub-knobs without --bloom: same fail-fast stance as --beta.
+            if bloom_levels.is_some() || bloom_radius.is_some() {
+                return Err(
+                    "--bloom-levels/--bloom-radius only apply together with --bloom".to_string(),
+                );
+            }
+            None
+        }
+    };
+
     Ok(RegradeArgs {
         exr_dir: PathBuf::from(exr_dir),
         png_dir: PathBuf::from(png_dir),
         grade: GradeConfig {
             exposure,
             tonemap,
-            bloom: None,
+            bloom,
         },
     })
+}
+
+/// Parse a flag's value as a strictly positive integer, with the flag name in
+/// every failure message.
+fn positive_int_flag_value(flag: &str, value: Option<&String>) -> Result<u32, String> {
+    let raw = value.ok_or_else(|| format!("{flag} needs a value"))?;
+    let parsed: u32 = raw
+        .parse()
+        .map_err(|_| format!("{flag} expects a positive integer, got `{raw}`"))?;
+    if parsed == 0 {
+        return Err(format!("{flag} must be positive, got `{raw}`"));
+    }
+    Ok(parsed)
 }
 
 /// Parse a flag's value as a strictly positive finite `f32`, with the flag name in

@@ -162,7 +162,13 @@ pub fn grade_file<P: AsRef<Path>, Q: AsRef<Path>>(
         },
     )
     .map_err(|e| GradeError::Exr(e.to_string()))?;
-    let rgb = image.layer_data.channel_data.pixels;
+    let mut rgb = image.layer_data.channel_data.pixels;
+
+    // Bloom is an image-space op in LINEAR space — it must run over the whole
+    // frame before the per-pixel exposure/tone-curve/quantize path.
+    if let Some(bloom_cfg) = &cfg.bloom {
+        rgb.px = bloom(&rgb.px, rgb.w, rgb.h, bloom_cfg);
+    }
 
     // Tonemap each pixel to a 16-bit sRGB triple, packed big-endian for PNG.
     let mut bytes = Vec::with_capacity(rgb.w * rgb.h * 6);

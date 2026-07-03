@@ -144,8 +144,12 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
             .map(|i| palette_color(config, state.progenitor[i].0))
             .collect(),
         ColorMode::Frozen(colors) => {
-            let _ = colors;
-            todo!("M6e: frozen per-particle colors")
+            assert_eq!(
+                colors.len(),
+                n,
+                "frozen colors are not from this run's snapshot 0"
+            );
+            colors.clone()
         }
         ColorMode::Dispersion(dc) => {
             let sigma = velocity_dispersion(&state.vel, knn.neighbours(dc.k, dc.softening));
@@ -171,11 +175,9 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
 
     // Optional density-aware pass: brighten dense neighbourhoods (never dim). Off by
     // default, so the base map above is delivered bit-for-bit when `density == None`.
-    // [red-phase note: still on knn_density directly; moves onto the shared cache in
-    // the M6e implementation, gated bit-identical.]
+    // (Density comes off the shared cache — bit-identical to knn_density, gated.)
     if let Some(dc) = &config.density {
-        let density = crate::density::knn_density(&state.pos, dc.k, dc.softening);
-        let boost = density_boost(&density, dc.strength);
+        let boost = density_boost(knn.density(dc.k, dc.softening), dc.strength);
         for (b, &g) in brightness.iter_mut().zip(&boost) {
             *b *= g;
         }
@@ -200,17 +202,23 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
     }
 }
 
+/// A `(k, softening-bits)` cache key — the softening's bit pattern makes the
+/// dedup exact.
+type KnnKey = (usize, u64);
+/// One kNN evaluation: per-particle densities + neighbour index lists.
+type KnnPass = (Vec<f64>, Vec<Vec<usize>>);
+
 /// The shared kNN passes for one `prepare` call: one
 /// [`knn_neighbourhood`] evaluation per **distinct** `(k, softening)` requested by
 /// the config's consumers (density boost, dispersion coloring, size-by-density,
-/// compression hue). Keys use the softening's bit pattern so the dedup is exact.
+/// compression hue).
 struct KnnCache {
-    passes: Vec<((usize, u64), (Vec<f64>, Vec<Vec<usize>>))>,
+    passes: Vec<(KnnKey, KnnPass)>,
 }
 
 impl KnnCache {
     fn for_config(state: &State, config: &PrepConfig) -> Self {
-        let mut keys: Vec<(usize, u64)> = Vec::new();
+        let mut keys: Vec<KnnKey> = Vec::new();
         let mut want = |k: usize, soft: f64| {
             let key = (k, soft.to_bits());
             if !keys.contains(&key) {
@@ -222,6 +230,9 @@ impl KnnCache {
         }
         if let Some(ch) = &config.compression {
             want(ch.k, ch.softening);
+        }
+        if let Some(dc) = &config.density {
+            want(dc.k, dc.softening);
         }
         if let Some(sd) = &config.size_by_density {
             want(sd.k, sd.softening);
@@ -238,7 +249,7 @@ impl KnnCache {
         KnnCache { passes }
     }
 
-    fn pass(&self, k: usize, softening: f64) -> &(Vec<f64>, Vec<Vec<usize>>) {
+    fn pass(&self, k: usize, softening: f64) -> &KnnPass {
         let key = (k, softening.to_bits());
         &self
             .passes

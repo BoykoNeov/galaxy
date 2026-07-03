@@ -116,8 +116,34 @@ pub fn knn_neighbourhood(
     k: usize,
     softening: f64,
 ) -> (Vec<f64>, Vec<Vec<usize>>) {
-    let _ = (positions, k, softening);
-    todo!("M6e: kNN neighbourhood (densities + indices)")
+    let n = positions.len();
+    if k == 0 || n <= k {
+        return (vec![0.0; n], vec![Vec::new(); n]);
+    }
+    let coeff = k as f64 * 3.0 / (4.0 * PI);
+    let mut density = Vec::with_capacity(n);
+    let mut neighbours = Vec::with_capacity(n);
+    for i in 0..n {
+        let pi = positions[i];
+        // Squared distance + index, self excluded — the same candidates as
+        // knn_density, just carrying identity alongside.
+        let mut d2: Vec<(f64, usize)> = (0..n)
+            .filter(|&j| j != i)
+            .map(|j| (pi.distance_squared(positions[j]), j))
+            .collect();
+        // Partial select on the k-th order statistic: the left partition plus the
+        // pivot are exactly the k nearest (unordered; any valid set on ties). The
+        // pivot's distance is the same d_k value knn_density computes, and the
+        // density arithmetic below is kept operation-for-operation identical so
+        // the two estimators agree bit-for-bit (gated).
+        let (left, kth, _) = d2.select_nth_unstable_by(k - 1, |a, b| a.0.total_cmp(&b.0));
+        let d_k = kth.0.sqrt().max(softening); // floor before cubing
+        let mut nbrs: Vec<usize> = left.iter().map(|&(_, j)| j).collect();
+        nbrs.push(kth.1);
+        density.push(coeff / (d_k * d_k * d_k));
+        neighbours.push(nbrs);
+    }
+    (density, neighbours)
 }
 
 /// Local velocity dispersion `σ_v` per particle over its neighbourhood set
@@ -131,8 +157,22 @@ pub fn knn_neighbourhood(
 /// An empty neighbour list (the degenerate-kNN sentinel) yields `σ = 0.0` —
 /// "no neighbourhood", which the color ramp maps to the cold end.
 pub fn velocity_dispersion(vel: &[DVec3], neighbours: &[Vec<usize>]) -> Vec<f64> {
-    let _ = (vel, neighbours);
-    todo!("M6e: velocity dispersion over kNN neighbourhoods")
+    neighbours
+        .iter()
+        .enumerate()
+        .map(|(i, nbrs)| {
+            if nbrs.is_empty() {
+                return 0.0; // degenerate kNN — "no neighbourhood"
+            }
+            let m = (nbrs.len() + 1) as f64; // members: self + the k neighbours
+            let sum = nbrs.iter().fold(vel[i], |s, &j| s + vel[j]);
+            let mean = sum / m;
+            let var = nbrs.iter().fold(vel[i].distance_squared(mean), |s, &j| {
+                s + vel[j].distance_squared(mean)
+            }) / m;
+            var.sqrt()
+        })
+        .collect()
 }
 
 /// Per-particle splat sizes from local density — the [`SizeByDensity`] map:
@@ -145,8 +185,33 @@ pub fn velocity_dispersion(vel: &[DVec3], neighbours: &[Vec<usize>]) -> Vec<f64>
 /// Panics if the clamp band is invalid (`min_frac`/`max_frac` non-finite,
 /// `min_frac ≤ 0`, or `min_frac > max_frac`) — a config bug, not a data condition.
 pub fn density_sizes(density: &[f64], base: f32, min_frac: f32, max_frac: f32) -> Vec<f32> {
-    let _ = (density, base, min_frac, max_frac);
-    todo!("M6e: density-driven splat sizes")
+    assert!(
+        min_frac.is_finite() && max_frac.is_finite() && min_frac > 0.0 && min_frac <= max_frac,
+        "invalid size clamp band [{min_frac}, {max_frac}]"
+    );
+    // Reference density: the mean over the positive estimates, exactly as in
+    // density_boost — a 0.0 is the "no neighbourhood" sentinel and gets base size.
+    let (sum, count) = density
+        .iter()
+        .filter(|&&d| d > 0.0)
+        .fold((0.0, 0usize), |(s, c), &d| (s + d, c + 1));
+    if count == 0 {
+        return vec![base; density.len()];
+    }
+    let rho_ref = sum / count as f64;
+    density
+        .iter()
+        .map(|&d| {
+            if d > 0.0 {
+                // (ρ_ref/ρ)^⅓ is the inter-particle-spacing ratio: exactly 1 at the
+                // reference (cbrt(1) = 1, so ρ = ρ_ref sizes exactly `base`).
+                let frac = ((rho_ref / d).cbrt() as f32).clamp(min_frac, max_frac);
+                base * frac
+            } else {
+                base // sentinel: no estimate, no resizing
+            }
+        })
+        .collect()
 }
 
 /// Per-particle brightness multiplier from local density — **mean-referenced and

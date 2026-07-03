@@ -126,7 +126,7 @@ fn density_impl(
         cfg.n_ngb
     );
 
-    // Global spacing estimate: seed for the bracket and the grid cell size.
+    // Global spacing estimate: fallback seed and the cap scale.
     let (mut lo_c, mut hi_c) = (pos[0], pos[0]);
     for p in pos {
         lo_c = lo_c.min(*p);
@@ -143,12 +143,35 @@ fn density_impl(
         1.0 // fully degenerate cloud: any h is as meaningless as another
     };
     // Uniform cloud at spacing s hits the target when (4π/3)(2h)³/s³ = n_ngb.
-    let h_seed = s_est * (3.0 * cfg.n_ngb / (32.0 * PI)).cbrt();
+    let to_seed = |spacing: f64| spacing * (3.0 * cfg.n_ngb / (32.0 * PI)).cbrt();
+    let h_seed = to_seed(s_est);
     // Beyond ~the cloud diagonal the count plateaus at (32/3)n: nothing past
     // this cap can change, so rootless solves clamp here (finite, documented).
     let h_cap = (64.0 * h_seed).max(4.0 * diag);
 
-    let grid = HashGrid::build(pos, SUPPORT * h_seed);
+    // Per-particle bracket seeds from LOCAL bin occupancy: a global-spacing
+    // seed is wildly wrong for centrally-concentrated clouds (every galaxy),
+    // where it brackets dense-center particles with ~10³–10⁴-candidate balls
+    // and turns the solve quadratic in practice. Bins of edge 4·s_est hold
+    // ~64 points of a uniform cloud; occupancy `c` rescales the local spacing
+    // by c^(−1/3). The seed only positions the bracket — the converged h is a
+    // pure function of positions to the bisection tolerance (gated), so this
+    // is a performance choice, not a physics one.
+    let occ_bin = 4.0 * s_est;
+    let occupancy = HashGrid::build(pos, occ_bin);
+    let seeds: Vec<f64> = pos
+        .iter()
+        .map(|&p| {
+            let c = occupancy.bin_len(p).max(1) as f64; // own bin: O(1), ≥ 1
+            to_seed(occ_bin / c.cbrt()).min(h_cap)
+        })
+        .collect();
+    // The query grid follows the MEDIAN seed so dense-region bins stay small;
+    // outskirt queries just walk more (mostly empty) bins.
+    let mut sorted = seeds.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let cell = (SUPPORT * sorted[n / 2]).min(SUPPORT * h_seed).max(1e-12);
+    let grid = HashGrid::build(pos, cell);
 
     // Kernel-weighted count over a candidate superset (gathered at ≥ 2h).
     let count = |i: usize, h: f64, cand: &[usize]| -> f64 {
@@ -163,9 +186,12 @@ fn density_impl(
         let seed = h_init
             .map(|h| h[i])
             .filter(|&x| x.is_finite() && x > 0.0)
-            .unwrap_or(h_seed);
-        let mut lo = (seed / 8.0).min(h_cap);
-        let mut hi = (seed * 8.0).min(h_cap);
+            .unwrap_or(seeds[i]);
+        // A tight initial bracket keeps the candidate ball small (its volume
+        // grows as the cube of the bracket top); the expand/shrink loops below
+        // recover from any seed misestimate, re-querying as they go.
+        let mut lo = (seed / 2.0).min(h_cap);
+        let mut hi = (seed * 2.0).min(h_cap);
         let mut cand = grid.neighbours_within(pos, pos[i], SUPPORT * hi);
 
         // Expand up until the target is bracketed or the cap says "no root".

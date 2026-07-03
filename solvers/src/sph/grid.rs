@@ -42,6 +42,13 @@ impl HashGrid {
         HashGrid { cell, cells }
     }
 
+    /// Number of particles binned into the cell containing `p` — an O(1)
+    /// local-occupancy probe (the adaptive-h bracket seed uses it to estimate
+    /// the local spacing without a radius query).
+    pub fn bin_len(&self, p: DVec3) -> usize {
+        self.cells.get(&cell_of(p, self.cell)).map_or(0, Vec::len)
+    }
+
     /// Indices `j` (ascending) of all particles with `|pos[j] − center| ≤ r`.
     /// `pos` must be the same slice the grid was built from. A particle exactly
     /// at distance `r` IS a neighbor (`≤`, matching the O(N²) oracle).

@@ -74,8 +74,18 @@ pub fn tone_curve(c: [f32; 3], op: ToneMap) -> [f32; 3] {
     c.map(|x| match op {
         ToneMap::AcesApprox => aces_approx(x),
         ToneMap::Reinhard => (x / (1.0 + x)).clamp(0.0, 1.0),
-        ToneMap::Asinh { .. } => todo!("M6a: Lupton-style asinh stretch"),
+        ToneMap::Asinh { beta } => asinh_stretch(x, beta),
     })
+}
+
+/// Lupton-style asinh stretch `β·asinh(x/β)`, clamped to `[0, 1]`. Linear (unit
+/// slope) for `x ≪ β`, logarithmic for `x ≫ β` — so as β grows the curve tends to
+/// the identity, and for small β the highlights are held far below Reinhard's
+/// asymptote. β is floored at `f32::MIN_POSITIVE`: at exactly `0.0` the raw
+/// expression is `0·asinh(∞) = NaN`, and one NaN would poison the graded frame.
+fn asinh_stretch(x: f32, beta: f32) -> f32 {
+    let beta = beta.max(f32::MIN_POSITIVE);
+    (beta * (x / beta).asinh()).clamp(0.0, 1.0)
 }
 
 /// Narkowicz (2015) ACES filmic approximation, clamped to `[0, 1]`.

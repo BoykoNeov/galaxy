@@ -121,7 +121,10 @@ fn asinh_compresses_highlights_harder_than_reinhard() {
         a < r,
         "asinh(β=0.1) should compress highlights below Reinhard at x=100: {a} !< {r}"
     );
-    assert!((a - 0.760_090).abs() < EPS, "asinh(100;β=0.1) ≈ 0.760090, got {a}");
+    assert!(
+        (a - 0.760_090).abs() < EPS,
+        "asinh(100;β=0.1) ≈ 0.760090, got {a}"
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use galaxy_grade::GradeConfig;
+use galaxy_grade::{GradeConfig, ToneMap};
 use galaxy_renderprep::FrameData;
 use glam::Vec3;
 
@@ -29,8 +29,70 @@ pub struct RegradeArgs {
 /// human-readable message) on missing/extra positionals, unknown flags or tonemap
 /// names, malformed or non-positive numbers, and `--beta` without `asinh` (β only
 /// exists on the asinh curve — anything else is a typo worth failing fast on).
-pub fn parse_regrade_args(_args: &[String]) -> Result<RegradeArgs, String> {
-    todo!("M6a: regrade arg parsing")
+pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut exposure = 1.0f32;
+    let mut tonemap_name: Option<&str> = None;
+    let mut beta: Option<f32> = None;
+
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--exposure" => exposure = positive_flag_value("--exposure", it.next())?,
+            "--beta" => beta = Some(positive_flag_value("--beta", it.next())?),
+            "--tonemap" => {
+                tonemap_name = Some(
+                    it.next()
+                        .ok_or("--tonemap needs a value: aces|reinhard|asinh")?,
+                )
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!(
+                    "unknown flag `{flag}` (expected --exposure, --tonemap, --beta)"
+                ));
+            }
+            positional => positionals.push(positional),
+        }
+    }
+
+    let [exr_dir, png_dir] = positionals.as_slice() else {
+        return Err(format!(
+            "regrade needs exactly two positionals <exr_dir> <png_dir>, got {positionals:?}"
+        ));
+    };
+
+    let tonemap = match tonemap_name.unwrap_or("aces") {
+        "aces" => ToneMap::AcesApprox,
+        "reinhard" => ToneMap::Reinhard,
+        "asinh" => ToneMap::Asinh {
+            beta: beta.take().unwrap_or(DEFAULT_ASINH_BETA),
+        },
+        other => return Err(format!("unknown tonemap `{other}` (aces|reinhard|asinh)")),
+    };
+    // A leftover --beta means the tonemap isn't asinh — β does not exist on the
+    // other curves, so this is a mis-typed invocation, not a value to ignore.
+    if beta.is_some() {
+        return Err("--beta only applies to `--tonemap asinh`".to_string());
+    }
+
+    Ok(RegradeArgs {
+        exr_dir: PathBuf::from(exr_dir),
+        png_dir: PathBuf::from(png_dir),
+        grade: GradeConfig { exposure, tonemap },
+    })
+}
+
+/// Parse a flag's value as a strictly positive finite `f32`, with the flag name in
+/// every failure message.
+fn positive_flag_value(flag: &str, value: Option<&String>) -> Result<f32, String> {
+    let raw = value.ok_or_else(|| format!("{flag} needs a value"))?;
+    let parsed: f32 = raw
+        .parse()
+        .map_err(|_| format!("{flag} expects a number, got `{raw}`"))?;
+    if !(parsed.is_finite() && parsed > 0.0) {
+        return Err(format!("{flag} must be positive, got `{raw}`"));
+    }
+    Ok(parsed)
 }
 
 /// The union of the axis-aligned bounding boxes of every frame — the scene extent
@@ -149,7 +211,14 @@ mod tests {
     #[test]
     fn regrade_parses_full_asinh_invocation() {
         let r = parse_regrade_args(&args(&[
-            "e", "p", "--exposure", "2.5", "--tonemap", "asinh", "--beta", "0.05",
+            "e",
+            "p",
+            "--exposure",
+            "2.5",
+            "--tonemap",
+            "asinh",
+            "--beta",
+            "0.05",
         ]))
         .unwrap();
         assert_eq!(
@@ -164,14 +233,10 @@ mod tests {
     #[test]
     fn regrade_flags_are_order_independent() {
         // --beta before --tonemap must still land on the asinh curve.
-        let a = parse_regrade_args(&args(&[
-            "e", "p", "--beta", "0.05", "--tonemap", "asinh",
-        ]))
-        .unwrap();
-        let b = parse_regrade_args(&args(&[
-            "e", "p", "--tonemap", "asinh", "--beta", "0.05",
-        ]))
-        .unwrap();
+        let a =
+            parse_regrade_args(&args(&["e", "p", "--beta", "0.05", "--tonemap", "asinh"])).unwrap();
+        let b =
+            parse_regrade_args(&args(&["e", "p", "--tonemap", "asinh", "--beta", "0.05"])).unwrap();
         assert_eq!(a, b);
     }
 
@@ -190,7 +255,7 @@ mod tests {
                 beta: DEFAULT_ASINH_BETA
             }
         );
-        assert!(DEFAULT_ASINH_BETA > 0.0);
+        const { assert!(DEFAULT_ASINH_BETA > 0.0) };
     }
 
     #[test]

@@ -14,6 +14,9 @@
 //! Usage: `cargo run -p galaxy-xtask --release [disk|dm|cuspy] [out_dir]`
 //!   * A bare first arg that is none of `disk`/`dm`/`cuspy` is taken as `out_dir` with
 //!     the `disk` scenario (back-compat with the original single-scenario CLI).
+//!   * `regrade <exr_dir> <png_dir> [--exposure E] [--tonemap aces|reinhard|asinh]
+//!     [--beta B]` re-grades retained linear EXRs into fresh PNGs (+ movie if ffmpeg
+//!     is present) in seconds — no re-simulation, no re-render (the M6a look loop).
 //!   * Set `GALAXY_MOVIE_QUICK=1` for a fast low-N, low-res preview (same physical
 //!     time and dt, so the trajectory is faithful — only particle count, frame size,
 //!     and frame cadence are reduced). Use it to sanity-check a scenario before a
@@ -32,7 +35,7 @@ use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, Trun
 use galaxy_render::{write_exr, Camera, RenderConfig, Renderer};
 use galaxy_renderprep::{prepare, PrepConfig};
 use galaxy_sim::{run, DirectorySink, SimConfig};
-use galaxy_xtask::framing_radius;
+use galaxy_xtask::{framing_radius, parse_regrade_args};
 use glam::Vec3;
 
 // --- Shared physics / look (both scenarios) ----------------------------------
@@ -68,6 +71,12 @@ struct Scenario {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // `regrade` is a pure grade-stage pass over retained EXRs — no sim, no GPU.
+    if args.first().map(String::as_str) == Some("regrade") {
+        return regrade(&args[1..]);
+    }
+
     let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
 
     // First positional selects the scenario; anything else is treated as the out dir
@@ -378,6 +387,44 @@ fn cuspy_scenario(quick: bool) -> Scenario {
         frame_percentile: 0.7,
         info,
     }
+}
+
+/// The M6a look loop: re-grade a directory of retained linear-HDR EXRs into PNGs
+/// under a new exposure/tone curve, then (optionally) ffmpeg them into a movie next
+/// to the frames. Seconds instead of a re-render, because the EXR is the pristine
+/// linear artifact. The movie step assumes the pipeline's `frame_%05d` stems; other
+/// stems still regrade fine, ffmpeg just skips them with its usual message.
+fn regrade(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    const USAGE: &str = "usage: regrade <exr_dir> <png_dir> \
+         [--exposure E] [--tonemap aces|reinhard|asinh] [--beta B]";
+    let cfg = parse_regrade_args(args).map_err(|e| format!("regrade: {e}\n{USAGE}"))?;
+
+    let mut exrs: Vec<PathBuf> = std::fs::read_dir(&cfg.exr_dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "exr"))
+        .collect();
+    exrs.sort(); // frame_<i:05>.exr → lexicographic == frame order
+    if exrs.is_empty() {
+        return Err(format!("no .exr frames in {}", cfg.exr_dir.display()).into());
+    }
+
+    std::fs::create_dir_all(&cfg.png_dir)?;
+    for exr in &exrs {
+        // The extension filter above guarantees a stem exists.
+        let Some(stem) = exr.file_stem() else {
+            continue;
+        };
+        let png = cfg.png_dir.join(stem).with_extension("png");
+        grade_file(exr, &png, &cfg.grade)?;
+    }
+    println!(
+        "regraded {} frames ({:?}) → {}",
+        exrs.len(),
+        cfg.grade,
+        cfg.png_dir.display()
+    );
+    encode_movie(&cfg.png_dir, &cfg.png_dir.join("movie.mp4"));
+    Ok(())
 }
 
 /// The scenario-independent pipeline: simulate the IC to snapshots, renderprep every

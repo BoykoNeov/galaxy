@@ -183,6 +183,17 @@ pub fn framing_radius(frames: &[FrameData], percentile: f32) -> f32 {
     radii[idx]
 }
 
+/// Per-frame `percentile` of the **3-D** radius about the origin (the zero-COM
+/// barycenter) — the raw framing requirement the M6d envelope smooths, one entry
+/// per frame. 3-D rather than in-plane because an orbiting/tilted camera must
+/// enclose the scene from *any* view axis, and a sphere of radius `r` projects to
+/// `r` in every orthographic view. Same percentile-index convention as
+/// [`framing_radius`]; an empty frame contributes `0.0`.
+pub fn per_frame_radii(frames: &[FrameData], percentile: f32) -> Vec<f32> {
+    let _ = (frames, percentile);
+    todo!("M6d")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +250,31 @@ mod tests {
     #[test]
     fn framing_radius_of_nothing_is_zero() {
         assert_eq!(framing_radius(&[], 0.98), 0.0);
+    }
+
+    // --- per-frame 3-D framing radii (M6d) -------------------------------------
+
+    #[test]
+    fn per_frame_radii_takes_the_3d_percentile_of_each_frame() {
+        // Frame a: 3-D radii {1, 5, 2} — the [0,3,4] point has in-plane radius 3
+        // but 3-D radius 5, so percentile 1.0 → 5 pins the THREE-dimensional
+        // metric. Frame b: a single pure-z point (in-plane radius 0) → 10.
+        let a = frame_at(&[[1.0, 0.0, 0.0], [0.0, 3.0, 4.0], [0.0, 0.0, 2.0]]);
+        let b = frame_at(&[[0.0, 0.0, 10.0]]);
+        let r = per_frame_radii(&[a.clone(), b], 1.0);
+        assert_eq!(r.len(), 2);
+        assert!((r[0] - 5.0).abs() < 1e-5, "{:?}", r);
+        assert!((r[1] - 10.0).abs() < 1e-5, "{:?}", r);
+        // Median convention matches framing_radius: sorted {1,2,5}, idx round(1.0) → 2.
+        let m = per_frame_radii(std::slice::from_ref(&a), 0.5);
+        assert!((m[0] - 2.0).abs() < 1e-5, "{:?}", m);
+    }
+
+    #[test]
+    fn per_frame_radii_of_empty_frames_are_zero() {
+        let r = per_frame_radii(&[FrameData::default(), frame_at(&[[3.0, 0.0, 0.0]])], 0.9);
+        assert_eq!(r, vec![0.0, 3.0]);
+        assert!(per_frame_radii(&[], 0.9).is_empty());
     }
 
     // --- regrade arg parsing (M6a) -------------------------------------------

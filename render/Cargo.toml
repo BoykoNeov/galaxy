@@ -11,3 +11,6 @@ wgpu = "29"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 exr = "1"
+
+[dev-dependencies]
+proptest = { workspace = true }

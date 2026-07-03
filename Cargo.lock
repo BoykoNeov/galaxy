@@ -373,6 +373,7 @@ dependencies = [
  "galaxy-renderprep",
  "glam",
  "pollster",
+ "proptest",
  "thiserror",
  "wgpu",
 ]

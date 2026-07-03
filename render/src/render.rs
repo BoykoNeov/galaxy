@@ -375,6 +375,29 @@ impl Renderer {
         })
     }
 
+    /// Render one frame with an optional volumetric gas component (M7e, plan D9):
+    ///
+    /// 1. **Transmittance prepass** (compute): one thread per star marches the
+    ///    mixed density grid from star to camera and writes `T = exp(−τ)` to a
+    ///    storage buffer.
+    /// 2. **Star pass**: the splat pipeline, each instance's emission × `T`.
+    /// 3. **Gas pass**: a fullscreen triangle raymarches emission+absorption
+    ///    per pixel, additively blended into the same `Rgba32Float` target.
+    ///
+    /// `gas: None` renders stars only, `T ≡ 1.0` — bit-compatible with
+    /// [`Renderer::render_frame`] and pinned by the M6g golden gate. The march
+    /// rules and their CPU oracles live in [`crate::volume`]; the shaders here
+    /// mirror them operation-for-operation.
+    pub fn render_frame_with_gas(
+        &self,
+        frame: &FrameData,
+        gas: Option<&crate::volume::GasFrame<'_>>,
+        camera: &Camera,
+        cfg: &RenderConfig,
+    ) -> Result<HdrImage, RenderError> {
+        todo!("M7e: prepass → attenuated stars → gas march, one additive target")
+    }
+
     /// Render one frame: additively blend every particle in `frame` as a Gaussian
     /// splat, as seen by `camera`, into an `Rgba32Float` target of
     /// `cfg.width × cfg.height`, and read it back as a linear [`HdrImage`].

@@ -17,11 +17,13 @@ pub mod camera;
 pub mod exr_io;
 pub mod render;
 pub mod rig;
+pub mod volume;
 
 pub use camera::{Camera, Projection};
 pub use exr_io::{read_exr, write_exr};
 pub use render::{HdrImage, RenderConfig, Renderer};
 pub use rig::{ease_in_out, smooth_envelope, CameraPath, RigError};
+pub use volume::{GasFrame, GasLook};
 
 /// Errors from the render stage.
 #[derive(thiserror::Error, Debug)]

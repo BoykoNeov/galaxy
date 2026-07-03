@@ -1091,12 +1091,54 @@ late-time positions — N-body is chaotic).
     each scenario's force softening ε, the smallest separation the sim resolves.
   - [next: bloom at grade time in linear space (M6b) — the placement decision is
     already argued in the plan doc.]
+- **HDR bloom at grade time (landed, M6b) — the emissive-star-field halo.**
+  `bloom(pixels, w, h, &BloomConfig { strength, levels, radius })` in `grade`: mip
+  pyramid down, separable Gaussian per level, up-add, `out = img + strength·halo`.
+  Pure CPU, linear-domain, image-space — wired into `grade_file` behind
+  `GradeConfig.bloom: Option<BloomConfig>` and into `regrade` as `--bloom S
+  [--bloom-levels N] [--bloom-radius R]` (defaults 5 / 2.0).
+  - **Placement (deliberate deviation from this doc's render-stage recipe):** bloom
+    runs at *grade time*, in linear space *before* the tone curve — mathematically
+    identical to pre-EXR bloom (both are linear-domain pre-tonemap), but the EXR
+    stays the pristine **pre-bloom** artifact, so strength/radius iterate in
+    seconds through the M6a regrade loop instead of a re-render. GPU bloom stays a
+    named perf follow-up gated on actual pain (CPU at 720p is instant).
+  - **No bright-pass threshold** (decision): in the linear astro look every source
+    blooms in proportion to its flux — which keeps the operator LINEAR, gated
+    bit-exactly via `bloom(2·img) = 2·bloom(img)` (×2 commutes with f32 rounding,
+    so no threshold/knee can hide inside a tolerance).
+  - **The border finding (caught by the first rendered A/B, then gated):** a
+    flux-exact *scatter* pipeline (per-source-normalized kernels, out-of-range taps
+    clamped to the border) piles the reflected halo flux into a **bright band along
+    the frame edges** — a constant-image corner pixel came out 4.7×. A local,
+    data-independent pipeline cannot be exactly flux-conserving AND map constants
+    to constants at borders simultaneously, so the two laws are split: every
+    pyramid stage (tent reduce / Gaussian blur / tent expand, all with
+    symmetric-reflected borders) is a **gather of convex combinations** —
+    mean-valued mips, constants pass through unchanged, no band possible — and the
+    **flux budget is enforced by one explicit scalar**, `strength·flux(img)/
+    flux(halo)`, so the mix adds exactly `strength × total flux`. The renormalizer
+    sums f64 over **sorted** channel values (permutation-invariant), keeping
+    translation equivariance bit-exact. Tent taps sit ON even fine pixels (no
+    half-pixel drift).
+  - Gates (`grade/tests/bloom.rs`): strength/levels-0 bit-exact no-ops; bit-exact
+    ×2 linearity; flux `(1+strength)·flux(img)` at 1e-5; **constants bloom to
+    constants at every pixel** (the border gate, 1e-4); odd-dimension
+    center-impulse dihedral symmetry + monotone radial decay; bit-exact 2^levels
+    translation equivariance; 1×1 mip-floor level cap; determinism; `grade_file`
+    applies bloom image-wide before the per-pixel tone curve (wiring gate).
+  - **Movie default: ON in all three scenarios, strength 0.45** (levels 5, radius
+    2.0), tuned by A/B regrades of retained QUICK EXRs (0/0.3/0.45/0.6/1.2; cuspy
+    under asinh exposure 4, disk/dm under the ACES default): 0.3 timid, 0.6 hazes
+    the dense cuspy halo field, 1.2 washes structure; 0.45 makes nuclei/knots glow
+    while tails and halo dots stay resolved.
+  - [next: Hermite temporal upsampling to 60 fps (M6c).]
 - **M6 (in progress) — "the beautiful": visual/cinematic series.** Asinh grade +
-  regrade loop + density boost ON (M6a, landed above) → bloom (M6b) → Hermite
-  temporal upsampling to 60 fps (M6c) → animated camera rig (M6d) → coloring modes
-  v2 incl. the density→blue star-formation proxy (M6e) → `scenario.toml` + Toomre
-  encounter zoo (M6f) → perspective/vertex-path render, the 10⁸ swap (M6g,
-  optional). Session-by-session plan with gates and decisions:
+  regrade loop + density boost ON (M6a) → bloom (M6b) — both landed above →
+  Hermite temporal upsampling to 60 fps (M6c) → animated camera rig (M6d) →
+  coloring modes v2 incl. the density→blue star-formation proxy (M6e) →
+  `scenario.toml` + Toomre encounter zoo (M6f) → perspective/vertex-path render,
+  the 10⁸ swap (M6g, optional). Session-by-session plan with gates and decisions:
   `docs/plans/cinematic-toomre-bloom.md`.
 
 ## Validation strategy

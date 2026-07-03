@@ -60,7 +60,7 @@ upsampling and the scenario zoo.
 | Session | Milestone | One-liner | Effort | Depends on |
 |---|---|---|---|---|
 | 1 | **M6a** ✅ | Grade toolkit: asinh stretch, `regrade` subcommand, density boost ON | S | — |
-| 2 | **M6b** | Bloom (CPU mip-chain, applied at grade time in linear space) | M | M6a (regrade loop) |
+| 2 | **M6b** ✅ | Bloom (CPU mip-chain, applied at grade time in linear space) | M | M6a (regrade loop) |
 | 3 | **M6c** | Hermite temporal upsampling → smooth 60 fps movies | M | — |
 | 4 | **M6d** | Camera rig: smoothed framing + orbit/tilt paths | M | best after M6c |
 | 5 | **M6e** | Coloring modes v2: initial-radius ramp, σ_v, size-by-density | M | — |
@@ -105,7 +105,15 @@ large x. (Density math is already gated; its *tuning* is eyeballed by rule 2.)
 Demo: cuspy movie regraded with asinh + density boost — tails visibly brighter
 without core clipping, zero re-simulation.
 
-## M6b — bloom (Session 2, M)
+## M6b — bloom (Session 2, M) — LANDED
+
+*(Landed 2026-07; see the DESIGN.md M6b entry. As recommended below, the EXR
+stays pre-bloom and bloom runs at grade time; no threshold. One deviation
+discovered in the doing: the flux-exact scatter formulation piles halo flux
+into a bright band at the frame borders, so the pyramid became mean-valued
+gathers (constants → constants exactly) with flux enforced by one explicit
+renormalization scalar — both laws gated. Movie default strength 0.45,
+levels 5, radius 2.0.)*
 
 **Goal:** the signature emissive-star-field look — cores halo out, bright knots
 glow. DESIGN names the technique: mip down/blur/up.

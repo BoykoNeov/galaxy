@@ -16,8 +16,10 @@
 
 pub mod density;
 pub mod frame;
+pub mod interp;
 pub mod prepare;
 
 pub use density::{density_boost, knn_density, DensityColoring};
 pub use frame::{FrameData, FrameError, FrameHeader};
+pub use interp::{subframe, HermiteSpan, InterpError};
 pub use prepare::{prepare, PrepConfig};

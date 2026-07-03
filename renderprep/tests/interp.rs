@@ -408,3 +408,130 @@ fn ids_used_for_the_gate_are_the_particle_ids() {
         Err(InterpError::IdMismatch { index: 1, .. })
     ));
 }
+
+// --------------------------------------------------------------------------
+// Species routing through subframes (M7d): prepared frames may hold only the
+// collisionless rows (gas is routed to the volumetric grid). `subframe` must
+// accept such filtered frames, pairing them with the span's stellar particles.
+// --------------------------------------------------------------------------
+
+/// A generic mixed-species snapshot pair: rows 0/2/3 collisionless, row 1 gas.
+fn mixed_pair() -> (State, State) {
+    use galaxy_core::Species;
+    let (mut s0, mut s1) = (
+        snap(
+            0.4,
+            vec![
+                DVec3::new(1.3, -0.2, 2.1),
+                DVec3::new(0.2, 0.6, -0.3),
+                DVec3::new(-3.4, 0.9, 0.4),
+                DVec3::new(2.0, 1.5, -1.0),
+            ],
+            vec![
+                DVec3::new(0.3, 1.1, -0.6),
+                DVec3::new(-0.1, 0.2, 0.4),
+                DVec3::new(-0.2, -0.8, 0.5),
+                DVec3::new(0.6, -0.4, 0.1),
+            ],
+        ),
+        snap(
+            1.6,
+            vec![
+                DVec3::new(1.8, 0.9, 1.2),
+                DVec3::new(0.4, 0.3, 0.1),
+                DVec3::new(-3.9, -0.3, 1.1),
+                DVec3::new(2.5, 1.1, -0.6),
+            ],
+            vec![
+                DVec3::new(0.5, 0.7, -1.2),
+                DVec3::new(0.2, -0.3, 0.6),
+                DVec3::new(-0.4, -1.1, 0.9),
+                DVec3::new(0.3, -0.7, 0.5),
+            ],
+        ),
+    );
+    let kinds = vec![
+        Species::Collisionless,
+        Species::Gas,
+        Species::Collisionless,
+        Species::Collisionless,
+    ];
+    s0.kind = kinds.clone();
+    s1.kind = kinds;
+    (s0, s1)
+}
+
+#[test]
+fn filtered_subframe_reproduces_the_prepared_endpoints_bit_exact() {
+    let (s0, s1) = mixed_pair();
+    let span = HermiteSpan::new(&s0, &s1).unwrap();
+    let cfg = PrepConfig::default(); // gas routed out
+    let f0 = prepare(&s0, &cfg);
+    let f1 = prepare(&s1, &cfg);
+    assert_eq!(f0.len(), 3, "precondition: gas row filtered");
+
+    let at0 = subframe(&span, &f0, &f1, 0.0);
+    assert_eq!(at0, f0, "u=0 must reproduce the prepared f0 bit-exactly");
+    let at1 = subframe(&span, &f0, &f1, 1.0);
+    assert_eq!(at1, f1, "u=1 must reproduce the prepared f1 bit-exactly");
+}
+
+#[test]
+fn filtered_subframe_positions_follow_the_stellar_hermite_rows() {
+    // Mid-span, the filtered subframe's positions must be exactly the f32
+    // projection of the Hermite sample at the STELLAR indices (0, 2, 3) —
+    // pairing splat row k with hermite row k instead would scramble the gas
+    // row into the stars.
+    let (s0, s1) = mixed_pair();
+    let span = HermiteSpan::new(&s0, &s1).unwrap();
+    let cfg = PrepConfig::default();
+    let f0 = prepare(&s0, &cfg);
+    let f1 = prepare(&s1, &cfg);
+
+    let u = 0.375;
+    let sub = subframe(&span, &f0, &f1, u);
+    let (hpos, _) = span.sample(u);
+    assert_eq!(sub.len(), 3);
+    assert_eq!(sub.pos[0], hpos[0].as_vec3());
+    assert_eq!(sub.pos[1], hpos[2].as_vec3());
+    assert_eq!(sub.pos[2], hpos[3].as_vec3());
+}
+
+#[test]
+fn full_length_frames_still_interpolate_all_rows() {
+    // Debug mode (gas_as_splats) keeps gas in the splat list; subframe must
+    // keep accepting full-length frames on a mixed-species span.
+    let (s0, s1) = mixed_pair();
+    let span = HermiteSpan::new(&s0, &s1).unwrap();
+    let cfg = PrepConfig {
+        gas_as_splats: true,
+        ..PrepConfig::default()
+    };
+    let f0 = prepare(&s0, &cfg);
+    let f1 = prepare(&s1, &cfg);
+    assert_eq!(f0.len(), 4);
+
+    assert_eq!(subframe(&span, &f0, &f1, 0.0), f0);
+    let u = 0.5;
+    let sub = subframe(&span, &f0, &f1, u);
+    let (hpos, _) = span.sample(u);
+    for i in 0..4 {
+        assert_eq!(sub.pos[i], hpos[i].as_vec3());
+    }
+}
+
+#[test]
+#[should_panic(expected = "prepared frame")]
+fn subframe_rejects_frames_of_impossible_length() {
+    // Neither the full state length (4) nor the stellar count (3): a caller
+    // contract violation, and pairing rows would silently scramble the movie.
+    let (s0, s1) = mixed_pair();
+    let span = HermiteSpan::new(&s0, &s1).unwrap();
+    let bogus = FrameData {
+        pos: vec![Vec3::ZERO; 2],
+        color: vec![[1.0; 3]; 2],
+        size: vec![1.0; 2],
+        brightness: vec![1.0; 2],
+    };
+    let _ = subframe(&span, &bogus, &bogus, 0.5);
+}

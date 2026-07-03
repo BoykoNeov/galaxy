@@ -461,3 +461,146 @@ fn full_featured_prepare_is_deterministic() {
     };
     assert_eq!(prepare(&state, &cfg), prepare(&state, &cfg));
 }
+
+// ---------------------------------------------------------------------------
+// Species routing (M7d): gas leaves the splat list by default — it renders
+// through the volumetric grid, not the additive star path. `gas_as_splats`
+// keeps it (debug mode). The filter runs AFTER all attribute math, so stellar
+// rows are identical either way, and gas-free states never take the filter.
+// ---------------------------------------------------------------------------
+
+/// Three stars interleaved with two gas particles (progenitors 4/5 per plan D1).
+fn mixed_species_state() -> State {
+    State {
+        pos: vec![
+            DVec3::new(1.0, 0.0, 0.0),
+            DVec3::new(0.5, 0.5, 0.0),
+            DVec3::new(0.0, 2.0, 0.0),
+            DVec3::new(-0.5, 0.5, 1.0),
+            DVec3::new(0.0, 0.0, -3.0),
+        ],
+        vel: vec![DVec3::ZERO; 5],
+        mass: vec![2.0, 1.0, 4.0, 3.0, 1.0],
+        id: (0..5).map(ParticleId).collect(),
+        progenitor: vec![
+            Progenitor(0),
+            Progenitor(4),
+            Progenitor(1),
+            Progenitor(5),
+            Progenitor(0),
+        ],
+        kind: vec![
+            Species::Collisionless,
+            Species::Gas,
+            Species::Collisionless,
+            Species::Gas,
+            Species::Collisionless,
+        ],
+        time: 5.0,
+        a: 1.0,
+    }
+}
+
+#[test]
+fn gas_leaves_the_splat_list_by_default() {
+    let state = mixed_species_state();
+    let cfg = sample_config();
+    assert!(!cfg.gas_as_splats, "routing out is the default");
+    let data = prepare(&state, &cfg);
+
+    // Only the three collisionless rows survive, in their original order.
+    assert_eq!(data.len(), 3);
+    assert_eq!(data.pos[0].as_dvec3(), state.pos[0]);
+    assert_eq!(data.pos[1].as_dvec3(), state.pos[2]);
+    assert_eq!(data.pos[2].as_dvec3(), state.pos[4]);
+    assert_eq!(data.brightness, vec![3.0 * 2.0, 3.0 * 4.0, 3.0 * 1.0]);
+    assert_eq!(data.color[0], cfg.palette[0]); // progenitor 0
+    assert_eq!(data.color[1], cfg.palette[1]); // progenitor 1
+    assert_eq!(data.color[2], cfg.palette[0]); // progenitor 0
+}
+
+#[test]
+fn gas_as_splats_keeps_the_full_list() {
+    let state = mixed_species_state();
+    let cfg = PrepConfig {
+        gas_as_splats: true,
+        ..sample_config()
+    };
+    let data = prepare(&state, &cfg);
+    assert_eq!(data.len(), 5);
+    // Gas rows are ordinary splats in debug mode: palette by progenitor
+    // (4 and 5 wrap modulo the 2-entry palette), brightness by mass.
+    assert_eq!(data.color[1], cfg.palette[0]); // progenitor 4 % 2 = 0
+    assert_eq!(data.color[3], cfg.palette[1]); // progenitor 5 % 2 = 1
+    assert_eq!(data.brightness[1], 3.0 * 1.0);
+    assert_eq!(data.brightness[3], 3.0 * 3.0);
+}
+
+#[test]
+fn routing_is_a_pure_filter_of_the_debug_map() {
+    // With the k-NN features ON (density boost, size-by-density), the stellar
+    // rows of the routed output must equal the corresponding rows of the
+    // full (gas_as_splats) map bit-exactly: the filter runs after all
+    // attribute math, and the neighbourhood estimates see ALL particles
+    // (gas is mass) in both cases.
+    let state = mixed_species_state();
+    let full_cfg = PrepConfig {
+        density: Some(DensityColoring {
+            k: 2,
+            softening: 1e-6,
+            strength: 1.0,
+        }),
+        size_by_density: Some(SizeByDensity {
+            k: 2,
+            softening: 1e-6,
+            min_frac: 0.5,
+            max_frac: 2.0,
+        }),
+        gas_as_splats: true,
+        ..sample_config()
+    };
+    let routed_cfg = PrepConfig {
+        gas_as_splats: false,
+        ..full_cfg.clone()
+    };
+    let full = prepare(&state, &full_cfg);
+    let routed = prepare(&state, &routed_cfg);
+
+    let stellar = [0usize, 2, 4];
+    assert_eq!(routed.len(), stellar.len());
+    for (out, &src) in stellar.iter().enumerate() {
+        assert_eq!(routed.pos[out], full.pos[src]);
+        assert_eq!(routed.color[out], full.color[src]);
+        assert_eq!(routed.size[out], full.size[src]);
+        assert_eq!(routed.brightness[out], full.brightness[src]);
+    }
+}
+
+#[test]
+fn all_gas_state_prepares_to_an_empty_frame() {
+    let mut state = mixed_species_state();
+    state.kind = vec![Species::Gas; state.len()];
+    let data = prepare(&state, &sample_config());
+    assert!(data.is_empty());
+    assert_eq!(data.color.len(), 0);
+    assert_eq!(data.size.len(), 0);
+    assert_eq!(data.brightness.len(), 0);
+}
+
+#[test]
+fn frozen_colors_are_indexed_by_state_row_not_splat_row() {
+    // ColorMode::Frozen carries one color per particle of the STATE (computed
+    // from snapshot 0 before routing); the filter must pick the stellar
+    // entries, not the first n_star ones.
+    let state = mixed_species_state();
+    let frozen: Vec<[f32; 3]> = (0..5).map(|i| [i as f32 * 0.1, 0.5, 0.9]).collect();
+    let cfg = PrepConfig {
+        color: ColorMode::Frozen(frozen.clone()),
+        ..sample_config()
+    };
+    let data = prepare(&state, &cfg);
+    assert_eq!(data.len(), 3);
+    assert_eq!(data.color[0], frozen[0]);
+    assert_eq!(data.color[1], frozen[2]);
+    assert_eq!(data.color[2], frozen[4]);
+}

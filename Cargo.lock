@@ -383,7 +383,9 @@ name = "galaxy-renderprep"
 version = "0.0.0"
 dependencies = [
  "galaxy-core",
+ "galaxy-solvers",
  "glam",
+ "rayon",
  "thiserror",
 ]
 

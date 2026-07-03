@@ -95,6 +95,13 @@ pub struct PrepConfig {
     /// Optional star-formation-proxy hue shift (M6e). `None` (the default) leaves
     /// the base colors untouched.
     pub compression: Option<CompressionHue>,
+    /// Keep `Species::Gas` particles in the splat list (M7d debug mode). By
+    /// default gas is routed OUT of the splat columns — it renders through the
+    /// volumetric gas grid, not the additive star path. The filter runs after
+    /// all attribute math, so stellar rows are identical either way, and a
+    /// gas-free state never takes the filter at all (bit-compatible with the
+    /// pre-M7d map).
+    pub gas_as_splats: bool,
 }
 
 impl Default for PrepConfig {
@@ -108,6 +115,7 @@ impl Default for PrepConfig {
             color: ColorMode::Progenitor,
             size_by_density: None,
             compression: None,
+            gas_as_splats: false,
         }
     }
 }

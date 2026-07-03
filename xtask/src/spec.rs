@@ -749,7 +749,8 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                 min_frac: SIZE_MIN_FRAC,
                 max_frac: SIZE_MAX_FRAC,
             }),
-            compression: None, // filled by run_movie (rho0 needs snapshot 0)
+            compression: None,    // filled by run_movie (rho0 needs snapshot 0)
+            gas_as_splats: false, // gas renders volumetrically (M7d), not as splats
         },
         eps,
         dt: spec.sim.dt,

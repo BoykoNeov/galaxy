@@ -5,5 +5,7 @@ edition.workspace = true
 
 [dependencies]
 galaxy-core = { path = "../core" }
+galaxy-solvers = { path = "../solvers" }
 glam = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }

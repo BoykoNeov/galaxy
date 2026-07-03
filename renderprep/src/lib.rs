@@ -17,6 +17,7 @@
 pub mod coloring;
 pub mod density;
 pub mod frame;
+pub mod gasgrid;
 pub mod interp;
 pub mod prepare;
 
@@ -26,5 +27,8 @@ pub use density::{
     DensityColoring, SizeByDensity,
 };
 pub use frame::{FrameData, FrameError, FrameHeader};
+pub use gasgrid::{
+    deposit_fixed, deposit_fixed_serial, deposit_gas, sample_mix, GasGrid, GasGridConfig,
+};
 pub use interp::{subframe, HermiteSpan, InterpError};
 pub use prepare::{prepare, ColorMode, CompressionHue, DispersionColoring, PrepConfig};

@@ -7,7 +7,10 @@
 //! `brightness_per_mass * mass`.
 
 use galaxy_core::{DVec3, ParticleId, Progenitor, State};
-use galaxy_renderprep::{prepare, DensityColoring, PrepConfig};
+use galaxy_renderprep::{
+    knn_density, prepare, ColorMode, CompressionHue, DensityColoring, DispersionColoring,
+    PrepConfig, SizeByDensity,
+};
 
 /// Two particles from progenitor 0, one from progenitor 1, with distinct masses.
 fn sample_state() -> State {
@@ -32,6 +35,7 @@ fn sample_config() -> PrepConfig {
         brightness_per_mass: 3.0,
         size: 0.5,
         density: None,
+        ..Default::default()
     }
 }
 
@@ -220,7 +224,235 @@ fn empty_palette_falls_back_to_white() {
         brightness_per_mass: 1.0,
         size: 1.0,
         density: None,
+        ..Default::default()
     };
     let data = prepare(&state, &cfg);
     assert!(data.color.iter().all(|&c| c == [1.0, 1.0, 1.0]));
+}
+
+// ---------------------------------------------------------------------------
+// Coloring modes v2 (DESIGN M6e): ColorMode, size-by-density, compression hue.
+// The default config must stay the pre-M6e pure map bit-for-bit (the tests above
+// pin that); these gate the new opt-in paths through `prepare`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_config_is_the_pre_m6e_map() {
+    // The bit-compat contract: every new knob defaults OFF.
+    let d = PrepConfig::default();
+    assert_eq!(d.color, ColorMode::Progenitor);
+    assert_eq!(d.size_by_density, None);
+    assert_eq!(d.compression, None);
+}
+
+#[test]
+fn frozen_colors_are_bit_stable_across_frames() {
+    // The frozen-at-t0 property: whatever the particles do later (positions, time),
+    // Frozen colors come back exactly as given, keyed by index — palette ignored.
+    let frozen = vec![[0.9, 0.1, 0.3], [0.2, 0.8, 0.4], [0.5, 0.5, 0.5]];
+    let cfg = PrepConfig {
+        color: ColorMode::Frozen(frozen.clone()),
+        ..sample_config()
+    };
+    let early = sample_state();
+    let mut late = sample_state();
+    for p in &mut late.pos {
+        *p = *p * 7.0 + DVec3::new(3.0, -2.0, 11.0);
+    }
+    late.time = 99.0;
+    assert_eq!(prepare(&early, &cfg).color, frozen);
+    assert_eq!(prepare(&late, &cfg).color, frozen);
+}
+
+/// Two spatially separated triplets with k=2 neighbourhoods internal to each:
+/// clump A (indices 0..3) is dynamically cold (identical velocities), clump B
+/// (3..6) has velocity spread. One progenitor, equal masses.
+fn two_temperature_state() -> State {
+    let pos = vec![
+        DVec3::new(0.0, 0.0, 0.0),
+        DVec3::new(0.1, 0.0, 0.0),
+        DVec3::new(0.0, 0.1, 0.0),
+        DVec3::new(100.0, 0.0, 0.0),
+        DVec3::new(100.1, 0.0, 0.0),
+        DVec3::new(100.0, 0.1, 0.0),
+    ];
+    let vel = vec![
+        DVec3::new(1.0, 2.0, 3.0),
+        DVec3::new(1.0, 2.0, 3.0),
+        DVec3::new(1.0, 2.0, 3.0),
+        DVec3::new(0.0, 0.0, 0.0),
+        DVec3::new(6.0, 0.0, 0.0),
+        DVec3::new(3.0, 3.0, 0.0),
+    ];
+    State {
+        mass: vec![1.0; 6],
+        id: (0..6).map(ParticleId).collect(),
+        progenitor: vec![Progenitor(0); 6],
+        time: 0.0,
+        a: 1.0,
+        pos,
+        vel,
+    }
+}
+
+#[test]
+fn dispersion_mode_colors_cold_clump_cold_and_hot_clump_hotter() {
+    let cold = [0.1, 0.2, 0.9];
+    let hot = [0.9, 0.8, 0.1];
+    let cfg = PrepConfig {
+        color: ColorMode::Dispersion(DispersionColoring {
+            k: 2,
+            softening: 1e-9,
+            cold,
+            hot,
+        }),
+        ..sample_config()
+    };
+    let data = prepare(&two_temperature_state(), &cfg);
+    for i in 0..3 {
+        assert_eq!(data.color[i], cold, "cold clump must be exactly cold");
+    }
+    for i in 3..6 {
+        assert_ne!(data.color[i], cold, "hot clump must move off the cold end");
+        for c in 0..3 {
+            let toward_hot = (hot[c] - cold[c]).signum();
+            assert!(
+                (data.color[i][c] - cold[c]) * toward_hot > 0.0,
+                "particle {i} channel {c} must move toward hot"
+            );
+            let (lo, hi) = (cold[c].min(hot[c]), cold[c].max(hot[c]));
+            assert!(data.color[i][c] >= lo && data.color[i][c] <= hi);
+        }
+    }
+}
+
+#[test]
+fn size_by_density_shrinks_dense_splats_and_softens_sparse_ones() {
+    // The clustered octahedron + 3 sparse escapers: dense splats must come out
+    // strictly smaller than sparse ones, all inside the clamp band.
+    let state = clustered_state();
+    let base = 1.0;
+    let (min_frac, max_frac) = (0.25, 4.0);
+    let cfg = PrepConfig {
+        size: base,
+        size_by_density: Some(SizeByDensity {
+            k: 2,
+            softening: 1e-6,
+            min_frac,
+            max_frac,
+        }),
+        ..Default::default()
+    };
+    let data = prepare(&state, &cfg);
+    for i in 0..6 {
+        for j in 6..9 {
+            assert!(
+                data.size[i] < data.size[j],
+                "dense splat {i} ({}) must be tighter than sparse {j} ({})",
+                data.size[i],
+                data.size[j]
+            );
+        }
+    }
+    for s in &data.size {
+        assert!(*s >= min_frac * base && *s <= max_frac * base);
+    }
+}
+
+#[test]
+fn compression_hue_shifts_only_the_compressed_clump() {
+    // Two tight quads far apart. At t1 clump A has contracted to half scale
+    // (ρ ×8); clump B is untouched — its kNN geometry is internal, so its density
+    // is bit-identical to t0 and its color must stay exactly the base. Clump A at
+    // full strength shifts t = 1 − ρ0/ρ = 7/8 of the way to young.
+    let quad = |center: DVec3, scale: f64| -> Vec<DVec3> {
+        vec![
+            center + DVec3::new(scale * 0.5, 0.0, 0.0),
+            center + DVec3::new(-scale * 0.5, 0.0, 0.0),
+            center + DVec3::new(0.0, scale * 0.5, 0.0),
+            center + DVec3::new(0.0, -scale * 0.5, 0.0),
+        ]
+    };
+    let b_center = DVec3::new(100.0, 0.0, 0.0);
+    let pos0: Vec<DVec3> = [quad(DVec3::ZERO, 1.0), quad(b_center, 1.0)].concat();
+    let pos1: Vec<DVec3> = [quad(DVec3::ZERO, 0.5), quad(b_center, 1.0)].concat();
+    let state_at = |pos: Vec<DVec3>| State {
+        vel: vec![DVec3::ZERO; 8],
+        mass: vec![1.0; 8],
+        id: (0..8).map(ParticleId).collect(),
+        progenitor: vec![Progenitor(0); 8],
+        time: 0.0,
+        a: 1.0,
+        pos,
+    };
+    let (k, softening) = (2, 1e-9);
+    let rho0 = knn_density(&pos0, k, softening);
+    let base = [0.8, 0.4, 0.2];
+    let young = [0.5, 0.7, 1.0];
+    let cfg = PrepConfig {
+        palette: vec![base],
+        compression: Some(CompressionHue {
+            k,
+            softening,
+            rho0,
+            young,
+            strength: 1.0,
+        }),
+        ..Default::default()
+    };
+    let data = prepare(&state_at(pos1), &cfg);
+    // Untouched clump B: base color bit-exact (ρ = ρ0 ⇒ no shift at all).
+    for i in 4..8 {
+        assert_eq!(data.color[i], base, "uncompressed particle {i} shifted");
+    }
+    // Compressed clump A: exactly 7/8 of the way to young (ρ/ρ0 = 8), lerp-rounding
+    // tolerance only.
+    let t = 1.0 - 1.0 / 8.0;
+    for i in 0..4 {
+        for c in 0..3 {
+            let want = (1.0 - t) * base[c] + t * young[c];
+            assert!(
+                (data.color[i][c] - want).abs() < 1e-5,
+                "particle {i} channel {c}: got {}, want {want}",
+                data.color[i][c]
+            );
+        }
+    }
+    // And the t0 frame itself: ρ = ρ0 everywhere ⇒ every color exactly base.
+    let at_t0 = prepare(&state_at(pos0), &cfg);
+    assert!(at_t0.color.iter().all(|&c| c == base));
+}
+
+#[test]
+fn full_featured_prepare_is_deterministic() {
+    // Every M6e path on at once — two calls, identical frames.
+    let state = two_temperature_state();
+    let cfg = PrepConfig {
+        color: ColorMode::Dispersion(DispersionColoring {
+            k: 2,
+            softening: 1e-9,
+            cold: [0.1, 0.2, 0.9],
+            hot: [0.9, 0.8, 0.1],
+        }),
+        density: Some(DensityColoring {
+            k: 2,
+            softening: 1e-9,
+            strength: 2.0,
+        }),
+        size_by_density: Some(SizeByDensity {
+            k: 2,
+            softening: 1e-9,
+            min_frac: 0.5,
+            max_frac: 2.0,
+        }),
+        compression: Some(CompressionHue {
+            k: 2,
+            softening: 1e-9,
+            rho0: knn_density(&two_temperature_state().pos, 2, 1e-9),
+            young: [0.6, 0.8, 1.0],
+            strength: 0.7,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(prepare(&state, &cfg), prepare(&state, &cfg));
 }

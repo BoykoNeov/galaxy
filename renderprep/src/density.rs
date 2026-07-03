@@ -50,6 +50,24 @@ pub struct DensityColoring {
     pub strength: f32,
 }
 
+/// Density-driven splat sizing for [`crate::prepare`] (M6e "size-by-density"):
+/// dense regions get tight small splats, diffuse regions soft large ones, via
+/// `size = base · clamp((ρ_ref/ρ)^{1/3}, min_frac, max_frac)` — the inverse
+/// cube-root is the natural inter-particle-spacing law (an SPH-style adaptive
+/// smoothing length). Carries its own kNN parameterization so `prepare` can share
+/// one O(N²) pass between all consumers that agree on `(k, softening)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SizeByDensity {
+    /// Neighbour count for the k-th-NN density estimate (see [`DensityColoring::k`]).
+    pub k: usize,
+    /// kNN distance floor (see [`DensityColoring::softening`]).
+    pub softening: f64,
+    /// Lower clamp on the size fraction (densest splats), `0 < min_frac ≤ 1`.
+    pub min_frac: f32,
+    /// Upper clamp on the size fraction (sparsest splats), `max_frac ≥ 1`.
+    pub max_frac: f32,
+}
+
 /// k-th nearest-neighbour local **number density** for every particle:
 /// `ρ_i = k / ((4/3)π d_{k,i}³)`, with `d_{k,i}` the distance from `i` to its k-th
 /// nearest neighbour (self excluded) floored at `softening` before cubing.
@@ -83,6 +101,52 @@ pub fn knn_density(positions: &[DVec3], k: usize, softening: f64) -> Vec<f64> {
             coeff / (d_k * d_k * d_k)
         })
         .collect()
+}
+
+/// k-NN **neighbourhood**: the densities of [`knn_density`] (bit-for-bit — gated)
+/// *plus* the k nearest-neighbour **indices** per particle (self excluded,
+/// unordered; any valid set on exact distance ties). The indices feed the
+/// velocity-dispersion coloring (M6e), which needs the neighbour *members*, not
+/// just the k-th distance.
+///
+/// Degenerate inputs mirror [`knn_density`]: with `N ≤ k` (or `k == 0`) every
+/// density is the `0.0` sentinel and every neighbour list is empty.
+pub fn knn_neighbourhood(
+    positions: &[DVec3],
+    k: usize,
+    softening: f64,
+) -> (Vec<f64>, Vec<Vec<usize>>) {
+    let _ = (positions, k, softening);
+    todo!("M6e: kNN neighbourhood (densities + indices)")
+}
+
+/// Local velocity dispersion `σ_v` per particle over its neighbourhood set
+/// `{self} ∪ neighbours[i]`: the root-mean-square deviation from the
+/// neighbourhood's mean velocity,
+///
+/// ```text
+///   σ_i = sqrt( (1/m) Σ_{j ∈ members} |v_j − v̄|² ),   v̄ = (1/m) Σ v_j
+/// ```
+///
+/// An empty neighbour list (the degenerate-kNN sentinel) yields `σ = 0.0` —
+/// "no neighbourhood", which the color ramp maps to the cold end.
+pub fn velocity_dispersion(vel: &[DVec3], neighbours: &[Vec<usize>]) -> Vec<f64> {
+    let _ = (vel, neighbours);
+    todo!("M6e: velocity dispersion over kNN neighbourhoods")
+}
+
+/// Per-particle splat sizes from local density — the [`SizeByDensity`] map:
+/// `base · clamp((ρ_ref/ρ_i)^{1/3}, min_frac, max_frac)`, with `ρ_ref` the mean
+/// over the *positive* densities (the same reference discipline as
+/// [`density_boost`]). `ρ_i = ρ_ref` gives exactly `base`; the `0.0` sentinel
+/// ("no neighbourhood") gets exactly `base` too — sizing only acts where the
+/// estimate is real. Returns all-`base` when no density is positive.
+///
+/// Panics if the clamp band is invalid (`min_frac`/`max_frac` non-finite,
+/// `min_frac ≤ 0`, or `min_frac > max_frac`) — a config bug, not a data condition.
+pub fn density_sizes(density: &[f64], base: f32, min_frac: f32, max_frac: f32) -> Vec<f32> {
+    let _ = (density, base, min_frac, max_frac);
+    todo!("M6e: density-driven splat sizes")
 }
 
 /// Per-particle brightness multiplier from local density — **mean-referenced and

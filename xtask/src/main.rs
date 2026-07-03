@@ -43,7 +43,9 @@ use galaxy_grade::{grade_file, BloomConfig, GradeConfig, ToneMap};
 use galaxy_ic::{DiskCollision, ExponentialDisk, Nfw, NfwCollision, Plummer, TruncatedNfw};
 use galaxy_render::camera::DEFAULT_MARGIN;
 use galaxy_render::{smooth_envelope, write_exr, Camera, CameraPath, RenderConfig, Renderer};
-use galaxy_renderprep::{prepare, subframe, DensityColoring, FrameData, HermiteSpan, PrepConfig};
+use galaxy_renderprep::{
+    prepare, subframe, ColorMode, DensityColoring, FrameData, HermiteSpan, PrepConfig,
+};
 use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_xtask::{
     framing_radius, parse_regrade_args, per_frame_radii, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS,
@@ -226,6 +228,9 @@ fn dm_scenario(quick: bool) -> Scenario {
                 softening: DM_EPS,
                 strength: DENSITY_STRENGTH,
             }),
+            color: ColorMode::Progenitor,
+            size_by_density: None,
+            compression: None,
         },
         eps: DM_EPS,
         dt,
@@ -333,6 +338,9 @@ fn disk_scenario(quick: bool) -> Scenario {
                 softening: DISK_EPS,
                 strength: DENSITY_STRENGTH,
             }),
+            color: ColorMode::Progenitor,
+            size_by_density: None,
+            compression: None,
         },
         eps: DISK_EPS,
         dt: 0.02,
@@ -449,6 +457,9 @@ fn cuspy_scenario(quick: bool) -> Scenario {
                 softening: CUSPY_EPS,
                 strength: DENSITY_STRENGTH,
             }),
+            color: ColorMode::Progenitor,
+            size_by_density: None,
+            compression: None,
         },
         eps: CUSPY_EPS,
         dt: 0.02,

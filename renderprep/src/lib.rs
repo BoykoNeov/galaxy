@@ -14,12 +14,17 @@
 //! The schema mirrors `galaxy-io`'s versioned little-endian style and is the
 //! decoupling contract, so it is versioned and changes deliberately.
 
+pub mod coloring;
 pub mod density;
 pub mod frame;
 pub mod interp;
 pub mod prepare;
 
-pub use density::{density_boost, knn_density, DensityColoring};
+pub use coloring::{compression_colors, dispersion_colors, initial_radius_colors, RadialRamp};
+pub use density::{
+    density_boost, density_sizes, knn_density, knn_neighbourhood, velocity_dispersion,
+    DensityColoring, SizeByDensity,
+};
 pub use frame::{FrameData, FrameError, FrameHeader};
 pub use interp::{subframe, HermiteSpan, InterpError};
-pub use prepare::{prepare, PrepConfig};
+pub use prepare::{prepare, ColorMode, CompressionHue, DispersionColoring, PrepConfig};

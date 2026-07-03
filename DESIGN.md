@@ -1046,6 +1046,12 @@ late-time positions — N-body is chaotic).
   - [next: the warm cuspy disk once ρ(r)'s cusp divergence is handled (unlocks Q≈1.5
     survival over *several* orbits, i.e. a full merger rather than a single flyby); a
     `scenario.toml` front-end so these hardcoded scenarios become data.]
+- **M6 (planned) — "the beautiful": visual/cinematic series.** Asinh grade + regrade
+  loop + density boost ON (M6a) → bloom (M6b) → Hermite temporal upsampling to 60 fps
+  (M6c) → animated camera rig (M6d) → coloring modes v2 incl. the density→blue
+  star-formation proxy (M6e) → `scenario.toml` + Toomre encounter zoo (M6f) →
+  perspective/vertex-path render, the 10⁸ swap (M6g, optional). Session-by-session
+  plan with gates and decisions: `docs/plans/cinematic-toomre-bloom.md`.
 
 ## Validation strategy
 

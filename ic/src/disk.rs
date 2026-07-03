@@ -43,6 +43,7 @@ use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 
 use std::f64::consts::{PI, TAU};
 
+use crate::gas_disk::GasParams;
 use crate::{Plummer, SphericalHalo};
 
 /// Toomre's stellar stability factor: Q = σ_R κ / (3.36 G Σ). The 3.36 is the
@@ -80,6 +81,14 @@ pub struct ExponentialDisk<H = Plummer> {
     /// dispersion targeting Toomre stability parameter `q`, with the mean azimuthal
     /// streaming reduced by asymmetric drift. Set via [`with_toomre_q`].
     toomre_q: Option<f64>,
+    /// Optional isothermal gas component (M7c). `None` = a purely stellar disk
+    /// (every existing IC). `Some` reserves a fraction `f_gas` of the total disk
+    /// mass as SPH gas with sound speed `c_s`: the disk potential is unchanged
+    /// (the same total `disk_mass` on the same profile), but that fraction is
+    /// sampled as `Species::Gas` with a thermal sech² layer and a
+    /// pressure-corrected rotation. Set via [`with_gas`](Self::with_gas); the gas
+    /// physics lives in [`crate::gas_disk`].
+    pub(crate) gas: Option<GasParams>,
 }
 
 impl<H: SphericalHalo> ExponentialDisk<H> {
@@ -102,6 +111,7 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
             r_max,
             halo,
             toomre_q: None,
+            gas: None,
         }
     }
 

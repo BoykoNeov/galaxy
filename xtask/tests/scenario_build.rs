@@ -9,7 +9,7 @@
 use galaxy_core::DVec3;
 use galaxy_ic::{DiskCollision, ExponentialDisk, Plummer, TruncatedNfw};
 use galaxy_xtask::spec::{
-    build_scenario, parse_scenario_toml, preset, DiskCounts, ModelSpec, Rig, ScenarioSpec,
+    build_scenario, parse_scenario_toml, preset, DiskCounts, ModelSpec, Rig, RigSpec, ScenarioSpec,
 };
 use galaxy_xtask::{
     DENSITY_K, DENSITY_STRENGTH, FRAME_H, FRAME_W, G, PEAK_BRIGHTNESS, QUICK_H, QUICK_W,
@@ -134,6 +134,36 @@ fn quick_build_honours_counts_cadence_and_frame_size() {
             azimuth_deg: (-90.0, 90.0),
             tilt_deg: (60.0, 60.0),
             window: 6,
+        }
+    );
+}
+
+#[test]
+fn dolly_build_maps_the_rig_verbatim() {
+    // The spec's dolly knobs must reach the runtime Rig untouched (fractions
+    // stay unresolved — the movie pipeline anchors them to the final framing
+    // radius). Gated against the parsed spec, not literal numbers, so preset
+    // tuning stays free (zoo rule 2: aesthetics are eyeballed, not gated).
+    let spec = parse_preset("dolly");
+    let RigSpec::Dolly {
+        direction_deg,
+        distance_frac,
+        fov_deg,
+        near_frac,
+    } = spec.rig
+    else {
+        panic!("dolly preset must carry a dolly rig, got {:?}", spec.rig);
+    };
+    let mut spec = spec;
+    shrink_quick(&mut spec, TINY);
+    let s = build_scenario(&spec, true);
+    assert_eq!(
+        s.rig,
+        Rig::Dolly {
+            direction_deg: (direction_deg[0], direction_deg[1]),
+            distance_frac: (distance_frac[0], distance_frac[1]),
+            fov_deg,
+            near_frac,
         }
     );
 }

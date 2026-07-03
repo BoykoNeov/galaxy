@@ -107,6 +107,22 @@ pub struct CameraPath(PathKind);
 enum PathKind {
     /// The back-compat default: one static camera for every frame.
     Fixed(Camera),
+    /// Fixed-direction perspective dolly (M6g): eased eye distance, constant fov.
+    Dolly {
+        target: Vec3,
+        /// Fixed spherical direction (θ azimuth, φ tilt) the eye approaches from.
+        azimuth: f32,
+        tilt: f32,
+        /// (start, end) eye distance in world units, eased over the timeline.
+        distance: (f32, f32),
+        /// Vertical field of view in radians — CONSTANT (a camera move, not a
+        /// zoom): `half_extent.y = distance·tan(fov_y/2)` at every u.
+        fov_y: f32,
+        /// Near-plane depth from the eye (world units), constant along the path.
+        near: f32,
+        /// Image aspect (width : height); `half_extent.x = aspect · half_extent.y`.
+        aspect: f32,
+    },
     /// Eased azimuth/tilt sweep + breathing framing radius about a fixed target.
     OrbitTilt {
         target: Vec3,
@@ -128,6 +144,30 @@ impl CameraPath {
     /// bit-exact back-compat with the pre-M6d single-framing pipeline.
     pub fn fixed(camera: Camera) -> Self {
         CameraPath(PathKind::Fixed(camera))
+    }
+
+    /// A fixed-direction perspective dolly: the eye approaches `target` from the
+    /// spherical direction `(azimuth, tilt)` (the same documented basis as
+    /// [`CameraPath::orbit_tilt`]), its distance easing from `distance.0` to
+    /// `distance.1`, with a constant vertical field of view `fov_y` — a physical
+    /// camera move, not a zoom. Dollying *out* (`distance.1 > distance.0`) is
+    /// legitimate.
+    ///
+    /// Validation (fail loudly, per house style): distances finite and `> 0`;
+    /// `fov_y` finite in `(0, π)`; `near` finite with `0 < near <
+    /// min(distance)`; `aspect` finite and `> 0`; angles finite.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dolly(
+        target: Vec3,
+        azimuth: f32,
+        tilt: f32,
+        distance: (f32, f32),
+        fov_y: f32,
+        near: f32,
+        aspect: f32,
+    ) -> Result<Self, RigError> {
+        let _ = (target, azimuth, tilt, distance, fov_y, near, aspect);
+        todo!("M6g: dolly path")
     }
 
     /// An eased orbit/tilt sweep about `target` with a breathing framing radius.
@@ -181,6 +221,7 @@ impl CameraPath {
     pub fn camera_at(&self, u: f32) -> Camera {
         match &self.0 {
             PathKind::Fixed(camera) => *camera,
+            PathKind::Dolly { .. } => todo!("M6g: dolly camera_at"),
             PathKind::OrbitTilt {
                 target,
                 azimuth,

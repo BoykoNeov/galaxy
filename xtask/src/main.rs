@@ -325,6 +325,7 @@ fn run_movie(
                 rcfg.aspect(),
             )?
         }
+        Rig::Dolly { .. } => todo!("M6g: dolly rig wiring"),
     };
     let gcfg = GradeConfig {
         exposure: EXPOSURE,

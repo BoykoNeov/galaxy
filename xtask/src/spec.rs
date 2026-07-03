@@ -239,6 +239,18 @@ pub enum RigSpec {
         tilt_deg: [f32; 2],
         window: usize,
     },
+    /// Fixed-direction perspective dolly (M6g): the eye approaches from
+    /// `direction_deg` = [azimuth, tilt] (degrees, the orbit-tilt spherical
+    /// convention) with constant vertical `fov_deg`. Distances are *fractions
+    /// of the final framing radius* (scene-scale-free): the eye eases from
+    /// `distance_frac[0]` to `distance_frac[1]` × that radius; the near plane
+    /// sits at `near_frac` × the same radius.
+    Dolly {
+        direction_deg: [f32; 2],
+        distance_frac: [f32; 2],
+        fov_deg: f32,
+        near_frac: f32,
+    },
 }
 
 /// The raw `[model]` table: a strict superset of every model kind's keys, so an
@@ -283,7 +295,9 @@ impl TryFrom<ModelTable> for ModelSpec {
     }
 }
 
-/// The raw `[rig]` table (strict superset of both rig kinds' keys).
+/// The raw `[rig]` table (strict superset of every rig kind's keys, so an
+/// unknown key is rejected by serde and each kind then checks it got exactly
+/// the keys it needs — no silently ignored knobs).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RigTable {
@@ -291,6 +305,22 @@ struct RigTable {
     azimuth_deg: Option<[f32; 2]>,
     tilt_deg: Option<[f32; 2]>,
     window: Option<usize>,
+    direction_deg: Option<[f32; 2]>,
+    distance_frac: Option<[f32; 2]>,
+    fov_deg: Option<f32>,
+    near_frac: Option<f32>,
+}
+
+impl RigTable {
+    fn orbit_knobs(&self) -> bool {
+        self.azimuth_deg.is_some() || self.tilt_deg.is_some() || self.window.is_some()
+    }
+    fn dolly_knobs(&self) -> bool {
+        self.direction_deg.is_some()
+            || self.distance_frac.is_some()
+            || self.fov_deg.is_some()
+            || self.near_frac.is_some()
+    }
 }
 
 impl TryFrom<RigTable> for RigSpec {
@@ -299,17 +329,25 @@ impl TryFrom<RigTable> for RigSpec {
     fn try_from(t: RigTable) -> Result<Self, String> {
         match t.kind.as_str() {
             "static" => {
-                if t.azimuth_deg.is_some() || t.tilt_deg.is_some() || t.window.is_some() {
-                    return Err("rig kind `static` takes no orbit-tilt knobs".into());
+                if t.orbit_knobs() || t.dolly_knobs() {
+                    return Err("rig kind `static` takes no orbit-tilt/dolly knobs".into());
                 }
                 Ok(RigSpec::Static)
             }
-            "orbit-tilt" => Ok(RigSpec::OrbitTilt {
-                azimuth_deg: t.azimuth_deg.ok_or("rig orbit-tilt needs azimuth_deg")?,
-                tilt_deg: t.tilt_deg.ok_or("rig orbit-tilt needs tilt_deg")?,
-                window: t.window.ok_or("rig orbit-tilt needs window")?,
-            }),
-            other => Err(format!("unknown rig kind `{other}` (static|orbit-tilt)")),
+            "orbit-tilt" => {
+                if t.dolly_knobs() {
+                    return Err("rig kind `orbit-tilt` takes no dolly knobs".into());
+                }
+                Ok(RigSpec::OrbitTilt {
+                    azimuth_deg: t.azimuth_deg.ok_or("rig orbit-tilt needs azimuth_deg")?,
+                    tilt_deg: t.tilt_deg.ok_or("rig orbit-tilt needs tilt_deg")?,
+                    window: t.window.ok_or("rig orbit-tilt needs window")?,
+                })
+            }
+            "dolly" => todo!("M6g: dolly rig table"),
+            other => Err(format!(
+                "unknown rig kind `{other}` (static|orbit-tilt|dolly)"
+            )),
         }
     }
 }
@@ -324,6 +362,7 @@ pub const PRESETS: &[(&str, &str)] = &[
     ("inclined", include_str!("../scenarios/inclined.toml")),
     ("bullseye", include_str!("../scenarios/bullseye.toml")),
     ("minor", include_str!("../scenarios/minor.toml")),
+    ("dolly", include_str!("../scenarios/dolly.toml")),
 ];
 
 /// Look up a checked-in preset's toml text by canonical name.
@@ -458,18 +497,21 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
     }
 
     // Rig.
-    if let RigSpec::OrbitTilt {
-        azimuth_deg,
-        tilt_deg,
-        window,
-    } = &s.rig
-    {
-        if *window == 0 {
-            return Err("rig window must be positive (snapshots of envelope smoothing)".into());
+    match &s.rig {
+        RigSpec::Static => {}
+        RigSpec::OrbitTilt {
+            azimuth_deg,
+            tilt_deg,
+            window,
+        } => {
+            if *window == 0 {
+                return Err("rig window must be positive (snapshots of envelope smoothing)".into());
+            }
+            if !azimuth_deg.iter().chain(tilt_deg).all(|a| a.is_finite()) {
+                return Err("rig angles must be finite".into());
+            }
         }
-        if !azimuth_deg.iter().chain(tilt_deg).all(|a| a.is_finite()) {
-            return Err("rig angles must be finite".into());
-        }
+        RigSpec::Dolly { .. } => todo!("M6g: dolly rig validation"),
     }
     Ok(())
 }
@@ -560,6 +602,15 @@ pub enum Rig {
         azimuth_deg: (f32, f32),
         tilt_deg: (f32, f32),
         window: usize,
+    },
+    /// Fixed-direction perspective dolly (M6g); the runtime form of
+    /// [`RigSpec::Dolly`] (same fields, fractions still unresolved — the movie
+    /// pipeline anchors them to the final framing radius it computes).
+    Dolly {
+        direction_deg: (f32, f32),
+        distance_frac: (f32, f32),
+        fov_deg: f32,
+        near_frac: f32,
     },
 }
 
@@ -684,6 +735,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                 tilt_deg: (tilt_deg[0], tilt_deg[1]),
                 window: *window,
             },
+            RigSpec::Dolly { .. } => todo!("M6g: dolly rig build"),
         },
         ramp: spec.look.ramps.iter().map(|r| (r.inner, r.outer)).collect(),
         sf_progenitors: spec.look.sf_progenitors.clone(),
@@ -1128,6 +1180,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dolly_is_the_cuspy_encounter_flown_through() {
+        // The M6g demo: same physics realization as cuspy (the rig is the whole
+        // point), approaching from outside the framed scene to inside the
+        // remnant, with the near plane short of the closest approach.
+        let cuspy = parse_preset("cuspy");
+        let d = parse_preset("dolly");
+        assert_eq!(d.seed, cuspy.seed);
+        assert_eq!(d.orbit, cuspy.orbit);
+        assert_eq!(d.sim, cuspy.sim);
+        assert_eq!(d.model, cuspy.model);
+        let RigSpec::Dolly {
+            distance_frac,
+            fov_deg,
+            near_frac,
+            ..
+        } = d.rig
+        else {
+            panic!("dolly preset must carry a dolly rig, got {:?}", d.rig);
+        };
+        assert!(
+            distance_frac[0] > 1.0,
+            "must start outside the framed scene: {distance_frac:?}"
+        );
+        assert!(
+            distance_frac[1] < 1.0,
+            "must end inside the remnant: {distance_frac:?}"
+        );
+        assert!(near_frac > 0.0 && near_frac < distance_frac[1]);
+        assert!(fov_deg > 0.0 && fov_deg < 180.0);
+    }
+
     // --- registry + validation --------------------------------------------------
 
     #[test]
@@ -1237,6 +1321,45 @@ mod tests {
                 parse_scenario_toml(&bad).is_err(),
                 "should reject: {why}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_broken_dolly_rigs() {
+        let dolly = preset("dolly").unwrap();
+        let cuspy = preset("cuspy").unwrap();
+        for (bad, why) in [
+            (dolly.replace("fov_deg = 55.0", "fov_deg = 0.0"), "zero fov"),
+            (
+                dolly.replace("fov_deg = 55.0", "fov_deg = 180.0"),
+                "fov at 180° (tan pole)",
+            ),
+            (
+                dolly.replace("near_frac = 0.02", "near_frac = 0.5"),
+                "near plane at/past the closest approach",
+            ),
+            (
+                dolly.replace("distance_frac = [5.0, 0.35]", "distance_frac = [5.0, 0.0]"),
+                "non-positive dolly distance",
+            ),
+            (dolly.replace("fov_deg = 55.0", ""), "dolly missing fov"),
+            (
+                dolly.replace("kind = \"dolly\"", "kind = \"static\""),
+                "static with dolly knobs",
+            ),
+            (
+                cuspy.replace("window = 8", "window = 8\nfov_deg = 55.0"),
+                "orbit-tilt with a dolly knob",
+            ),
+            (
+                dolly.replace(
+                    "direction_deg = [-60.0, 55.0]",
+                    "direction_deg = [-60.0, nan]",
+                ),
+                "non-finite dolly direction",
+            ),
+        ] {
+            assert!(parse_scenario_toml(&bad).is_err(), "should reject: {why}");
         }
     }
 

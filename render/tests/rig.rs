@@ -1,9 +1,9 @@
-//! Camera-rig gates (DESIGN.md M6d). Expectations are hand-derived from the
-//! documented definitions in `rig.rs` — the spherical basis convention, the
-//! σ = window/3 truncated-Gaussian envelope, the quintic smootherstep — never
-//! read back from the code under test.
+//! Camera-rig gates (DESIGN.md M6d orbit/tilt, M6g dolly). Expectations are
+//! hand-derived from the documented definitions in `rig.rs` — the spherical
+//! basis convention, the σ = window/3 truncated-Gaussian envelope, the quintic
+//! smootherstep — never read back from the code under test.
 
-use galaxy_render::camera::{Camera, DEFAULT_MARGIN};
+use galaxy_render::camera::{Camera, Projection, DEFAULT_MARGIN};
 use galaxy_render::rig::{ease_in_out, smooth_envelope, CameraPath, RigError};
 use glam::{Vec2, Vec3};
 use proptest::prelude::*;
@@ -407,4 +407,142 @@ fn splat_isotropy_under_aspect() {
     let path = test_path(vec![2.0], 2.0, 0.0);
     let s: Vec2 = path.camera_at(0.5).splat_ndc(0.5);
     assert!((s.y / s.x - 2.0).abs() < 1e-4, "splat anisotropic: {s:?}");
+}
+
+// --- dolly (M6g) ---------------------------------------------------------------
+//
+// A fixed-direction perspective dolly: the eye approaches the target along
+// r̂(θ, φ) (the same spherical convention as orbit/tilt), the eye distance eases
+// from start to end, and the vertical field of view is CONSTANT — a physical
+// camera move, not a zoom, so `half_extent.y = distance·tan(fov_y/2)` at every u.
+// Gates use fov_y = π/2 (tan = 1: half_extent.y == distance, hand-checkable).
+
+fn dolly_path() -> CameraPath {
+    CameraPath::dolly(
+        Vec3::ZERO,
+        -std::f32::consts::FRAC_PI_2,
+        0.0,
+        (10.0, 2.0),
+        std::f32::consts::FRAC_PI_2,
+        0.1,
+        2.0,
+    )
+    .unwrap()
+}
+
+/// The perspective parameters of a path's camera at `u` (distance, near),
+/// panicking if the camera is not perspective — every dolly camera must be.
+fn persp_params(path: &CameraPath, u: f32) -> (f32, f32) {
+    match path.camera_at(u).projection {
+        Projection::Perspective { distance, near } => (distance, near),
+        other => panic!("dolly camera at u={u} is not perspective: {other:?}"),
+    }
+}
+
+#[test]
+fn dolly_endpoints_hit_the_requested_distances() {
+    let path = dolly_path();
+    let (d0, n0) = persp_params(&path, 0.0);
+    let (d1, n1) = persp_params(&path, 1.0);
+    assert!((d0 - 10.0).abs() < EPS, "start distance {d0}");
+    assert!((d1 - 2.0).abs() < EPS, "end distance {d1}");
+    // With fov_y = π/2, half_extent.y == distance exactly.
+    assert!(path
+        .camera_at(0.0)
+        .half_extent
+        .abs_diff_eq(Vec2::new(20.0, 10.0), 1e-3));
+    assert!(path
+        .camera_at(1.0)
+        .half_extent
+        .abs_diff_eq(Vec2::new(4.0, 2.0), 1e-3));
+    // The near plane rides along unchanged.
+    assert!((n0 - 0.1).abs() < EPS && (n1 - 0.1).abs() < EPS);
+}
+
+#[test]
+fn dolly_field_of_view_is_constant() {
+    // A dolly is a camera MOVE: fov fixed, so half_extent.y/distance =
+    // tan(fov_y/2) = 1 at every sample (this is what separates it from a zoom).
+    let path = dolly_path();
+    for u in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] {
+        let c = path.camera_at(u);
+        let (d, _) = persp_params(&path, u);
+        assert!(
+            (c.half_extent.y / d - 1.0).abs() < 1e-4,
+            "fov drifted at u={u}: he.y {} vs distance {d}",
+            c.half_extent.y
+        );
+        assert!(
+            (c.half_extent.x / c.half_extent.y - 2.0).abs() < 1e-4,
+            "aspect drifted at u={u}"
+        );
+    }
+}
+
+#[test]
+fn dolly_distance_eases_like_the_angles() {
+    // Same quintic ease as orbit/tilt: midpoint is the exact arithmetic mean
+    // (ease(1/2) = 1/2 bit-exactly), approach is monotone for start > end.
+    let path = dolly_path();
+    let (dm, _) = persp_params(&path, 0.5);
+    assert!((dm - 6.0).abs() < 1e-4, "midpoint distance {dm}");
+    let mut prev = persp_params(&path, 0.0).0;
+    for i in 1..=100 {
+        let (d, _) = persp_params(&path, i as f32 / 100.0);
+        assert!(d <= prev + EPS, "approach not monotone at i={i}");
+        prev = d;
+    }
+}
+
+#[test]
+fn dolly_basis_matches_the_orbit_convention() {
+    // The dolly direction uses the SAME documented spherical basis as
+    // orbit/tilt (which is pinned against hand-derived poses above): a dolly
+    // at fixed (θ, φ) must produce the identical camera orientation as a
+    // degenerate orbit parked at those angles.
+    let target = Vec3::new(1.0, 2.0, 3.0);
+    let d = CameraPath::dolly(target, 0.7, 1.1, (8.0, 3.0), 1.0, 0.05, 1.5).unwrap();
+    let o = CameraPath::orbit_tilt(target, (0.7, 0.7), (1.1, 1.1), vec![1.0], 0.0, 1.5).unwrap();
+    for u in [0.0, 0.3, 0.5, 1.0] {
+        let cd = d.camera_at(u);
+        let co = o.camera_at(u);
+        assert!(cd.right.abs_diff_eq(co.right, EPS), "right at u={u}");
+        assert!(cd.up.abs_diff_eq(co.up, EPS), "up at u={u}");
+        assert!(cd.forward.abs_diff_eq(co.forward, EPS), "forward at u={u}");
+        assert!(cd.target.abs_diff_eq(target, EPS), "target at u={u}");
+    }
+}
+
+#[test]
+fn dolly_face_on_pose_reproduces_the_historical_orientation() {
+    // θ = −π/2, φ = 0 is the pinned face-on pose: right +X, up +Y, forward −Z.
+    let c = dolly_path().camera_at(0.0);
+    assert!(c.right.abs_diff_eq(Vec3::X, EPS), "{:?}", c.right);
+    assert!(c.up.abs_diff_eq(Vec3::Y, EPS), "{:?}", c.up);
+    assert!(c.forward.abs_diff_eq(Vec3::NEG_Z, EPS), "{:?}", c.forward);
+}
+
+#[test]
+fn dolly_rejects_invalid_parameters() {
+    use std::f32::consts::PI;
+    let ok = (Vec3::ZERO, -1.0f32, 0.5f32);
+    for (dist, fov, near, aspect, why) in [
+        ((0.0, 2.0), 1.0, 0.1, 1.0, "zero start distance"),
+        ((10.0, -2.0), 1.0, 0.1, 1.0, "negative end distance"),
+        ((10.0, 2.0), 0.0, 0.1, 1.0, "zero fov"),
+        ((10.0, 2.0), PI, 0.1, 1.0, "fov at π (tan blows up)"),
+        ((10.0, 2.0), 1.0, 2.0, 1.0, "near at the closest approach"),
+        ((10.0, 2.0), 1.0, -0.1, 1.0, "negative near"),
+        ((10.0, 2.0), 1.0, 0.1, 0.0, "zero aspect"),
+        ((f32::NAN, 2.0), 1.0, 0.1, 1.0, "non-finite distance"),
+    ] {
+        let r = CameraPath::dolly(ok.0, ok.1, ok.2, dist, fov, near, aspect);
+        assert!(r.is_err(), "should reject: {why}");
+    }
+    assert!(
+        CameraPath::dolly(ok.0, f32::INFINITY, ok.2, (10.0, 2.0), 1.0, 0.1, 1.0).is_err(),
+        "should reject: non-finite azimuth"
+    );
+    // Dolly OUT (end > start) is legitimate — retreat shots are real shots.
+    assert!(CameraPath::dolly(ok.0, ok.1, ok.2, (2.0, 10.0), 1.0, 0.1, 1.0).is_ok());
 }

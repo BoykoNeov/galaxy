@@ -23,8 +23,6 @@
 use galaxy_core::{DVec3, Progenitor, State};
 use galaxy_ic::{ExponentialDisk, Hernquist, Nfw, TruncatedNfw};
 
-const PI: f64 = std::f64::consts::PI;
-
 // ---------- fiducial galaxies ----------
 
 /// A submaximal cold disk (10% of the halo mass) in a unit Hernquist halo. The
@@ -114,7 +112,10 @@ fn cuspy_rotation_curve_rises_to_a_plateau() {
     let d = fiducial_hernquist();
     let v = |r: f64| d.circular_velocity(r);
     // Rises across the inner disk...
-    assert!(v(0.5) > v(0.2) && v(1.0) > v(0.5), "v_c should rise inward-out");
+    assert!(
+        v(0.5) > v(0.2) && v(1.0) > v(0.5),
+        "v_c should rise inward-out"
+    );
     // ...and the outer slope is much gentler than the inner slope (plateau-like).
     let inner_slope = (v(0.5) - v(0.2)) / 0.3;
     let outer_slope = (v(2.0) - v(1.5)) / 0.5;
@@ -218,5 +219,9 @@ fn disk_has_coherent_spin_and_galaxy_is_zero_com() {
         mtot += s.mass[i];
     }
     assert!(mom.length() < 1e-9 * mtot.max(1.0), "net momentum: {mom:?}");
-    assert!((com / mtot).length() < 1e-9, "COM off origin: {:?}", com / mtot);
+    assert!(
+        (com / mtot).length() < 1e-9,
+        "COM off origin: {:?}",
+        com / mtot
+    );
 }

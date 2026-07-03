@@ -70,54 +70,56 @@ impl SphericalHalo for Plummer {
 
 impl SphericalHalo for Hernquist {
     fn g(&self) -> f64 {
-        todo!("wire Hernquist into SphericalHalo")
+        self.g
     }
     fn total_mass(&self) -> f64 {
-        todo!("wire Hernquist into SphericalHalo")
+        self.total_mass
     }
-    fn density(&self, _r: f64) -> f64 {
-        todo!("wire Hernquist into SphericalHalo")
+    fn density(&self, r: f64) -> f64 {
+        Hernquist::density(self, r)
     }
-    fn enclosed_mass(&self, _r: f64) -> f64 {
-        todo!("wire Hernquist into SphericalHalo")
+    fn enclosed_mass(&self, r: f64) -> f64 {
+        Hernquist::enclosed_mass(self, r)
     }
-    fn sample(&self, _n: usize, _seed: u64) -> State {
-        todo!("wire Hernquist into SphericalHalo")
+    fn sample(&self, n: usize, seed: u64) -> State {
+        Hernquist::sample(self, n, seed)
     }
 }
 
 impl SphericalHalo for Nfw {
     fn g(&self) -> f64 {
-        todo!("wire Nfw into SphericalHalo")
+        self.g
     }
+    /// The untruncated NFW total mass diverges; return `M_vir`, which is exactly
+    /// what [`Nfw::sample`] realizes (profile truncated at `r_vir`).
     fn total_mass(&self) -> f64 {
-        todo!("wire Nfw into SphericalHalo")
+        self.virial_mass
     }
-    fn density(&self, _r: f64) -> f64 {
-        todo!("wire Nfw into SphericalHalo")
+    fn density(&self, r: f64) -> f64 {
+        Nfw::density(self, r)
     }
-    fn enclosed_mass(&self, _r: f64) -> f64 {
-        todo!("wire Nfw into SphericalHalo")
+    fn enclosed_mass(&self, r: f64) -> f64 {
+        Nfw::enclosed_mass(self, r)
     }
-    fn sample(&self, _n: usize, _seed: u64) -> State {
-        todo!("wire Nfw into SphericalHalo")
+    fn sample(&self, n: usize, seed: u64) -> State {
+        Nfw::sample(self, n, seed)
     }
 }
 
 impl SphericalHalo for TruncatedNfw {
     fn g(&self) -> f64 {
-        todo!("wire TruncatedNfw into SphericalHalo")
+        self.base.g
     }
     fn total_mass(&self) -> f64 {
-        todo!("wire TruncatedNfw into SphericalHalo")
+        TruncatedNfw::total_mass(self)
     }
-    fn density(&self, _r: f64) -> f64 {
-        todo!("wire TruncatedNfw into SphericalHalo")
+    fn density(&self, r: f64) -> f64 {
+        TruncatedNfw::density(self, r)
     }
-    fn enclosed_mass(&self, _r: f64) -> f64 {
-        todo!("wire TruncatedNfw into SphericalHalo")
+    fn enclosed_mass(&self, r: f64) -> f64 {
+        TruncatedNfw::enclosed_mass(self, r)
     }
-    fn sample(&self, _n: usize, _seed: u64) -> State {
-        todo!("wire TruncatedNfw into SphericalHalo")
+    fn sample(&self, n: usize, seed: u64) -> State {
+        TruncatedNfw::sample(self, n, seed)
     }
 }

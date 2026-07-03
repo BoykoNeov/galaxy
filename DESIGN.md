@@ -962,7 +962,51 @@ late-time positions — N-body is chaotic).
     unit-tested in `xtask/lib.rs` and every physics invariant (total mass, two progenitors,
     zero-COM, exact rigid placement, internal equilibrium) is already gated in
     `ic/tests/nfw_collision.rs` + `nfw_truncated_stability.rs`, so re-testing here is redundant.
-    [next: a cuspy-halo variant of `DiskInHalo` (needs the halo abstracted behind a trait)]
+
+- **Cuspy-halo disk galaxy (landed, M5f) — the halo abstracted behind a trait.**
+  The M3.5 `ExponentialDisk` was hard-wired to a `Plummer` halo. `SphericalHalo`
+  (`ic/halo.rs`) names the exact surface the disk reads from its halo — `g()`,
+  `total_mass()`, `density(r)`, `enclosed_mass(r)`, `sample(n, seed)` — so
+  `ExponentialDisk<H = Plummer>` is now generic over it and a cold disk can sit in a
+  cuspy [`Hernquist`]/[`Nfw`]/[`TruncatedNfw`] halo, not only the cored Plummer. The
+  **default type parameter** keeps every existing `ExponentialDisk` mention meaning
+  `<Plummer>` (zero blast radius; `DiskCollision`, xtask, and all M3.5 tests compile
+  unchanged); each impl **forwards to the model's inherent methods** via a
+  type-qualified path (`Nfw::density(self, r)`) so a trait method can never recurse.
+  Mirrors the swappable-`ForceSolver` pattern. One deliberate non-uniformity: the
+  untruncated NFW's total mass **diverges**, so `Nfw::total_mass()` returns `M_vir`,
+  exactly what `Nfw::sample` realizes (truncated at r_vir).
+  - **The payoff — a realistic rotation curve.** A cuspy halo's M(<r) rises steeply
+    from the center, so the disk's rotation curve **rises to a flat plateau** (the CDM
+    -galaxy shape) instead of turning over as it does in a Plummer core.
+  - **Scope: the COLD disk** (no Toomre warmth this round). A cold disk on circular
+    orbits is an equilibrium in *any* spherical potential — the honest first
+    increment. The warm path leans on ρ(r), which **diverges** at a cusp, so warm-in
+    -a-cusp is a deliberate follow-up.
+  - **Gates.** Analytic self-consistency: v_c(R) matches √(G·[M_halo(<R)+M_disk(<R)]/R)
+    against **independently hand-derived** cuspy enclosed masses — Hernquist
+    M(<r)=M r²/(r+a)² and the NFW closed form — the discriminating check that the
+    right (cuspy) mass profile feeds the disk. Plus a realization's tags/order, spin,
+    zero-COM, and ⟨v_φ⟩(R) on the analytic v_c. The **NFW variant proves the trait
+    genuinely abstracts multiple cuspy halos**, not just Hernquist.
+  - **Finding — a cusp must be RESOLVED for the live-halo stability gate.** Unlike the
+    cored Plummer disk (holds at N_halo=1000, ε=0.05·r_s), a cold disk in a *live*
+    N-body cusp needs a **smaller softening fraction and more halo particles**
+    (fiducial N_halo=6000, ε=0.01·r_s): at low resolution the N-body inward force in
+    the inner cusp falls **several-fold below** the analytic G·M(<r)/r² the disk is
+    placed on, so the disk over-rotates and flies apart (r_half drifts ~80% in one
+    orbit). This is a resolution/softening artifact of the live halo, **not** an IC
+    defect — the sampling is exact (analytic gates), the disk just reads a smooth
+    force the under-resolved cusp doesn't deliver ("judge structure outside ε"). At
+    resolution the disk holds: the gate checks the half-mass radius **and the 90%
+    Lagrangian radius** (the latter catches a minority of inner, least-resolved
+    particles blowing out that a median would mask) — both hold to <10%, E and L_z
+    conserved. RMS thickness is a *loose* sanity bound only: the cold v_z=0 sheet is a
+    geometric layer, not a vertical equilibrium, so it settles/phase-mixes vertically,
+    more so in the steeper cuspy field.
+  - [next: wire a cuspy `ExponentialDisk` into `DiskCollision` for a *disk+halo*
+    merger movie with real tidal tails (the M5e DM movie is pure blobs); and/or the
+    warm cuspy disk once ρ(r)'s cusp divergence is handled.]
 
 ## Validation strategy
 

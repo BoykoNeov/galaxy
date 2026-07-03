@@ -86,13 +86,7 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
     /// Construct a disk galaxy. All scalar parameters must be strictly positive,
     /// the disk's `g` is inherited from `halo.g()`, and `r_max` must exceed the
     /// scale length.
-    pub fn new(
-        disk_mass: f64,
-        scale_length: f64,
-        scale_height: f64,
-        r_max: f64,
-        halo: H,
-    ) -> Self {
+    pub fn new(disk_mass: f64, scale_length: f64, scale_height: f64, r_max: f64, halo: H) -> Self {
         assert!(disk_mass > 0.0, "disk mass must be positive");
         assert!(scale_length > 0.0, "scale length must be positive");
         assert!(scale_height > 0.0, "scale height must be positive");

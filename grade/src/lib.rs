@@ -7,7 +7,12 @@
 //! seconds without re-running physics or the GPU. It has no dependency on
 //! `galaxy-render` (and so pulls in no wgpu).
 //!
-//! Grade = exposure → tone curve (ACES/Reinhard) → sRGB OETF → 16-bit quantize.
+//! Grade = [bloom (linear, image-space)] → exposure → tone curve (ACES/Reinhard/
+//! asinh) → sRGB OETF → 16-bit quantize.
+
+mod bloom;
+
+pub use bloom::{bloom, BloomConfig};
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -43,6 +48,10 @@ pub struct GradeConfig {
     pub exposure: f32,
     /// The tone-mapping operator.
     pub tonemap: ToneMap,
+    /// Optional bloom, applied image-wide in linear space BEFORE exposure and the
+    /// tone curve (`None` ⇒ off). An image-space op — `grade_file` runs it; the
+    /// per-pixel [`tonemap`] cannot and does not.
+    pub bloom: Option<BloomConfig>,
 }
 
 impl Default for GradeConfig {
@@ -50,6 +59,7 @@ impl Default for GradeConfig {
         GradeConfig {
             exposure: 1.0,
             tonemap: ToneMap::AcesApprox,
+            bloom: None,
         }
     }
 }

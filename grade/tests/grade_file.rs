@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::BufReader;
 
 use exr::prelude::write_rgba_file;
-use galaxy_grade::{grade_file, tonemap, GradeConfig};
+use galaxy_grade::{bloom, grade_file, tonemap, BloomConfig, GradeConfig, ToneMap};
 
 fn scratch(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -63,6 +63,62 @@ fn grades_exr_to_16bit_srgb_png() {
             assert!(
                 d <= 1,
                 "pixel {i} ch {c}: png {} vs tonemap {}",
+                px[i][c],
+                expected[c]
+            );
+        }
+    }
+}
+
+#[test]
+fn grade_file_applies_bloom_before_the_tone_curve() {
+    // Bloom is an image-space linear-domain op, so it cannot live inside the
+    // per-pixel `tonemap()` — grade_file must run it over the whole EXR image
+    // FIRST, then tonemap each bloomed pixel. Oracle: `bloom()` (independently
+    // gated in bloom.rs) composed with `tonemap()` (gated in tonemap.rs) — this
+    // test pins the wiring: bloom actually applied, in linear space before the
+    // curve, with the row-major pixel order shared between EXR and bloom.
+    const W: usize = 9;
+    const H: usize = 5;
+    // Dim grey background with one hot pixel at the center — bloom must leak
+    // flux into the neighbours, so a grade that ignores `cfg.bloom` mismatches.
+    let mut linear = vec![[0.05f32, 0.05, 0.05]; W * H];
+    linear[2 * W + 4] = [4.0, 2.0, 1.0];
+
+    let exr_path = scratch("galaxy_grade_bloom_in.exr");
+    let png_path = scratch("galaxy_grade_bloom_out.png");
+    write_rgba_file(&exr_path, W, H, |x, y| {
+        let p = linear[y * W + x];
+        (p[0], p[1], p[2], 1.0f32)
+    })
+    .unwrap();
+
+    let bloom_cfg = BloomConfig {
+        strength: 1.5,
+        levels: 2,
+        radius: 1.0,
+    };
+    // Non-default exposure/curve so the composition order is exercised too.
+    let cfg = GradeConfig {
+        exposure: 2.0,
+        tonemap: ToneMap::Reinhard,
+        bloom: Some(bloom_cfg),
+    };
+    grade_file(&exr_path, &png_path, &cfg).unwrap();
+
+    let (w, h, px) = read_png16(&png_path);
+    let _ = std::fs::remove_file(&exr_path);
+    let _ = std::fs::remove_file(&png_path);
+
+    assert_eq!((w, h), (W as u32, H as u32));
+    let bloomed = bloom(&linear, W, H, &bloom_cfg);
+    for (i, lin) in bloomed.iter().enumerate() {
+        let expected = tonemap(*lin, &cfg);
+        for c in 0..3 {
+            let d = (px[i][c] as i32 - expected[c] as i32).abs();
+            assert!(
+                d <= 1,
+                "pixel {i} ch {c}: png {} vs bloom∘tonemap {}",
                 px[i][c],
                 expected[c]
             );

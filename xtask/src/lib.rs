@@ -11,6 +11,14 @@ use glam::Vec3;
 /// given. A tuning constant, eyeballed against the rendered collision frames (M6a).
 pub const DEFAULT_ASINH_BETA: f32 = 0.2;
 
+/// Default bloom mip-pyramid depth for `regrade --bloom S` when `--bloom-levels` is
+/// not given: 5 octaves span halo scales from ~2 px up to ~the frame at 720p (M6b).
+pub const DEFAULT_BLOOM_LEVELS: u32 = 5;
+
+/// Default per-level Gaussian σ (pixels) for `regrade --bloom S` when
+/// `--bloom-radius` is not given (M6b).
+pub const DEFAULT_BLOOM_RADIUS: f32 = 2.0;
+
 /// A parsed `regrade` invocation: which EXR frames to read, where the PNGs go, and
 /// the grade to apply.
 #[derive(Clone, Debug, PartialEq)]
@@ -78,7 +86,11 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
     Ok(RegradeArgs {
         exr_dir: PathBuf::from(exr_dir),
         png_dir: PathBuf::from(png_dir),
-        grade: GradeConfig { exposure, tonemap },
+        grade: GradeConfig {
+            exposure,
+            tonemap,
+            bloom: None,
+        },
     })
 }
 
@@ -204,6 +216,7 @@ mod tests {
             GradeConfig {
                 exposure: 1.0,
                 tonemap: ToneMap::AcesApprox,
+                bloom: None,
             }
         );
     }
@@ -226,6 +239,7 @@ mod tests {
             GradeConfig {
                 exposure: 2.5,
                 tonemap: ToneMap::Asinh { beta: 0.05 },
+                bloom: None,
             }
         );
     }
@@ -256,6 +270,113 @@ mod tests {
             }
         );
         const { assert!(DEFAULT_ASINH_BETA > 0.0) };
+    }
+
+    // --- regrade bloom flags (M6b) --------------------------------------------
+
+    use galaxy_grade::BloomConfig;
+
+    #[test]
+    fn regrade_parses_full_bloom_invocation() {
+        let r = parse_regrade_args(&args(&[
+            "e",
+            "p",
+            "--bloom",
+            "0.4",
+            "--bloom-levels",
+            "3",
+            "--bloom-radius",
+            "1.5",
+        ]))
+        .unwrap();
+        assert_eq!(
+            r.grade.bloom,
+            Some(BloomConfig {
+                strength: 0.4,
+                levels: 3,
+                radius: 1.5,
+            })
+        );
+        // Bloom composes with the tone-curve flags untouched.
+        assert_eq!(r.grade.exposure, 1.0);
+        assert_eq!(r.grade.tonemap, ToneMap::AcesApprox);
+    }
+
+    #[test]
+    fn regrade_bloom_defaults_levels_and_radius() {
+        let r = parse_regrade_args(&args(&["e", "p", "--bloom", "0.4"])).unwrap();
+        assert_eq!(
+            r.grade.bloom,
+            Some(BloomConfig {
+                strength: 0.4,
+                levels: DEFAULT_BLOOM_LEVELS,
+                radius: DEFAULT_BLOOM_RADIUS,
+            })
+        );
+        const { assert!(DEFAULT_BLOOM_LEVELS > 0) };
+        const { assert!(DEFAULT_BLOOM_RADIUS > 0.0) };
+    }
+
+    #[test]
+    fn regrade_bloom_flags_are_order_independent() {
+        // Sub-flags before --bloom must still land on the same config.
+        let a = parse_regrade_args(&args(&[
+            "e",
+            "p",
+            "--bloom-radius",
+            "1.5",
+            "--bloom",
+            "0.4",
+        ]))
+        .unwrap();
+        let b = parse_regrade_args(&args(&[
+            "e",
+            "p",
+            "--bloom",
+            "0.4",
+            "--bloom-radius",
+            "1.5",
+        ]))
+        .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn regrade_rejects_bad_bloom_invocations() {
+        for (bad, why) in [
+            (&["e", "p", "--bloom"][..], "flag missing its value"),
+            (&["e", "p", "--bloom", "abc"][..], "non-numeric strength"),
+            (
+                &["e", "p", "--bloom", "0"][..],
+                "non-positive strength (omit the flag for off)",
+            ),
+            (&["e", "p", "--bloom", "-0.5"][..], "negative strength"),
+            (
+                &["e", "p", "--bloom-levels", "3"][..],
+                "levels without --bloom",
+            ),
+            (
+                &["e", "p", "--bloom-radius", "2"][..],
+                "radius without --bloom",
+            ),
+            (
+                &["e", "p", "--bloom", "0.4", "--bloom-levels", "0"][..],
+                "zero levels",
+            ),
+            (
+                &["e", "p", "--bloom", "0.4", "--bloom-levels", "2.5"][..],
+                "non-integer levels",
+            ),
+            (
+                &["e", "p", "--bloom", "0.4", "--bloom-radius", "-1"][..],
+                "non-positive radius",
+            ),
+        ] {
+            assert!(
+                parse_regrade_args(&args(bad)).is_err(),
+                "should reject: {why} ({bad:?})"
+            );
+        }
     }
 
     #[test]

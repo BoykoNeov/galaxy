@@ -513,6 +513,7 @@ fn run_movie(s: &Scenario, out: &Path) -> Result<(), Box<dyn std::error::Error>>
     let gcfg = GradeConfig {
         exposure: EXPOSURE,
         tonemap: TONEMAP,
+        bloom: None,
     };
     let renderer = Renderer::new()?;
 

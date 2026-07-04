@@ -596,6 +596,42 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
         ));
     }
 
+    // Gas look ([look.gas], M7f): a gas-only knob. Present iff the model carries
+    // `[model.gas]` — a `[look.gas]` on a gas-free model renders nothing (a dead
+    // knob), so it fails loud rather than being silently ignored. When present,
+    // its rates must be finite and non-negative (opacity 0 = emission-only is OK).
+    let model_has_gas = matches!(&s.model, ModelSpec::DiskPlummer { gas: Some(_), .. });
+    match (&s.look.gas, model_has_gas) {
+        (Some(_), false) => {
+            return Err(
+                "look.gas is set but the model has no gas — a dead volumetric \
+                        look (remove [look.gas], or add [model.gas])"
+                    .into(),
+            );
+        }
+        (Some(gl), true) => {
+            if !gl.color.iter().all(|c| c.is_finite() && *c >= 0.0) {
+                return Err(format!(
+                    "look.gas color components must be finite and non-negative, got {:?}",
+                    gl.color
+                ));
+            }
+            if !(gl.emissivity.is_finite() && gl.emissivity >= 0.0) {
+                return Err(format!(
+                    "look.gas emissivity must be finite and non-negative, got {}",
+                    gl.emissivity
+                ));
+            }
+            if !(gl.opacity.is_finite() && gl.opacity >= 0.0) {
+                return Err(format!(
+                    "look.gas opacity must be finite and non-negative, got {}",
+                    gl.opacity
+                ));
+            }
+        }
+        (None, _) => {}
+    }
+
     // Rig.
     match &s.rig {
         RigSpec::Static => {}
@@ -940,7 +976,19 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         ramp: spec.look.ramps.iter().map(|r| (r.inner, r.outer)).collect(),
         sf_progenitors: spec.look.sf_progenitors.clone(),
         sound_speed,
-        gas_look: None, // TODO(M7f GREEN): thread the gas look, Some iff gas-rich
+        // Gas look (M7f): `Some` iff the scenario is gas-rich (tied to `sound_speed`,
+        // the other gas-only field), taking the declared `[look.gas]` or the neutral
+        // default the renderer falls back to when the model has gas but omits it.
+        gas_look: sound_speed.map(|_| {
+            spec.look
+                .gas
+                .map(|g| GasLookValues {
+                    color: g.color,
+                    emissivity: g.emissivity,
+                    opacity: g.opacity,
+                })
+                .unwrap_or_default()
+        }),
         info,
     }
 }

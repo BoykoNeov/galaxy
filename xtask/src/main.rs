@@ -113,13 +113,6 @@ const TONEMAP: ToneMap = ToneMap::AcesApprox;
 // tails and halo dots stay resolved. Levels/radius are the documented CLI defaults.
 const BLOOM_STRENGTH: f32 = 0.45;
 const FPS: u32 = 60;
-// M7e volumetric gas look — PLACEHOLDERS until `[look.gas]` lands in M7f.
-// Values from the volume-demo A/B pass on the static synthetic disk (κ = 14
-// carves an opaque lane there; real merger gas re-tunes in M7f). Inert for
-// every gas-free scenario (deposit_gas returns None → the star-only path).
-const GAS_COLOR: [f32; 3] = [0.55, 0.62, 0.95];
-const GAS_EMISSIVITY: f32 = 0.4;
-const GAS_KAPPA: f32 = 14.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1015,10 +1008,16 @@ fn run_movie(
         .iter()
         .map(|st| galaxy_renderprep::deposit_gas(st, &gas_cfg))
         .collect();
-    let gas_look = galaxy_render::GasLook {
-        color: GAS_COLOR,
-        emissivity: GAS_EMISSIVITY,
-        opacity: GAS_KAPPA,
+    // The volumetric gas look is scenario data ([look.gas], M7f): `Some` iff the
+    // scenario is gas-rich, else the neutral default (inert — a gas-free run has no
+    // grids for it to touch).
+    let gas_look = match &s.gas_look {
+        Some(gl) => galaxy_render::GasLook {
+            color: gl.color,
+            emissivity: gl.emissivity,
+            opacity: gl.opacity,
+        },
+        None => galaxy_render::GasLook::default(),
     };
     if gas_grids.iter().any(Option::is_some) {
         println!(

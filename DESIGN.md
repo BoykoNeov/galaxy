@@ -1516,9 +1516,12 @@ late-time positions — N-body is chaotic).
     Gadget projected signal velocity v_sig,i = max_j(2c_s − 3 w_ij) over
     approaching neighbors (w_ij = v_ij·r̂ < 0), floored at 2c_s; a gas-free
     state carries no hydro constraint (+∞). `validate_dt` returns a typed
-    `CflViolation`; the `CflGuard` sink decorator and its xtask wiring fold into
-    M7c, where a real `GravitySph` pipeline run exists to guard (wiring it now
-    would be dead code — no gas run reaches xtask until the gas-disk IC lands).
+    `CflViolation`; the `CflGuard` sink decorator (`xtask/src/cfl_guard.rs`, D6 —
+    in xtask so the engine crates stay decoupled) landed in M7c: it runs
+    `validate_dt` on every emitted state and returns `SimError::Config` on a
+    violation (the run dies loud at snapshot cadence, no trait widening), with
+    `C_CFL = 0.25`. The remaining wiring — swapping it into `run_movie` gated on
+    gas-presence — is M7c 2c.
   - **Isothermal shock-tube gate (the flagship):** a 4:1 density jump at rest,
     driven by the stock `LeapfrogKdk` + `GravitySph::hydro_only` — the real
     force code the merger will use. Geometry (advisor-vetted): free surfaces
@@ -1781,9 +1784,36 @@ late-time positions — N-body is chaotic).
     zero-COM/zero-momentum frame. Gates: six-population tag/count partition +
     contiguous ids, `kind ⟺ gas-progenitor` correspondence, mixed pairing, n_gas=0,
     zero COM/momentum, determinism, plus the eight-seed unit gate.
-  - [still owed in M7c: the `CflGuard` sink-decorator + xtask wiring (read the
-    xtask `Sink`/`run_movie` pipeline first) + minimal `[model.gas]` in spec.rs,
-    and the dynamical gas-rich merger dust-lane demo (the M7 money shot).]
+- **`[model.gas]` front-end — spec.rs + `check_gas` (landed, M7c).** A gas-rich
+  `disk-plummer` scenario carries one `[model.gas]` table (`fraction` +
+  `sound_speed`) that applies the **same** gas to *both* disks, plus `gas1`/`gas2`
+  particle counts on `DiskCounts` (`#[serde(default)] = 0`, so gas-free presets are
+  untouched). `build_scenario` routes to `DiskCollision::sample_gas`; the gas-free
+  path stays byte-identical (the pre-existing `disk_preset_build_matches...` gate
+  is the guard).
+  - **One `c_s`, one source.** `HydroParams.sound_speed` is *global* to the
+    isothermal solver — two gas populations physically cannot carry different sound
+    speeds in one run — so a single `sound_speed` is threaded to both the IC's
+    pressure equilibrium (baked into `state`) and, in `run_movie`, the solver's
+    `HydroParams`; the runtime `Scenario.sound_speed: Option<f64>` is that lone
+    source. (`fraction` *could* go per-galaxy later without touching the solver;
+    `c_s` could not — it is the forced axis.)
+  - **Palette stays 4 progenitors.** Gas is not a splat (it renders volumetrically,
+    filtered out of the splat list *after* `prepare`'s attribute pass, which
+    wraps `palette[progenitor % len]` and never goes OOB), and gas color is the
+    deferred `[look.gas]` uniform (M7f) — so gas is fully decoupled from `[look]`.
+  - **Physics gated with a readable message, not an ic panic.** `with_gas`'s
+    rejection rule moved into a non-panicking `ExponentialDisk::check_gas(f, c_s)
+    -> Result<(), String>` (with `min_gas_toomre_q_for(f, c_s)` so neither face
+    needs `self.gas` set); `with_gas` delegates to it and keeps its panic, while
+    `validate()` calls it so a fragmenting layer (`min Q_gas < 1`), out-of-range
+    `f`, or non-positive `c_s` fails the front-end with the reason named. Gas is a
+    **disk-plummer-only** knob in v1 (the IC supports NFW-halo gas; the pipeline
+    keeps it minimal), rejected on the other kinds.
+  - [still owed in M7c: the `run_movie` solver-swap (`BarnesHut → GravitySph`) +
+    `CflGuard`/`validate_dt` wiring gated on gas-presence (gas-free path
+    byte-identical), and the dynamical gas-rich merger dust-lane demo (the M7
+    money shot; its wall-clock is the GPU-SPH gate measurement).]
 
 ## Validation strategy
 

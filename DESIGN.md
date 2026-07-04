@@ -1515,7 +1515,11 @@ late-time positions — N-body is chaotic).
   - **CFL sentinel (D6):** `max_stable_dt = C_cfl·min_i h_i/v_sig,i` with the
     Gadget projected signal velocity v_sig,i = max_j(2c_s − 3 w_ij) over
     approaching neighbors (w_ij = v_ij·r̂ < 0), floored at 2c_s; a gas-free
-    state carries no hydro constraint (+∞). `validate_dt` returns a typed
+    state carries no hydro constraint (+∞). The max_j runs over the true force
+    coupling range r < 2·max(h_i,h_j) (gather at 2·h_max, gate per pair), matching
+    `hydro_accelerations` — so a diffuse large-h neighbor's approach still bounds a
+    small-h target it drives even when 2·h_i < r (M7 review fix; pre-fix the query
+    used 2·h_i and left such a target at the 2c_s floor). `validate_dt` returns a typed
     `CflViolation`; the `CflGuard` sink decorator (`xtask/src/cfl_guard.rs`, D6 —
     in xtask so the engine crates stay decoupled) landed in M7c: it runs
     `validate_dt` on every emitted state and returns `SimError::Config` on a

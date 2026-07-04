@@ -1573,8 +1573,12 @@ late-time positions — N-body is chaotic).
     global 2·h_max radius went quadratic on adaptive-h fields (h_max is a
     far-outskirts value): 13.7 s → 0.34 s for 40k @ 128³.
   - **Bounds are camera-independent:** a cube on the gas centroid, half-edge =
-    percentile radius (default 0.99) + the full kernel support 2·h_max, so
-    every in-percentile particle deposits its whole kernel inside the box.
+    percentile radius (default 0.99) + the MEDIAN kernel support 2·h_med (M7f
+    fix — the original 2·h_max pad let one sparse outskirt/tidal particle
+    inflate the cube ~3× and dilute the gas below one cell per scale length;
+    see the M7f finding). A robust pad keeps the box on the bulk that carries
+    the visible signal; a few boundary particles lose only their own outer
+    kernel — a `+0.0` clip the mass gate already sanctions for the dropped tail.
   - **Adaptive-h perf fix (solvers):** bracket seeds now come from LOCAL bin
     occupancy (`HashGrid::bin_len`, O(1)) with a [seed/2, 2·seed] bracket and
     a median-seed query grid; the old global-spacing seed made dense-center
@@ -1833,19 +1837,29 @@ late-time positions — N-body is chaotic).
     trip**, 61 snapshots → 481 frames → movie, `voxelized gas (64³)` confirmed. QUICK
     wall-clock ≈ 340 s. The gas-free 481-frame pixel re-verify is accepted at the
     unit-proof level (byte-identical snapshots + untouched render path).
-  - **Finding — the gas-grid bounds heuristic doesn't survive a merger.**
-    `deposit_gas`'s cubic bounds are `percentile_radius(gas) + SUPPORT·h_max`
-    (`renderprep/gasgrid.rs`). Under adaptive-h a *single* sparse edge gas particle
-    (the truncated-exponential outskirt, or tidal debris) carries a huge `h`, so
-    `SUPPORT·h_max` inflates the grid to ~41 units while the dense gas disk is ~2 —
-    **< 1 cell per gas scale length at 64³**, and only ~1.5 even at 128³, so the
-    column density dilutes to near-invisibility (the demo's faint gas). This is a
-    *bounds* problem, not `[look.gas]`, and full-res does not fix it. The M7d static
-    synthetic demo never exposed it (uniform disk, no edge sparsity). **M7f owes a
-    bounds heuristic one edge particle's `h_max` can't dominate** (pad by a
-    percentile-of-`h` or `SUPPORT·median_h`, or clip the pad — the dropped far tails
-    stay exactly +0.0 per the M7d deposition-order proof) *before* any κ/emissivity
-    tuning.
+  - **M7f bounds fix (landed) — median pad, not max.** `deposit_gas`'s cubic
+    bounds were `percentile_radius(gas) + SUPPORT·h_max` (`renderprep/gasgrid.rs`).
+    Under adaptive-h a *single* sparse edge gas particle (truncated-exponential
+    outskirt, or tidal debris) carries a huge `h`, so `SUPPORT·h_max` inflated the
+    grid to ~40+ units while the dense gas disk is ~2 — **< 1 cell per gas scale
+    length at 64³**, and only ~1.5 even at 128³, so the column density diluted to
+    near-invisibility. A probe across the demo snapshots confirmed it is the pad,
+    not the radius: at pericenter `h_med = 0.09` but `h_max = 7.8` (even `h_max`
+    *within* the p99 radius is 3.8 — one sparse particle just inside it), so ANY
+    max-based pad is fragile. Fix: pad by `SUPPORT·h_med`. The pad then collapses
+    (`S·h_med ≈ 0.19` vs `r99 ≈ 7.3`), so the box shrinks to ~r99 and the residual
+    is the radius, not the pad — a robust win independent of the exact statistic.
+    Re-voxelizing the pericenter snapshot: box half 22.9 → 7.5, **peak gas ρ ×35**
+    (0.004 → 0.15), mean-nonzero ×90 — gas goes from invisible to a real signal.
+    Boundary particles whose support pokes past the box lose only their own outer
+    kernel (`+0.0` clip, sanctioned by the M7d deposition-order proof). The M7d
+    static synthetic demo never exposed the bug (uniform disk, no edge sparsity).
+    **Late-merger frames stay radius-limited** (snap 6000: `r99 ≈ 17` set by real
+    tidal tails, half ≈ 17 median or not → ~0.9 cell/SL @64³) — a uniform-grid
+    dynamic-range limit (a 0.5-unit core and 34-unit tails can't coexist at 64³),
+    NOT the bug; `percentile` remains the framing knob to tighten a specific shot.
+    Still owed in M7f: `[look.gas]` κ/emissivity + `gasrich` preset (the full
+    dust-lane A/B re-render lands there, tuned against the now-resolved grid).
   - [still owed in M7c: the **full-res** merger render — its wall-clock is the
     GPU-SPH gate (>~30 min ⇒ insert a GPU-SPH session). QUICK ~5 min does not predict
     it (N ~2–3×, pixels 4×, voxels 8×); it is a deliberate user call, and best run

@@ -140,9 +140,10 @@ pub struct GasGridConfig {
     pub dims: [u32; 3],
     /// The grid volume is a cube centered on the gas centroid whose half-edge is
     /// the `percentile` radius of the gas population (about the centroid) padded
-    /// by the full kernel support `2·h_max` — camera-independent, and every
-    /// particle inside the percentile radius deposits its whole kernel inside
-    /// the box. Clamped to `[0, 1]`; default 0.99.
+    /// by the median kernel support `2·h_med` — camera-independent, and robust
+    /// to the huge adaptive `h` of sparse outskirt/tidal particles (a `h_max`
+    /// pad let one such particle inflate the cube and dilute the gas). Clamped
+    /// to `[0, 1]`; default 0.99.
     pub percentile: f64,
     /// Adaptive-h configuration for the shared `solvers::sph` smoothing-length
     /// solve (plan D2: h is recomputed per snapshot, never stored).
@@ -293,7 +294,7 @@ fn deposit_impl(
 
 /// Voxelize the gas population of `state`: select `Species::Gas` rows, derive
 /// adaptive smoothing lengths via the shared `solvers::sph` routine, choose
-/// cubic bounds (percentile radius about the gas centroid + `2·h_max` pad, see
+/// cubic bounds (percentile radius about the gas centroid + `2·h_med` pad, see
 /// [`GasGridConfig`]), and kernel-deposit onto `cfg.dims` cells.
 ///
 /// Returns `None` when the state holds no gas — a gas-free run has no grid and
@@ -314,16 +315,27 @@ pub fn deposit_gas(state: &State, cfg: &GasGridConfig) -> Option<GasGrid> {
     // h is a pure function of the gas positions (plan D2) — the same shared
     // routine the force path uses, so render and physics smooth identically.
     let h = density_adaptive(&pos, &mass, &cfg.density, None).h;
-    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+
+    // Robust pad scale: the MEDIAN smoothing length, not the max. Adaptive h in
+    // the sparse outskirts (and, mid-merger, in tidal debris) runs orders of
+    // magnitude above the bulk, so a SUPPORT·h_max pad let one isolated particle
+    // inflate the cube several-fold and dilute the gas below one cell per scale
+    // length (the M7c demo finding). The median tracks the bulk that carries the
+    // visible signal; particles whose support pokes past the box lose only their
+    // own outer kernel — a `+0.0` clip the M7d mass gate already sanctions for
+    // the dropped far tail.
+    let mut hs = h.clone();
+    hs.sort_by(|a, b| a.total_cmp(b));
+    let h_med = hs[hs.len() / 2];
 
     // Cubic bounds: percentile radius about the (unweighted) gas centroid,
-    // padded by the full kernel support. f32 rounding of the corners is
-    // harmless — the pad dwarfs the f32 ulp at scene scale.
+    // padded by the full kernel support of the median particle. f32 rounding of
+    // the corners is harmless — the pad dwarfs the f32 ulp at scene scale.
     let centroid = pos.iter().fold(DVec3::ZERO, |a, &p| a + p) / pos.len() as f64;
     let mut d: Vec<f64> = pos.iter().map(|p| (*p - centroid).length()).collect();
     d.sort_by(|a, b| a.total_cmp(b));
     let idx = ((d.len() - 1) as f64 * cfg.percentile.clamp(0.0, 1.0)).round() as usize;
-    let half = d[idx] + SUPPORT * h_max;
+    let half = d[idx] + SUPPORT * h_med;
     let bounds_min = (centroid - DVec3::splat(half)).as_vec3();
     let bounds_max = (centroid + DVec3::splat(half)).as_vec3();
 

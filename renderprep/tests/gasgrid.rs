@@ -321,8 +321,9 @@ fn deposit_gas_ignores_collisionless_rows() {
 #[test]
 fn deposit_gas_bounds_contain_the_percentile_radius() {
     // Documented convention: cube centered on the gas centroid, half-edge =
-    // percentile radius + 2·h_max. Every particle within the percentile
-    // distance of the centroid must therefore sit strictly inside the bounds.
+    // percentile radius + a positive pad (2·h_med). Every particle within the
+    // percentile distance of the centroid must therefore sit strictly inside
+    // the bounds — this holds for any positive pad, independent of its scale.
     let state = gas_state(random_cloud(300, 5.0, 77));
     let cfg = GasGridConfig {
         dims: [16; 3],

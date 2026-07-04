@@ -206,6 +206,23 @@ fn gas_scenario_defaults_gas_look_when_look_gas_absent() {
 }
 
 #[test]
+fn gas_look_values_default_matches_the_renderer_fallback() {
+    // The whole point of the `GasLookValues::default` = `GasLook::default` promise
+    // (a gas-rich scenario omitting `[look.gas]` renders with the neutral look the
+    // renderer itself falls back to) rides on two hand-written `Default`s in
+    // different crates. Nothing else gates them, so pin the equality field-by-field
+    // — retuning one without the other would silently break the promise.
+    let x = galaxy_xtask::spec::GasLookValues::default();
+    let r = galaxy_render::GasLook::default();
+    assert_eq!(x.color, r.color, "gas look default color must match");
+    assert_eq!(
+        x.emissivity, r.emissivity,
+        "gas look default emissivity must match"
+    );
+    assert_eq!(x.opacity, r.opacity, "gas look default opacity must match");
+}
+
+#[test]
 fn gas_scenario_carries_a_declared_look_gas() {
     // A `[look.gas]` table overrides the default and threads onto the `Scenario`.
     let toml = gas_toml().replace(

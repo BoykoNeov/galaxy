@@ -1,6 +1,7 @@
 //! `galaxy-xtask`: the pipeline orchestrator (scenario → sim → renderprep → render
 //! → grade → ffmpeg). The binary is the glue; this lib holds the pure, testable bits.
 
+pub mod cfl_guard;
 pub mod spec;
 
 use std::path::PathBuf;

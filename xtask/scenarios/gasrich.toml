@@ -1,18 +1,34 @@
 # M7f showpiece: the `disk` parabolic prograde encounter made GAS-RICH. Each warm
 # Plummer-disk galaxy carries an isothermal SPH gas layer (f_gas = 0.3 of the disk
 # mass) that renders volumetrically — emission in the tidal bridge, absorption
-# (dust lanes) over the stellar cores. The sound speed c_s = 0.05 sets a
-# marginally-stable gas disk (min Q_gas ~= 2.0 / 2.4 for the two disks): gas-rich
-# enough for dark lanes, with headroom over Q = 1 for the pericenter compression
-# (isothermal has no fragmentation physics, so a sub-1 dip would clump artificially).
+# (dust lanes) over the stellar cores.
+#
+# GAS RICHNESS (f_gas), not the sound speed, sets the dark lanes: viewed face-on
+# the column density is ∫ρ dz = Σ_gas = f·Σ, INDEPENDENT of the layer thickness c_s
+# sets. So with this near-face-on rig c_s is free, and c_s = 0.1 (min Q_gas ~= 4.0
+# / 4.7) is chosen WARM for two reasons — neither of them CFL: (1) higher Q widens
+# the margin against the artificial clumping isothermal gas (no fragmentation
+# physics) is prone to under merger compression; (2) warming is aesthetically free
+# here, since face-on lane depth is c_s-independent. It does NOT buy a bigger step:
+# at QUICK (2500-gas) resolution the running CFL bound is set by the compressed
+# midplane density of the realization, not by c_s (measured: warming c_s 0.05->0.1
+# moved the running bound only ~0.0043 -> ~0.0048), and it keeps declining through
+# the merger as the gas concentrates. That bound is realization-sensitive at this
+# resolution — some seeds grow a dense knot that drags it below 0.002. This preset's
+# SEED is one whose QUICK realization stays clean and rides dt = 0.005 for the whole
+# merger with the CflGuard never tripping (it matches the validated M7c QUICK demo).
+# FULL resolution (denser, smoother gas sampling) is the robust regime and a
+# deliberate user call — its wall-clock is the standing GPU-SPH gate. A colder
+# marginal-Q disk (the plan's Q ~= 1.5-2) is left to that better-resolved pass: at
+# QUICK resolution it under-resolves the thin sech² layer AND clumps, needing a
+# punishing dt for no gain in the face-on lanes.
 #
 # The stellar populations and orbit are the `disk` preset's; gas SPLITS the disk
 # mass (traces the same exponential), so the stellar rotation curve and tidal
-# morphology are unchanged. Small dt = 0.005 with the CflGuard sentinel keeps the
-# gas hydro stable through pericenter (t=0 CFL bound ~9x this on the QUICK demo).
+# morphology are unchanged.
 
 name = "gasrich"
-seed = 0x0DA5_1DEA
+seed = 0x00C0_FFEE # the validated QUICK-clean realization (see the CFL note above)
 
 [model]
 kind = "disk-plummer"
@@ -21,7 +37,7 @@ kind = "disk-plummer"
 # isothermal solver's c_s is a single global, so two gas pops cannot differ in it).
 [model.gas]
 fraction = 0.3
-sound_speed = 0.05
+sound_speed = 0.1
 
 [model.galaxy1]
 disk_mass = 0.15
@@ -61,7 +77,7 @@ pericenter = 1.5
 separation = 8.0
 
 [sim]
-dt = 0.005 # small: gas hydro CFL (colder, thinner gas disk than the demo's c_s=0.1)
+dt = 0.005 # gas hydro CFL: this seed's QUICK realization stays clean at 0.005
 n_steps = 6000 # T = 30, same physical span as `disk` (1500 * 0.02)
 snapshot_every = 100 # -> 61 snapshots, matching the `disk` cadence
 eps = 0.05
@@ -74,15 +90,22 @@ frame_percentile = 0.92 # tighter than `disk` — keep the frame on the gassy co
 palette = [[0.05, 0.035, 0.025], [1.0, 0.5, 0.25], [0.025, 0.035, 0.05], [0.35, 0.6, 1.0]]
 sf_progenitors = [1, 3] # only the disks form "stars" — halos are dark matter
 
-# Volumetric gas look (M7f): cool blue-white emission with strong extinction so the
-# gas glows in the bridge and lays dark dust lanes over the cores. Emissivity j and
-# opacity kappa are tuned by eyeball against the QUICK render (re-render cost only —
-# the density grid carries rho alone). Grid resolution is NOT here: it is a global
-# quality constant (64^3 QUICK / 128^3 full), like the frame dimensions.
+# Volumetric gas look (M7f): cool blue emission + extinction so the gas glows in the
+# tidal bridge and dims the stellar cores. The knobs are DENSITY-REGIME dependent —
+# both scale inversely with the gas ρ the grid holds. The M7e placeholders (κ≈14,
+# j≈0.4) were tuned on a DENSE synthetic disk (ρ~1); this merger's gas is ρ~0.1–0.5,
+# so the same visual needs ~an order of magnitude more κ and j (that's why the movie
+# gas looked invisible until it was tuned here — deposition always ran, the look was
+# just far too weak for the regime). At QUICK (2500 gas / 64³) the gas is intrinsically
+# SOFT — few particles ⇒ large SPH h ⇒ a smooth blobby field, not sharp dust lanes;
+# 128³ raises peak ρ but not the visible sharpness (particle count, not grid res, is the
+# limiter). Sharp lanes are the FULL-res + more-edge-on story (the user-gated showpiece).
+# Grid resolution is NOT a look knob: it is a global quality constant (64³/128³), like
+# the frame dimensions. Tuned by eyeball on the QUICK render; re-render cost only.
 [look.gas]
-color = [0.5, 0.6, 0.95]
-emissivity = 0.25
-opacity = 12.0
+color = [0.4, 0.58, 1.0]
+emissivity = 20.0
+opacity = 100.0
 
 [[look.ramps]]
 inner = [0.05, 0.035, 0.025]
@@ -100,10 +123,11 @@ outer = [0.025, 0.035, 0.05]
 inner = [1.0, 0.3, 0.45]
 outer = [0.4, 0.9, 0.9]
 
-# A gentle near-face-on reveal so the dust lanes read over the cores through the
-# merger (the showpiece — not a back-compat exemplar).
+# A moderately edge-on reveal: tilting the encounter toward edge-on lengthens the
+# line of sight through the thin gas layer, so the gas reads over the starlight
+# (the showpiece — not a back-compat exemplar).
 [rig]
 kind = "orbit-tilt"
 azimuth_deg = [-45.0, 45.0]
-tilt_deg = [70.0, 45.0]
+tilt_deg = [35.0, 25.0]
 window = 6

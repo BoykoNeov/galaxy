@@ -63,7 +63,14 @@ pub fn max_stable_dt(state: &State, params: &HydroParams, cfg: &DensityConfig, c
 
     let mut min_dt = f64::INFINITY;
     for i in 0..gpos.len() {
-        let ngb = grid.neighbours_within(&gpos, gpos[i], SUPPORT * h[i]);
+        // Gather at the GLOBAL max support and gate each pair on the real force
+        // coupling range r < 2·max(h_i,h_j): the averaged kernel W̄ is nonzero
+        // there, so a diffuse large-h_j neighbor drives particle i even when
+        // 2·h_i < r. Querying only within 2·h_i would miss that approacher and
+        // leave v_sig,i stuck at the 2c_s floor — overestimating the stable dt
+        // (the force law it must track gathers at this same global radius). This
+        // runs at snapshot cadence, not per step, so the wider gather is cheap.
+        let ngb = grid.neighbours_within(&gpos, gpos[i], SUPPORT * h_max);
         // v_sig,i = max_j (2c_s − 3 w_ij) over APPROACHING neighbors
         // (w_ij = v_ij·r̂_ij < 0), floored at 2c_s.
         let mut v_sig = two_cs;
@@ -73,8 +80,8 @@ pub fn max_stable_dt(state: &State, params: &HydroParams, cfg: &DensityConfig, c
             }
             let r_ij = gpos[i] - gpos[j];
             let r = r_ij.length();
-            if r == 0.0 {
-                continue;
+            if r == 0.0 || r >= SUPPORT * h[i].max(h[j]) {
+                continue; // outside the pair's force coupling range ⇒ no drive
             }
             let w = (gvel[i] - gvel[j]).dot(r_ij) / r; // projected relative velocity
             if w < 0.0 {

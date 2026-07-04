@@ -57,7 +57,10 @@ impl<S: SnapshotSink> CflGuard<S> {
 
 impl<S: SnapshotSink> SnapshotSink for CflGuard<S> {
     fn emit(&mut self, header: &Header, state: &State) -> Result<(), SimError> {
-        let _ = (header, state);
-        todo!("CflGuard::emit — validate_dt then delegate (M7c)")
+        // Fail the run loud on a CFL violation (D6) — a gas-free state's bound is
+        // +∞, so this is a no-op for every collisionless run. Then delegate.
+        validate_dt(state, &self.hydro, &self.density_cfg, self.dt, self.c_cfl)
+            .map_err(|v| SimError::Config(v.to_string()))?;
+        self.inner.emit(header, state)
     }
 }

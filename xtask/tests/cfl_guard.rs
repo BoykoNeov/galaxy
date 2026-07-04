@@ -73,7 +73,11 @@ fn stable_dt_delegates_to_the_inner_sink() {
     // Emit twice; both must pass and both must reach the inner sink.
     guard.emit(&header, &state).expect("stable dt must pass");
     guard.emit(&header, &state).expect("stable dt must pass");
-    assert_eq!(count.get(), 2, "the inner sink must receive every delegated emit");
+    assert_eq!(
+        count.get(),
+        2,
+        "the inner sink must receive every delegated emit"
+    );
 }
 
 #[test]
@@ -88,7 +92,11 @@ fn over_large_dt_fails_loud_without_touching_the_inner_sink() {
         Err(SimError::Config(_)) => {}
         other => panic!("expected SimError::Config on CFL violation, got {other:?}"),
     }
-    assert_eq!(count.get(), 0, "a violation must short-circuit before the inner sink");
+    assert_eq!(
+        count.get(),
+        0,
+        "a violation must short-circuit before the inner sink"
+    );
 }
 
 /// A gas-free state has no hydro CFL constraint (`validate_dt` bound = +∞), so the

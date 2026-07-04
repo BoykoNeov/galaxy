@@ -35,6 +35,8 @@ const TINY: DiskCounts = DiskCounts {
     disk1: 250,
     halo2: 200,
     disk2: 150,
+    gas1: 0,
+    gas2: 0,
 };
 
 // --- the front-end reproduces the hardcoded construction ----------------------

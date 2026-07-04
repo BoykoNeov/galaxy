@@ -61,11 +61,17 @@ pub struct ScenarioSpec {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(try_from = "ModelTable")]
 pub enum ModelSpec {
-    /// Two exponential disks in live Plummer halos (`DiskCollision<Plummer>`).
+    /// Two exponential disks in live Plummer halos (`DiskCollision<Plummer>`),
+    /// optionally with an isothermal SPH gas component (M7c). One `[model.gas]`
+    /// table applies the **same** gas fraction and sound speed to *both* disks:
+    /// the isothermal solver's `c_s` is a single global, so two gas populations
+    /// physically cannot carry different sound speeds in one run.
     DiskPlummer {
         galaxy1: DiskGalaxySpec<PlummerSpec>,
         galaxy2: DiskGalaxySpec<PlummerSpec>,
         counts: Counts<DiskCounts>,
+        /// The shared gas component, or `None` for a purely stellar encounter.
+        gas: Option<GasSpec>,
     },
     /// Two exponential disks in live truncated-NFW halos
     /// (`DiskCollision<TruncatedNfw>`) — the cusp-resolution rule (M5f) applies.
@@ -133,6 +139,21 @@ pub struct NfwSpec {
     pub skirt: f64,
 }
 
+/// An isothermal SPH gas component shared by both disks of a `disk-plummer`
+/// encounter (M7c). The `fraction` of each disk's mass is re-tagged as gas with
+/// the given `sound_speed`; the total disk mass and rotation curve are unchanged
+/// (gas traces the same exponential profile). The one `sound_speed` is threaded
+/// to both the IC's pressure equilibrium *and* the force solver's `HydroParams`
+/// — the isothermal EOS `P = c_s²ρ` uses a single global `c_s`.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GasSpec {
+    /// Gas mass fraction f_gas = M_gas/M_disk of each disk, in (0, 1).
+    pub fraction: f64,
+    /// Isothermal sound speed c_s (also the solver's `HydroParams.sound_speed`).
+    pub sound_speed: f64,
+}
+
 /// Full-resolution vs QUICK-preview particle counts.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,7 +162,8 @@ pub struct Counts<T> {
     pub quick: T,
 }
 
-/// Particle counts for a two-disk-galaxy encounter (four species).
+/// Particle counts for a two-disk-galaxy encounter (four stellar species, plus
+/// up to two gas species when the model carries a `[model.gas]` table).
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiskCounts {
@@ -149,12 +171,19 @@ pub struct DiskCounts {
     pub disk1: usize,
     pub halo2: usize,
     pub disk2: usize,
+    /// Gas particles in galaxy 1 (ignored, defaults to 0, when the model is
+    /// gas-free — a gas-free `disk-plummer` never reads these).
+    #[serde(default)]
+    pub gas1: usize,
+    /// Gas particles in galaxy 2 (same gas-free default rule as `gas1`).
+    #[serde(default)]
+    pub gas2: usize,
 }
 
 impl DiskCounts {
-    /// Total particle count.
+    /// Total particle count (gas counts are 0 for a gas-free encounter).
     pub fn total(&self) -> usize {
-        self.halo1 + self.disk1 + self.halo2 + self.disk2
+        self.halo1 + self.disk1 + self.halo2 + self.disk2 + self.gas1 + self.gas2
     }
 }
 
@@ -263,6 +292,11 @@ struct ModelTable {
     galaxy1: toml::Value,
     galaxy2: toml::Value,
     counts: toml::Value,
+    /// Optional isothermal gas component. v1 supports it on `disk-plummer` only;
+    /// the other kinds reject it (the IC supports NFW-halo gas too, but the
+    /// pipeline demo is a Plummer merger — kept minimal).
+    #[serde(default)]
+    gas: Option<toml::Value>,
 }
 
 impl TryFrom<ModelTable> for ModelSpec {
@@ -272,22 +306,40 @@ impl TryFrom<ModelTable> for ModelSpec {
         fn field<T: serde::de::DeserializeOwned>(v: toml::Value, what: &str) -> Result<T, String> {
             v.try_into().map_err(|e| format!("model {what}: {e}"))
         }
+        // Gas is a `disk-plummer`-only knob in v1: reject it up front for the
+        // other kinds so a stray `[model.gas]` fails loud, not silently ignored.
+        let no_gas_for = |kind: &str| -> Result<(), String> {
+            if t.gas.is_some() {
+                Err(format!(
+                    "model kind `{kind}` takes no `[model.gas]` (gas is disk-plummer-only in v1)"
+                ))
+            } else {
+                Ok(())
+            }
+        };
         match t.kind.as_str() {
             "disk-plummer" => Ok(ModelSpec::DiskPlummer {
                 galaxy1: field(t.galaxy1, "galaxy1")?,
                 galaxy2: field(t.galaxy2, "galaxy2")?,
                 counts: field(t.counts, "counts")?,
+                gas: t.gas.map(|v| field(v, "gas")).transpose()?,
             }),
-            "disk-nfw" => Ok(ModelSpec::DiskNfw {
-                galaxy1: field(t.galaxy1, "galaxy1")?,
-                galaxy2: field(t.galaxy2, "galaxy2")?,
-                counts: field(t.counts, "counts")?,
-            }),
-            "nfw-merger" => Ok(ModelSpec::NfwMerger {
-                galaxy1: field(t.galaxy1, "galaxy1")?,
-                galaxy2: field(t.galaxy2, "galaxy2")?,
-                counts: field(t.counts, "counts")?,
-            }),
+            "disk-nfw" => {
+                no_gas_for("disk-nfw")?;
+                Ok(ModelSpec::DiskNfw {
+                    galaxy1: field(t.galaxy1, "galaxy1")?,
+                    galaxy2: field(t.galaxy2, "galaxy2")?,
+                    counts: field(t.counts, "counts")?,
+                })
+            }
+            "nfw-merger" => {
+                no_gas_for("nfw-merger")?;
+                Ok(ModelSpec::NfwMerger {
+                    galaxy1: field(t.galaxy1, "galaxy1")?,
+                    galaxy2: field(t.galaxy2, "galaxy2")?,
+                    counts: field(t.counts, "counts")?,
+                })
+            }
             other => Err(format!(
                 "unknown model kind `{other}` (disk-plummer|disk-nfw|nfw-merger)"
             )),
@@ -402,6 +454,7 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
             galaxy1,
             galaxy2,
             counts,
+            gas: _,
         } => {
             for (g, which) in [(galaxy1, "galaxy1"), (galaxy2, "galaxy2")] {
                 validate_disk(g, which)?;
@@ -626,6 +679,11 @@ pub struct Scenario {
     pub ramp: Vec<([f32; 3], [f32; 3])>,
     /// Progenitors the star-formation compression proxy applies to (M6e).
     pub sf_progenitors: Vec<u16>,
+    /// Isothermal gas sound speed c_s when the scenario is gas-rich (M7c), else
+    /// `None`. The **single source** of c_s: the movie pipeline threads this same
+    /// value into both the IC's pressure equilibrium (already baked into `state`)
+    /// and the force solver's `HydroParams`, so the two cannot diverge.
+    pub sound_speed: Option<f64>,
     pub info: String,
 }
 
@@ -660,18 +718,25 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
     // `unit_mass` is the mass whose particle carries PEAK_BRIGHTNESS: the disk
     // particle for disk models (disk flux is set by disk MASS, not count), the
     // (equal-by-design) halo particle for the merger.
-    let (state, unit_mass, info) = match &spec.model {
+    let (state, unit_mass, info, sound_speed) = match &spec.model {
         ModelSpec::DiskPlummer {
             galaxy1,
             galaxy2,
             counts,
+            gas,
         } => {
             let c = if quick { counts.quick } else { counts.full };
             let h1 = Plummer::new(G, galaxy1.halo.mass, galaxy1.halo.scale);
             let h2 = Plummer::new(G, galaxy2.halo.mass, galaxy2.halo.scale);
-            let (state, unit_mass) = sample_disks(galaxy1, galaxy2, h1, h2, orbit, c, spec.seed);
-            let info = disk_info("halo", &state, &c, unit_mass, orbit, spec.sim.eps);
-            (state, unit_mass, info)
+            match gas {
+                None => {
+                    let (state, unit_mass) =
+                        sample_disks(galaxy1, galaxy2, h1, h2, orbit, c, spec.seed);
+                    let info = disk_info("halo", &state, &c, unit_mass, orbit, spec.sim.eps, None);
+                    (state, unit_mass, info, None)
+                }
+                Some(_gas) => todo!("gas-rich disk-plummer build — green 2b"),
+            }
         }
         ModelSpec::DiskNfw {
             galaxy1,
@@ -682,8 +747,8 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
             let h1 = truncated_nfw(&galaxy1.halo);
             let h2 = truncated_nfw(&galaxy2.halo);
             let (state, unit_mass) = sample_disks(galaxy1, galaxy2, h1, h2, orbit, c, spec.seed);
-            let info = disk_info("cuspy halo", &state, &c, unit_mass, orbit, spec.sim.eps);
-            (state, unit_mass, info)
+            let info = disk_info("cuspy halo", &state, &c, unit_mass, orbit, spec.sim.eps, None);
+            (state, unit_mass, info, None)
         }
         ModelSpec::NfwMerger {
             galaxy1,
@@ -713,7 +778,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                 orbit.separation,
                 spec.sim.n_steps as f64 * spec.sim.dt,
             );
-            (state, unit_mass, info)
+            (state, unit_mass, info, None)
         }
     };
 
@@ -786,6 +851,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         },
         ramp: spec.look.ramps.iter().map(|r| (r.inner, r.outer)).collect(),
         sf_progenitors: spec.look.sf_progenitors.clone(),
+        sound_speed,
         info,
     }
 }
@@ -848,9 +914,17 @@ fn disk_info(
     disk_particle_mass: f64,
     orbit: &OrbitSpec,
     eps: f64,
+    gas: Option<&GasSpec>,
 ) -> String {
+    let gas_note = match gas {
+        Some(g) => format!(
+            ", gas {}+{} (f_gas={} c_s={})",
+            c.gas1, c.gas2, g.fraction, g.sound_speed
+        ),
+        None => String::new(),
+    };
     format!(
-        "IC: {} particles ({halo_word} {}+{}, disk {}+{}), disk particle mass \
+        "IC: {} particles ({halo_word} {}+{}, disk {}+{}{gas_note}), disk particle mass \
          {disk_particle_mass:.3e}; e={} peri={} sep={}, eps={eps}",
         state.len(),
         c.halo1,
@@ -943,14 +1017,19 @@ mod tests {
                         disk1: 5000,
                         halo2: 3500,
                         disk2: 3500,
+                        gas1: 0,
+                        gas2: 0,
                     },
                     quick: DiskCounts {
                         halo1: 1500,
                         disk1: 1500,
                         halo2: 1000,
                         disk2: 1000,
+                        gas1: 0,
+                        gas2: 0,
                     },
                 },
+                gas: None,
             },
             orbit: OrbitSpec {
                 eccentricity: 1.0,
@@ -1084,12 +1163,16 @@ mod tests {
                         disk1: 5000,
                         halo2: 8000,
                         disk2: 4000,
+                        gas1: 0,
+                        gas2: 0,
                     },
                     quick: DiskCounts {
                         halo1: 5000,
                         disk1: 3000,
                         halo2: 4000,
                         disk2: 2000,
+                        gas1: 0,
+                        gas2: 0,
                     },
                 },
             },

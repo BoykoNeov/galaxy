@@ -72,8 +72,10 @@ Consequence: **momentum is conserved only to f32 roundoff**, not exactly (the CP
 path's *exact* antisymmetry comes from f64 + commutative coeff + negated grad, which
 f32 breaks). Acceptable and consistent with f32-force philosophy; the gate is a
 **bounded momentum-drift invariant** (D5), not exact conservation. NB: this means
-the CPU F1 "scatter-by-plane" rewrite is **not** ported — the GPU eats the O(N²)
-gather cost via parallelism, and gather-per-target is the determinism-safe shape.
+the CPU F1 "scatter-by-plane" rewrite is **not** ported — gather-per-target is the
+determinism-safe shape. Whether the GPU *eats* the O(N²) via parallelism (global
+over-gather) or *fixes* it (per-particle radius) is the upstream gather-radius fork
+in D4; gather-per-target is the target shape under either.
 
 ### D3 — compensated sums need the DS XOR-barrier trap
 Any error-free-transform / two-sum on the GPU (the density root-find or a
@@ -82,19 +84,62 @@ Reuse the `DRIFT_SHADER` fix: XOR the bits with a runtime-uniform pinned to 0 to
 block the fold; launder ALL intermediates. See [[gpu-double-single-reassociation]].
 Verified on the Vulkan adapter only — gates prove it on the CI adapter, not universally.
 
-### D4 — neighbor structure: GPU uniform hash grid (a real fork; reason stated)
-**Decision: a GPU uniform hash grid** (cell-linked-list / counting-sort bucketing),
-mirroring the CPU `sph::grid::HashGrid`.
-- *For:* 1:1 with the oracle → the simplest possible gating; it is the SPH-standard
-  GPU neighbor structure; adaptive-h gives a wide per-particle query radius that an
-  exact fixed-radius grid handles naturally.
-- *Against (the fork):* it is **net-new GPU code** with its own determinism gates,
-  whereas the **Karras LBVH is already built and gated** (`gpu/src/gpu_lbvh*.rs`).
-- *Why not reuse the LBVH:* it is a Barnes-Hut *approximation* walk (θ-criterion
-  aggregate), not exact fixed-radius neighbor *enumeration*; forcing it into range
-  queries fights its design. The gate-simplicity of a grid that matches the oracle
-  cell-for-cell outweighs the "reuse proven code" pull. **Revisit if** the grid's
-  determinism gates prove costlier than an LBVH range-query adapter.
+### D4 — neighbor structure: the choice is DOWNSTREAM of the gather-radius policy
+"GPU hash grid vs reuse the Karras LBVH" is the wrong axis to decide first. The
+structure hangs off a prior decision D2 half-dodged: **do we keep the global-h_max
+over-gather, or fix it to a per-particle radius?** State that upstream choice, then
+the structure follows.
+
+**The upstream fork (gather radius):**
+- **(a) Keep the global-h_max over-gather** (D2 as written — every target enumerates
+  all gas within a single global `SUPPORT·h_max`, then filters by
+  `r < SUPPORT·max(h_i,h_j)`; parallelize the O(N²)). Simplest, oracle-identical
+  pair sets, correct regardless of the h_j gather/scatter subtlety.
+- **(b) Fix it to a per-particle radius** `SUPPORT·h_i` plus a **max-h-per-node/cell
+  prune** to still capture distant large-h_j neighbors. This is the scale-forward
+  move: at 10⁵–10⁶ gas particles the global over-gather is fatal no matter how many
+  cores eat it.
+
+**The structure follows from that fork — not the other way round:**
+- **Under (a), both structures are O(N²) and ~equivalent.** Every query radius is
+  ≈`SUPPORT·h_max`, a large fraction of the occupied gas domain: a grid at
+  cell≈`SUPPORT·h_max` finds ~the whole pericenter knot in its 27-cell neighborhood,
+  and a BVH range query at that radius *touches most of the tree* (no pruning). The
+  LBVH's adaptivity buys nothing. So "simplest to build+gate" wins → **a GPU
+  counting-sort spatial hash** (Green-style: hash cell coords into a fixed table,
+  counting-sort particles — NOT a dense array, and NOT the CPU's sparse HashMap;
+  hashing survives far debris without exploding).
+- **Under (b), structure is decisive and the LBVH wins.** A single-resolution grid
+  degenerates on the h dynamic range (one cell size cannot serve a dense knot *and* a
+  sparse tail), whereas a **max-h-augmented BVH range query** handles variable
+  per-particle radius naturally. Reuse here is the **Karras *construction*** (Morton →
+  sort → build → flatten — the expensive, already-gated part), paired with a **new
+  range-query traversal** (exact: test true distance at leaves). It is emphatically
+  *not* the Barnes-Hut θ-walk — D4's earlier "LBVH can't do exact neighbors" argument
+  strawmanned reuse by pointing at the approximation *traversal* rather than the
+  *build*.
+
+**Caveats that keep this honest (retired as load-bearing, kept as footnotes):**
+- *Not "1:1 with the oracle":* the CPU `HashGrid` is a *sparse HashMap* grid; any GPU
+  port (spatial hash or BVH) is only neighbor-set-*equal*, never structurally
+  identical. Gate on equality of the **filtered pair set** (post `r < SUPPORT·max(h_i,
+  h_j)`), which is invariant to the radius policy — not the raw candidate set.
+- *Reuse is not free:* the existing LBVH is built over **all** particles for gravity,
+  but hydro neighbors are **gas-only** → reuse means either a second Karras build over
+  the gas subset each step, or traversing the all-particle tree and filtering stars at
+  leaves (wasted descent). It reuses strictly more gated code than a grid
+  (`GpuMorton`/`GpuSorter`/builder/flattener), but it is construction-*code* reuse,
+  not a free existing tree.
+
+**Decision + the number that settles it:** default to **(a) + spatial-hash grid** for
+the first cut (it matches D2, is the simplest gate, and both structures are a wash
+there anyway). The pivot to **(b) + LBVH range query** is triggered by the
+scale-forward mandate, and the discriminator is cheap and concrete: **measure
+h_max/h_min across the gas near pericenter** (h ~ ρ^(−1/3); `density_adaptive` + the
+existing snapshots). ≤ ~10× → a spatial-hash grid stays fine even under per-particle
+radius, the flip is not worth it; 100×+ → the grid degenerates and the LBVH clearly
+wins. Get that number before committing G1's structure. **Keep G1 isolated/swappable
+regardless** so the grid↔LBVH swap stays a module change, not a rewrite.
 
 ### D5 — GATE DESIGN: no full-merger trajectory match (chaotic system)
 A self-gravitating merger is chaotic (positive Lyapunov); an f32-vs-f64 force
@@ -130,9 +175,13 @@ batches" policy is the adaptive-dt follow-up (shared substrate, below).
 
 Sub-milestones, roughly in dependency order. Each lands red→green with its own gate.
 
-- **G1 — GPU uniform hash grid** (D4): buckets gas positions at a query radius;
-  gate = same neighbor sets as `sph::grid::HashGrid` on synthetic clouds
-  (set equality, order-independent). Net-new GPU code; carries the determinism gates.
+- **G1 — GPU neighbor structure** (D4 — default: counting-sort spatial hash; LBVH
+  range query if the h-range discriminator pivots it): buckets/queries gas positions
+  at the coupling radius; gate = equality of the **filtered pair set** (post
+  `r < SUPPORT·max(h_i,h_j)`) vs `sph::grid::HashGrid` on synthetic clouds
+  (set equality, order-independent — radius-policy-invariant, so it survives an
+  (a)→(b) swap). Net-new GPU code; carries the determinism gates. Keep it isolated so
+  the grid↔LBVH swap is a module change.
 - **G2 — GPU adaptive-h density**: per-gas-particle bisection on the kernel-weighted
   count → (ρ, h). Gate = f32-tolerance vs `density_adaptive` on a
   centrally-concentrated cloud (wide h range). DS XOR-barrier if a compensated sum

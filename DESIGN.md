@@ -1720,8 +1720,12 @@ late-time positions — N-body is chaotic).
     calls `self.sample(n_halo, n_disk, seed)` — which ignores `self.gas` — so the
     halo and stellar POSITIONS are **bit-identical** to the gas-free IC at the
     same seed; stellar masses then scale by (1−f_gas) (mass can't move a
-    position). Gas draws from a reserved `mix³(seed)` stream (past halo/pos/vel),
-    so n_gas = 0 leaves the stellar draws bit-identical too.
+    position). Gas draws from a **salted** stream `gas_stream_seed(seed) =
+    mix(seed ^ GAS_SALT)`, orthogonal to the stellar mix-chain, so n_gas = 0
+    leaves the stellar draws bit-identical too. (The single-disk M7c landing used
+    `mix³(seed)` here; the salt realignment landed with `DiskCollision` gas below,
+    because `mix³` collides with the collision's galaxy-2 base — see there. No gas
+    gate pinned exact gas positions, so the realignment was behaviour-safe.)
   - **Zero-COM via the gas block (advisor-caught).** `sample`'s combined recenter
     leaves each sub-block a *finite-N* COM ±M_halo·mean_pos (~1e-3, NOT roundoff);
     scaling the stars unbalances it by −f·M_halo·mean_pos ≈ 6e-4 — 7 orders over
@@ -1745,11 +1749,41 @@ late-time positions — N-body is chaotic).
     ~8% extra radial growth) not the ratio, so a growing common-mode baseline can't
     erode it. (Both dynamical gates' tolerances calibrated from measured numbers,
     replacing red placeholders.)
+- **Gas-rich two-disk encounter — `DiskCollision::sample_gas` (landed, M7c).**
+  Each galaxy contributes halo + disk + (optional) isothermal gas, so a disk-disk
+  encounter carries up to **six** populations: galaxy 1 {halo 0, disk 1, gas 4},
+  galaxy 2 {halo 2, disk 3, gas 5}.
+  - **`place_galaxy` remaps keyed on `kind`, not tag arithmetic (D1).** Stellar
+    (body-frame halo 0 / disk 1) shift `tag + 2·gal_index` → galaxy 2 gets 2/3;
+    gas (body-frame Progenitor(4)) maps `4 + gal_index` → gas1 = 4, gas2 = 5. The
+    gas remap is **+1 not +2**, so the earlier plan to reuse the uniform +2 shift
+    for gas was wrong; keying on species is the fix and matches the routing rule.
+    `place_galaxy` now also carries each particle's `kind` through, so a gas-free
+    encounter is still all-`Collisionless` and bit-identical to before (the ten
+    existing `disk_collision.rs` gates are the regression guard).
+  - **Salt, not a widened seed offset (the realignment).** The single-disk `mix³`
+    gas stream collides head-on here: galaxy 2's base seed is *also* `mix³(seed)`,
+    so galaxy 1's gas would draw from galaxy 2's halo seed. Rather than advance
+    galaxy 2 past a fourth per-galaxy stream (which would have shifted the gas-free
+    collision), the gas stream moved to the **salted domain**
+    `gas_stream_seed(seed) = mix(seed ^ GAS_SALT)` — orthogonal to the mix-chain,
+    so galaxy 2 stays at `mix³(seed)` untouched and gas never collides with any
+    stellar stream in either the single disk or the collision.
+  - **The white-box seed gate (advisor-caught).** None of the black-box gates
+    (bit-identity, COM, tags, counts) distinguishes the buggy `mix³` from the
+    salt: galaxy 2's halo is `mix³(seed)` *either way*. The discriminating gate is
+    a unit test asserting the **eight** per-encounter stream seeds (four per
+    galaxy) are all-distinct — 7 with `mix³` (gas1 == g2-halo), 8 with the salt.
+  - **Mixed pairings + edges.** Per-galaxy dispatch (`sample_gas` if the disk has
+    a gas layer, else `sample`) makes a gas-rich × gas-free encounter legal; a
+    gas-free galaxy ignores its gas count. `n_gas = 0` yields a purely stellar
+    encounter. Shared `recenter_zero_com` delivers the whole system to the global
+    zero-COM/zero-momentum frame. Gates: six-population tag/count partition +
+    contiguous ids, `kind ⟺ gas-progenitor` correspondence, mixed pairing, n_gas=0,
+    zero COM/momentum, determinism, plus the eight-seed unit gate.
   - [still owed in M7c: the `CflGuard` sink-decorator + xtask wiring (read the
-    xtask `Sink`/`run_movie` pipeline first), then `DiskCollision` gas — the gas
-    tag remap is **+1 not +2** (g1 gas=4, g2 gas=5; `place_galaxy`'s uniform +2
-    shift is wrong for gas) and galaxy-2's seed offset must advance past the new
-    gas stream — and the dynamical merger dust-lane demo (the M7 money shot).]
+    xtask `Sink`/`run_movie` pipeline first) + minimal `[model.gas]` in spec.rs,
+    and the dynamical gas-rich merger dust-lane demo (the M7 money shot).]
 
 ## Validation strategy
 

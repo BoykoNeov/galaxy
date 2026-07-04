@@ -104,6 +104,71 @@ fn moving_toward_neighbors_shrinks_the_bound() {
 }
 
 #[test]
+fn cross_support_approacher_tightens_the_bound() {
+    // The force law couples a pair out to 2·max(h_i,h_j) (the averaged kernel
+    // W̄ is nonzero there), so a SMALL-h particle can be driven by a DIFFUSE
+    // large-h neighbor whose support reaches it even though the small particle's
+    // own 2·h_i ball does not reach back. The CFL signal velocity must see that
+    // approach: gathering v_sig,i only within 2·h_i misses it and overestimates
+    // the stable dt.
+    //
+    // Construct exactly that regime: a tight static clump (→ small h) plus one
+    // isolated particle a distance D away, moving straight at the clump at
+    // V ≫ c_s (→ large h, since it must reach the clump to find neighbors). Then
+    // 2·h_clump < D < 2·h_dist, so the clump particle only "sees" the approacher
+    // through the neighbor's larger support.
+    let c_s = 1.0;
+    let big_v = 100.0;
+    let d = 5.0;
+
+    let clump = random_points(77, 200, 0.03); // tight ⇒ small h, all static
+    let mut pos = clump.clone();
+    pos.push(DVec3::new(0.0, 0.0, d)); // lone diffuse approacher
+    let mut vel = vec![DVec3::ZERO; clump.len()];
+    vel.push(DVec3::new(0.0, 0.0, -big_v)); // heading straight at the clump
+
+    let state = gas_state(pos.clone(), vel);
+    let cfg = DensityConfig::default();
+    let params = HydroParams {
+        sound_speed: c_s,
+        ..HydroParams::default()
+    };
+
+    // Recover h independently (same routine the CFL path uses) to hand-derive
+    // the bound and to assert the geometry actually sits in the cross-support
+    // regime we mean to test.
+    let dens = density_adaptive(&pos, &state.mass, &cfg, None);
+    let h_dist = *dens.h.last().unwrap();
+    let h_min = dens.h.iter().cloned().fold(f64::INFINITY, f64::min);
+    assert!(
+        2.0 * h_min < d,
+        "clump 2·h_min = {} must NOT reach the approacher at D = {d}",
+        2.0 * h_min
+    );
+    assert!(
+        2.0 * h_dist > d,
+        "approacher 2·h_dist = {} must reach the clump at D = {d}",
+        2.0 * h_dist
+    );
+
+    // The binding particle is the min-h clump member; it is approached at w ≈ −V
+    // (the clump is tiny beside D), so v_sig = 2c_s − 3w = 2c_s + 3V.
+    let v_sig = 2.0 * c_s + 3.0 * big_v;
+    let expect = C_CFL * h_min / v_sig;
+
+    let got = max_stable_dt(&state, &params, &cfg, C_CFL);
+    let rel = (got - expect).abs() / expect;
+    assert!(
+        rel < 5e-2,
+        "max_stable_dt = {got}, want ≈ {expect} (cross-support approacher seen). \
+         Gathering only within 2·h_i would return the static floor \
+         {} — 2c_s/v_sig = {}× too large.",
+        C_CFL * h_min / (2.0 * c_s),
+        v_sig / (2.0 * c_s),
+    );
+}
+
+#[test]
 fn gas_free_state_has_no_hydro_cfl_constraint() {
     // Pure collisionless state ⇒ no SPH CFL bound (returns +∞, any dt validates).
     let pos = random_points(44, 100, 3.0);

@@ -2,6 +2,7 @@
 //! → grade → ffmpeg). The binary is the glue; this lib holds the pure, testable bits.
 
 pub mod cfl_guard;
+pub mod simulate;
 pub mod spec;
 
 use std::path::PathBuf;
@@ -16,6 +17,8 @@ use glam::Vec3;
 
 /// Gravitational constant of the N-body unit system (G = 1).
 pub const G: f64 = 1.0;
+/// Barnes-Hut opening angle θ for the movie pipeline's gravity solver.
+pub const THETA: f64 = 0.5;
 /// Per-particle peak brightness, so dense cores additively saturate.
 pub const PEAK_BRIGHTNESS: f32 = 0.3;
 /// kNN neighbour count for every density-driven feature (M3.6/M6a tuning).

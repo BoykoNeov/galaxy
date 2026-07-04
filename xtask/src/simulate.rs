@@ -5,10 +5,11 @@
 //! collisionless scenario (byte-identical to the pre-M7c pipeline — literally
 //! the same solver + sink + `run`), or `GravitySph` (Barnes-Hut gravity +
 //! isothermal SPH) wrapped by a [`CflGuard`] snapshot sink when the scenario
-//! carries gas. On the gas path it validates the fixed global `dt` against the
-//! hydro CFL bound at t=0 *before* any sink activity, so an over-large `dt`
-//! fails loud before the first snapshot is written, not only at the first
-//! emit (the `cfl_guard` contract). The single `Scenario::sound_speed` (already
+//! carries gas. The guard validates the fixed global `dt` against the hydro CFL
+//! bound of every emitted state *before* delegating to the real sink; since
+//! `run` emits the t=0 IC as its first snapshot (before any integration step),
+//! an over-large `dt` fails loud before the first snapshot is written — no
+//! separate t=0 pre-check is needed. The single `Scenario::sound_speed` (already
 //! baked into `state`'s pressure equilibrium) also drives the solver's
 //! `HydroParams`, so IC and force law share one c_s and cannot diverge.
 
@@ -16,7 +17,7 @@ use std::path::Path;
 
 use galaxy_core::{LeapfrogKdk, StaticBackground};
 use galaxy_sim::{run, DirectorySink, RunSummary, SimConfig};
-use galaxy_solvers::sph::{validate_dt, DensityConfig, GravitySph, HydroParams};
+use galaxy_solvers::sph::{DensityConfig, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
 use crate::cfl_guard::{CflGuard, C_CFL};
@@ -24,8 +25,9 @@ use crate::spec::Scenario;
 use crate::{G, THETA};
 
 /// Simulate `s` to `.snap` files under `snap_dir`, choosing Barnes-Hut (gas-free)
-/// or `GravitySph` + `CflGuard` (gas-rich) by `s.sound_speed`. Errors on a t=0
-/// CFL violation (gas path) or any sink/`run` failure.
+/// or `GravitySph` + `CflGuard` (gas-rich) by `s.sound_speed`. Errors on a CFL
+/// violation (gas path — caught by the guard at the t=0 IC emit before any file
+/// is written) or any sink/`run` failure.
 pub fn simulate_snapshots(
     s: &Scenario,
     snap_dir: &Path,
@@ -54,10 +56,10 @@ pub fn simulate_snapshots(
                 ..HydroParams::default()
             };
             let density_cfg = DensityConfig::default();
-            // t=0 CFL check BEFORE any sink activity: fail loud before the first
-            // snapshot is written, not only at the first emit (cfl_guard contract).
-            validate_dt(&state, &hydro, &density_cfg, cfg.dt, C_CFL)
-                .map_err(|v| format!("CFL violation at t=0: {v}"))?;
+            // No separate t=0 pre-check: `run` emits the t=0 IC as its first
+            // snapshot before any integration step, and `CflGuard` validates
+            // before delegating — so an over-large `dt` already fails loud at the
+            // IC emit, before a single `.snap` file is written.
             let gravity = BarnesHut::new(G, s.eps, THETA);
             let mut solver = GravitySph::new(gravity, hydro, density_cfg.clone());
             let inner = DirectorySink::new(snap_dir)?;

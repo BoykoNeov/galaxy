@@ -10,9 +10,10 @@
 //!
 //! It lives in xtask, not solvers: it bridges `sim::SnapshotSink` and
 //! `solvers::sph::validate_dt`, and the engine crates stay decoupled (D6 —
-//! `validate_dt` in solvers, the sink glue here). The caller also runs
-//! `validate_dt` once at t=0 before `run`, so an over-large `dt` fails before the
-//! first step, not only at the first snapshot.
+//! `validate_dt` in solvers, the sink glue here). No separate t=0 pre-check is
+//! needed: `run` emits the t=0 IC as its first snapshot before any integration
+//! step, and this guard validates before delegating — so an over-large `dt`
+//! fails at that first emit, before a single snapshot file is written.
 
 use galaxy_core::State;
 use galaxy_io::Header;

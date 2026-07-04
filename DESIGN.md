@@ -1810,10 +1810,28 @@ late-time positions — N-body is chaotic).
     `f`, or non-positive `c_s` fails the front-end with the reason named. Gas is a
     **disk-plummer-only** knob in v1 (the IC supports NFW-halo gas; the pipeline
     keeps it minimal), rejected on the other kinds.
-  - [still owed in M7c: the `run_movie` solver-swap (`BarnesHut → GravitySph`) +
-    `CflGuard`/`validate_dt` wiring gated on gas-presence (gas-free path
-    byte-identical), and the dynamical gas-rich merger dust-lane demo (the M7
-    money shot; its wall-clock is the GPU-SPH gate measurement).]
+- **`run_movie` gas-gated solver swap — `simulate_snapshots` (landed, M7c).** The
+  movie pipeline's simulate step is extracted into a testable lib seam,
+  `galaxy_xtask::simulate::simulate_snapshots(&Scenario, &Path)`, that picks the
+  force solver by `Scenario.sound_speed`:
+  - **Gas-free** → plain `BarnesHut` + `DirectorySink` + `run`, *literally the same
+    code* as the pre-M7c inline block (byte-identity rests on identity, not
+    always-wrapping — a unit gate compares its `.snap` bytes to the bare pipeline,
+    and the load-bearing check is the full 481-frame pixel re-render against the
+    retained control).
+  - **Gas-rich** → `GravitySph::new(BarnesHut, HydroParams { sound_speed, .. },
+    DensityConfig)` under a `CflGuard` sink, with the single `Scenario.sound_speed`
+    feeding the solver's `HydroParams` (same c_s as the IC — cannot diverge). The
+    fixed global `dt` is `validate_dt`'d against the hydro CFL bound **at t=0,
+    before any sink activity**, so an over-large `dt` fails loud before the first
+    snapshot is written, not only at the first emit. Gating (not always-wrapping) is
+    deliberate: it keeps the per-step `Species::Gas` scan off every collisionless
+    run.
+  - [still owed in M7c: the dynamical gas-rich merger dust-lane demo (the M7 money
+    shot) through the M7e volumetric path — its wall-clock is the GPU-SPH gate
+    measurement (a >~30 min QUICK/full ⇒ insert a GPU-SPH session). Demo `dt` sits
+    *below* the isolated-disk CFL bound; a mid-run `CflGuard` trip at pericenter is
+    the guard working (lower `dt`, don't loosen `C_CFL`).]
 
 ## Validation strategy
 

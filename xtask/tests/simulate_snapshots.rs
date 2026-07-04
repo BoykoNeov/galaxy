@@ -111,7 +111,10 @@ kind = "static"
 /// `dt` well below the isolated-disk CFL bound, a handful of steps, snapshots
 /// every step.
 fn gas_scenario() -> Scenario {
-    let mut s = build_scenario(&parse_scenario_toml(GAS_TOML).expect("gas toml parses"), true);
+    let mut s = build_scenario(
+        &parse_scenario_toml(GAS_TOML).expect("gas toml parses"),
+        true,
+    );
     s.dt = 1e-4;
     s.n_steps = 4;
     s.snapshot_every = 1;
@@ -154,9 +157,7 @@ fn gravity_only_final(s: &Scenario) -> State {
         units: "nbody-G1".to_string(),
     };
     let last = Rc::new(RefCell::new(None));
-    let mut sink = CaptureLast {
-        last: last.clone(),
-    };
+    let mut sink = CaptureLast { last: last.clone() };
     run(&mut state, &mut solver, &mut integ, &bg, &cfg, &mut sink).unwrap();
     let final_state = last.borrow_mut().take();
     final_state.expect("at least one emit")
@@ -299,10 +300,8 @@ fn gas_free_path_matches_the_bare_barnes_hut_pipeline() {
 /// A unique-enough temp directory for one test, under the repo-configured temp
 /// root. Uniqueness comes from the OS thread id + the dir name the caller joins.
 fn tempdir() -> std::path::PathBuf {
-    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "sim_snap_{:?}",
-        std::thread::current().id()
-    ));
+    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("sim_snap_{:?}", std::thread::current().id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
     base

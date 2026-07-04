@@ -59,7 +59,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use galaxy_core::{LeapfrogKdk, State, StaticBackground};
+use galaxy_core::State;
 use galaxy_grade::{grade_file, BloomConfig, GradeConfig, ToneMap};
 use galaxy_render::camera::DEFAULT_MARGIN;
 use galaxy_render::{smooth_envelope, write_exr, Camera, CameraPath, RenderConfig, Renderer};
@@ -67,14 +67,14 @@ use galaxy_renderprep::{
     initial_radius_colors, knn_density, prepare, subframe, ColorMode, CompressionHue,
     DispersionColoring, FrameData, HermiteSpan, PrepConfig, RadialRamp,
 };
-use galaxy_sim::{run, DirectorySink, SimConfig};
 use galaxy_solvers::sph::{density_adaptive, density_fixed, reference_density, DensityConfig};
+use galaxy_xtask::simulate::simulate_snapshots;
 use galaxy_xtask::spec::{
     build_scenario, parse_scenario_toml, preset, Rig, Scenario, ScenarioSpec,
 };
 use galaxy_xtask::{
     framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii, ColorModeArg,
-    ScenarioArg, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K, G,
+    ScenarioArg, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K,
 };
 use glam::Vec3;
 
@@ -83,7 +83,6 @@ use glam::Vec3;
 // frame sizes, subframe count) live in the lib (`galaxy_xtask`) so the M6f
 // spec-driven builder shares them; the grade-side and mode-color knobs below are
 // consumed only by this binary. Tuning provenance: DESIGN.md M3.6/M6a–M6e.
-const THETA: f64 = 0.5; // Barnes-Hut opening angle
 const FALLOFF: f32 = 6.0;
 // M6e coloring. All kNN consumers reuse (DENSITY_K, scenario ε) so the O(N²)
 // estimate runs once per snapshot no matter how many passes are on.
@@ -944,21 +943,11 @@ fn run_movie(
     // 1. Simulate → snapshots — unless the caller asked to reuse retained ones
     //    (M6e: coloring modes iterate in render time, not sim time).
     if !reuse_snapshots {
-        let mut state = s.state.clone();
-        let mut solver = galaxy_solvers::BarnesHut::new(G, s.eps, THETA);
-        let mut integ = LeapfrogKdk::new();
-        let bg = StaticBackground;
-        let cfg = SimConfig {
-            dt: s.dt,
-            n_steps: s.n_steps,
-            snapshot_every: s.snapshot_every,
-            softening: s.eps,
-            rng_seed: s.seed,
-            config_hash: 0,
-            units: "nbody-G1".to_string(),
-        };
-        let mut sink = DirectorySink::new(&snap_dir)?;
-        let summary = run(&mut state, &mut solver, &mut integ, &bg, &cfg, &mut sink)?;
+        // The gas-gated simulate step (M7c): Barnes-Hut for a gas-free scenario
+        // (byte-identical to the pre-M7c pipeline), or GravitySph + CflGuard when
+        // the scenario carries gas — with the fixed dt validated against the hydro
+        // CFL bound at t=0 before the first snapshot.
+        let summary = simulate_snapshots(s, &snap_dir)?;
         println!(
             "simulated {} steps → {} snapshots (t_final = {:.2})",
             summary.steps, summary.snapshots_emitted, summary.final_time

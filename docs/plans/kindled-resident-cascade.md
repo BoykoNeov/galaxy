@@ -131,15 +131,44 @@ the structure follows.
   (`GpuMorton`/`GpuSorter`/builder/flattener), but it is construction-*code* reuse,
   not a free existing tree.
 
-**Decision + the number that settles it:** default to **(a) + spatial-hash grid** for
-the first cut (it matches D2, is the simplest gate, and both structures are a wash
-there anyway). The pivot to **(b) + LBVH range query** is triggered by the
-scale-forward mandate, and the discriminator is cheap and concrete: **measure
-h_max/h_min across the gas near pericenter** (h ~ ρ^(−1/3); `density_adaptive` + the
-existing snapshots). ≤ ~10× → a spatial-hash grid stays fine even under per-particle
-radius, the flip is not worth it; 100×+ → the grid degenerates and the LBVH clearly
-wins. Get that number before committing G1's structure. **Keep G1 isolated/swappable
-regardless** so the grid↔LBVH swap stays a module change, not a rewrite.
+**Decision + the number that settles it — MEASURED 2026-07-04.** The discriminator
+was cheap and concrete: the gas smoothing-length dynamic range (h ~ ρ^(−1/3);
+`density_adaptive` over the gas subset + the existing gasrich snapshots). Tool +
+full table: `M:\…\measure_h_range\FINDINGS.md`. Result, robust p99.5/p0.5 (raw
+h_max/h_min strips out to the bisection-clamp tails, so the *robust* ratio is the
+honest one):
+- **The undisturbed t=0 gasrich disk is already 34× — the clean anchor.** Zero
+  escapees, no bracket-clamp pressure, an equilibrium disk: a centrally-concentrated
+  gas disk *intrinsically* spans >30× in h (dense core vs diffuse edge). That alone
+  is 3.4× past the ≤10× "grid stays fine" threshold, before any merger dynamics.
+- Pericenter only widens it: QUICK climbs to ~280× robust (peak); full-res reads ~2×
+  the QUICK raw ratio at matched early steps, so QUICK is a **lower bound** on full-res.
+
+So the range is firmly in the **100×+ regime → a single-resolution uniform grid
+degenerates** (one cell size cannot serve an h~0.02 knot and an h~10 diffuse-tail
+particle; the large-h_j capture problem — dense `i` must find diffuse `j` out to
+`SUPPORT·h_j`≈26 — is exactly what per-node max-h on a BVH solves and a grid cannot
+cheaply). The same range also condemns (a) more than "O(N²)" implies: a dense-knot
+target over-gathering at `SUPPORT·h_max` scans a ~(h_max/h_i)³ candidate volume — a
+per-dense-particle constant of ~10⁶–10⁸, not a benign parallel-eaten O(N²).
+
+**Resolved:**
+- **Endpoint / structure = LBVH range query with max-h-augmented nodes**, reusing the
+  Karras *construction* (not the θ-walk). This is the scale-forward target the
+  measurement confirms. (A multi-level grid also survives the h-range, but it is
+  net-new with no reuse edge, so the LBVH dominates it *in our situation* — built +
+  gated construction already exists. Not relitigated.)
+- **Gather radius = (b) per-particle `SUPPORT·h_i` + max-h prune** at scale; (a) is
+  the throwaway-simple first-cut only.
+- **G1 staging is UNCHANGED and is a separate call the number does NOT settle.** The
+  h-range decides the *endpoint*, not whether G1 *starts* as a grid. Grid-first
+  remains sound de-risking: bring up G2–G6 (density root-find, force, CFL) gated
+  against a *known-correct* grid before also debugging the novel, conservativeness-
+  sensitive max-h range traversal (f32 AABBs must never miss an in-radius neighbor).
+  The grid is then a CPU-parity oracle + fallback, not throwaway. Going straight to
+  LBVH at G1 (call it **G1′**) is a legitimate *de-risk-vs-avoid-throwaway* choice —
+  make it explicitly, don't read it out of the h-range number.
+- **Keep G1 isolated/swappable regardless** so grid↔LBVH stays a module change.
 
 ### D5 — GATE DESIGN: no full-merger trajectory match (chaotic system)
 A self-gravitating merger is chaotic (positive Lyapunov); an f32-vs-f64 force
@@ -175,9 +204,11 @@ batches" policy is the adaptive-dt follow-up (shared substrate, below).
 
 Sub-milestones, roughly in dependency order. Each lands red→green with its own gate.
 
-- **G1 — GPU neighbor structure** (D4 — default: counting-sort spatial hash; LBVH
-  range query if the h-range discriminator pivots it): buckets/queries gas positions
-  at the coupling radius; gate = equality of the **filtered pair set** (post
+- **G1 — GPU neighbor structure** (D4 — endpoint is the **max-h LBVH range query**
+  per the measured 34×+ h-range; G1 *starts* grid-first as de-risking, or go straight
+  to LBVH as **G1′** — an explicit de-risk-vs-throwaway call, not settled by the
+  number): buckets/queries gas positions at the coupling radius; gate = equality of
+  the **filtered pair set** (post
   `r < SUPPORT·max(h_i,h_j)`) vs `sph::grid::HashGrid` on synthetic clouds
   (set equality, order-independent — radius-policy-invariant, so it survives an
   (a)→(b) swap). Net-new GPU code; carries the determinism gates. Keep it isolated so

@@ -940,10 +940,14 @@ fn run_movie(
         // (byte-identical to the pre-M7c pipeline), or GravitySph + CflGuard when
         // the scenario carries gas — with the fixed dt validated against the hydro
         // CFL bound at t=0 before the first snapshot.
+        let t_sim = std::time::Instant::now();
         let summary = simulate_snapshots(s, &snap_dir)?;
         println!(
-            "simulated {} steps → {} snapshots (t_final = {:.2})",
-            summary.steps, summary.snapshots_emitted, summary.final_time
+            "simulated {} steps → {} snapshots (t_final = {:.2}) in {:.1} s",
+            summary.steps,
+            summary.snapshots_emitted,
+            summary.final_time,
+            t_sim.elapsed().as_secs_f64()
         );
     }
 
@@ -988,9 +992,14 @@ fn run_movie(
     // The effective prep config (M6e): the scenario's base look + the requested
     // coloring mode + the star-formation compression proxy, both anchored to THIS
     // run's snapshot 0 (frozen ramp colors; reference densities ρ0).
+    let t_prep = std::time::Instant::now();
     let prep = effective_prep(s, color, &states[0]);
     let frames: Vec<_> = states.iter().map(|st| prepare(st, &prep)).collect();
-    println!("prepared {} endpoint frames", frames.len());
+    println!(
+        "prepared {} endpoint frames in {:.1} s",
+        frames.len(),
+        t_prep.elapsed().as_secs_f64()
+    );
 
     // 2b. Gas voxelization (M7e, plan D8): one density grid per SNAPSHOT
     //     endpoint — `None` for gas-free states, i.e. every pre-M7c scenario,
@@ -1148,6 +1157,7 @@ fn run_movie(
         grade_file(&exr, &png, &gcfg)?;
         Ok(())
     };
+    let t_render = std::time::Instant::now();
     let mut i = 0;
     for w in 0..states.len().saturating_sub(1) {
         // The span validates the id/time gates once per snapshot pair (a silent
@@ -1182,7 +1192,11 @@ fn run_movie(
         emit(i, last, gas)?;
         i += 1;
     }
-    println!("rendered + graded {i} frames → {}", frame_dir.display());
+    println!(
+        "rendered + graded {i} frames → {} in {:.1} s",
+        frame_dir.display(),
+        t_render.elapsed().as_secs_f64()
+    );
 
     // 4. ffmpeg → movie (optional; leaves PNGs if ffmpeg is absent).
     encode_movie(&frame_dir, &out.join("movie.mp4"));

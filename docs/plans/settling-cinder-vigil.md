@@ -26,6 +26,42 @@ urgent at the current default (QUICK) scale.
 
 ---
 
+## ✅ MEASURED 2026-07-04 — gate resolved (see below for revised ordering)
+
+Full artifacts: `M:\claud_projects\temp\gasrich_fullres_measure\FINDINGS.md`.
+Four-phase timing probe added to `run_movie` (sim/prep/voxel/render), committed as
+a permanent diagnostic (matches the existing `voxelized gas … in X s` line).
+
+**The run did NOT complete — full-res sim CFL-ABORTED at ~step 250** (dt=0.005 >
+stable bound 0.00475, *before* pericenter). Three findings:
+
+- **A (headline, unanticipated): full-res gasrich is UNPRODUCIBLE at any verified dt.**
+  The preset dt=0.005 is QUICK-tuned; the note's "FULL is the robust regime" is about
+  *fragmentation*, not CFL — full-res samples gas ~3× denser → smaller h → tighter CFL
+  bound. Needs a smaller/adaptive dt whose merger-wide minimum is unknown (likely
+  <0.002). **GPU-SPH does NOT fix this** — CFL constrains step *size*, not *speed*.
+- **B (perf gate): sim > 30 min → GPU-SPH TRIGGERED.** Early rate 20.5 s/100 steps →
+  30 min at only ~8,800 steps; any completing dt gives ≫6,000 steps with per-step cost
+  rising at pericenter. Robustly >30 min. **F1 (CPU opt of the exact loop GPU-SPH
+  replaces) is SUPERSEDED.**
+- **C (render-side, via `--reuse-snapshots` on the 3 snapshots):** prep ~2.2 min
+  (O(N²) kNN), voxel ~10 s, render+grade ~4.1 min → **render-side ≈ 6.5 min total,
+  ~5–25× smaller than sim.** **F2/F4 are NOT on the critical path** (their premise
+  "voxelization + march dominate" is false — voxel is 10 s).
+
+**Scale-forward reframe** (user wants headroom for bigger models/data): F1 stays moot;
+**F4 elevated** (0.5 GB@128³ → ~4 GB@256³ — a real scale-forward memory win, no longer
+"wait for the ceiling"); F2 cheap, bank opportunistically; **GPU-SPH** is the primary
+scale-forward investment; **adaptive dt** is the highest-leverage emergent item (fixes
+A, scale-forward numerics, and the one lever that could pull sim back under 30 min).
+
+**Revised ordering:** (1) adaptive dt / a CFL-safe full-res dt — REQUIRED before the
+showpiece can be produced at all (Finding A); (2) GPU-SPH — the sim cost (Finding B),
+reinforced by scale-forward; (3) F4 — banked as a scale-forward memory win; (4) F2 —
+opportunistic; F1 — dropped. The original ordering below is superseded by this.
+
+---
+
 ## ⚠ Before doing ANY of F1/F2/F4: measure full-res first
 
 All three findings bite specifically on the **full-res, edge-on `gasrich` showpiece

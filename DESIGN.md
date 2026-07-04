@@ -1827,11 +1827,29 @@ late-time positions — N-body is chaotic).
     snapshot is written, not only at the first emit. Gating (not always-wrapping) is
     deliberate: it keeps the per-step `Species::Gas` scan off every collisionless
     run.
-  - [still owed in M7c: the dynamical gas-rich merger dust-lane demo (the M7 money
-    shot) through the M7e volumetric path — its wall-clock is the GPU-SPH gate
-    measurement (a >~30 min QUICK/full ⇒ insert a GPU-SPH session). Demo `dt` sits
-    *below* the isolated-disk CFL bound; a mid-run `CflGuard` trip at pericenter is
-    the guard working (lower `dt`, don't loosen `C_CFL`).]
+  - **QUICK merger demo ran (M7c, 2026-07-04).** The `disk` parabolic encounter +
+    30% gas (c_s = 0.1) through the full gas pipeline: 6000 steps @ `dt = 0.005`
+    (t=0 CFL bound measured 0.046) survived the whole merger with **no CflGuard
+    trip**, 61 snapshots → 481 frames → movie, `voxelized gas (64³)` confirmed. QUICK
+    wall-clock ≈ 340 s. The gas-free 481-frame pixel re-verify is accepted at the
+    unit-proof level (byte-identical snapshots + untouched render path).
+  - **Finding — the gas-grid bounds heuristic doesn't survive a merger.**
+    `deposit_gas`'s cubic bounds are `percentile_radius(gas) + SUPPORT·h_max`
+    (`renderprep/gasgrid.rs`). Under adaptive-h a *single* sparse edge gas particle
+    (the truncated-exponential outskirt, or tidal debris) carries a huge `h`, so
+    `SUPPORT·h_max` inflates the grid to ~41 units while the dense gas disk is ~2 —
+    **< 1 cell per gas scale length at 64³**, and only ~1.5 even at 128³, so the
+    column density dilutes to near-invisibility (the demo's faint gas). This is a
+    *bounds* problem, not `[look.gas]`, and full-res does not fix it. The M7d static
+    synthetic demo never exposed it (uniform disk, no edge sparsity). **M7f owes a
+    bounds heuristic one edge particle's `h_max` can't dominate** (pad by a
+    percentile-of-`h` or `SUPPORT·median_h`, or clip the pad — the dropped far tails
+    stay exactly +0.0 per the M7d deposition-order proof) *before* any κ/emissivity
+    tuning.
+  - [still owed in M7c: the **full-res** merger render — its wall-clock is the
+    GPU-SPH gate (>~30 min ⇒ insert a GPU-SPH session). QUICK ~5 min does not predict
+    it (N ~2–3×, pixels 4×, voxels 8×); it is a deliberate user call, and best run
+    *after* the M7f bounds fix so the money shot actually shows gas.]
 
 ## Validation strategy
 

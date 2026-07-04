@@ -1860,10 +1860,57 @@ late-time positions — N-body is chaotic).
     NOT the bug; `percentile` remains the framing knob to tighten a specific shot.
     Still owed in M7f: `[look.gas]` κ/emissivity + `gasrich` preset (the full
     dust-lane A/B re-render lands there, tuned against the now-resolved grid).
+  - **`[look.gas]` volumetric look + `gasrich` preset (landed, M7f).** The gas
+    emission/absorption knobs (`color`, `emissivity` j, `opacity` κ) become
+    scenario data: a nested `[look.gas]` table on `LookSpec`, threaded onto the
+    runtime `Scenario` (`gas_look: Option<GasLookValues>`, `Some` **iff** the
+    model is gas-rich, mirroring `sound_speed`), so `run_movie` swaps its
+    hardcoded `GAS_*` placeholders for `s.gas_look`. Validation is asymmetric
+    (advisor-vetted): `[look.gas]` on a gas-free model is a **loud reject** (a
+    dead volumetric look), a gas-rich model that omits it renders with
+    `GasLook::default`, and negative/non-finite knobs fail. **Grid resolution is
+    deliberately NOT a look knob** — it is a global quality constant (64³ QUICK /
+    128³ full, like the frame dimensions); a 128³ re-render test raised peak ρ but
+    not the visible sharpness, confirming particle count (not grid res) is the
+    limiter, so exposing it would be scope creep. The `gasrich` preset is the
+    `disk` parabolic encounter made gas-rich (f_gas = 0.3).
+  - **The movie gas render was invisible from M7c until M7f — a look bug, not a
+    pipeline bug.** The M7c "deposit_gas RAN, verified not inferred" check
+    confirmed *deposition*, never *visibility*: every movie frame from M7c on was
+    stars-only to the eye. Root cause found in M7f by a per-pixel shader
+    diagnostic (green = ray misses grid; red = ρ found along ray → red over the
+    cores, so the machinery — clip, march, `density_at`, the transmittance
+    prepass, additive blend — all worked). **The look constants were simply
+    ~10× too weak for the regime:** the M7e placeholders (κ≈14, j≈0.4) were tuned
+    on a DENSE synthetic disk (ρ~1), but merger gas is ρ~0.1–0.5, and both κ and j
+    scale ~inversely with ρ. `gasrich` lands at κ=100, j=20 (flux drops and a blue
+    glow appears; κ=12 was bit-for-bit invisible, κ=300 over-crushed). **A gas-on
+    vs gas-off flux-delta test would guard this regression** (deferred; it cannot
+    judge "κ high enough to look good" — that stays an eyeball gate).
+  - **QUICK gas is intrinsically SOFT; sharp lanes are the full-res story.** At
+    2500 gas / 64³ the few particles carry large SPH `h` ⇒ a smooth blobby field,
+    so the QUICK `gasrich` reads as a soft blue glow (bridge emission + gentle
+    core attenuation), not hard dust lanes. The tuned rig tilts toward edge-on
+    (35°→25°) to lengthen the sight-line through the thin gas layer. Dramatic
+    lanes need the full-res realization (more gas ⇒ smaller `h`) + more edge-on —
+    the same **user-gated full-res showpiece** whose wall-clock is the GPU-SPH gate.
+  - **`gasrich` is warm (c_s = 0.1, min Q_gas ≈ 4), not marginal.** The plan's
+    Q ≈ 1.5–2 (c_s ≈ 0.05–0.07) is unreachable in isothermal SPH at QUICK
+    resolution: the thin cold sech² layer is under-resolved, settles vertically
+    out of equilibrium within ~100 steps, spikes the midplane density, and
+    collapses the running CFL bound to ~0.003 while artificially clumping. Warming
+    to c_s = 0.1 gives a resolved layer — and since face-on **column depth
+    ∫ρ dz = Σ_gas is c_s-independent**, warming costs nothing on the lanes.
+    Warming does NOT enlarge the CFL step (measured: c_s 0.05→0.1 moved the
+    running bound only ~0.0043→0.0048); the step is set by the compressed midplane
+    density of the realization. That bound is **realization-sensitive** at QUICK —
+    some seeds grow a knot that drags it below 0.002 and trips CflGuard — so the
+    preset's seed (`0x00C0_FFEE`) is chosen as one whose QUICK realization stays
+    clean at dt = 0.005 (confirmed: full merger, no trip, frames show no clump).
   - [still owed in M7c: the **full-res** merger render — its wall-clock is the
     GPU-SPH gate (>~30 min ⇒ insert a GPU-SPH session). QUICK ~5 min does not predict
-    it (N ~2–3×, pixels 4×, voxels 8×); it is a deliberate user call, and best run
-    *after* the M7f bounds fix so the money shot actually shows gas.]
+    it (N ~2–3×, pixels 4×, voxels 8×); it is a deliberate user call, and now that
+    M7f tuned the look it is the money shot that actually shows gas.]
 
 ## Validation strategy
 

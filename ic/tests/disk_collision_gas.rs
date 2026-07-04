@@ -68,17 +68,45 @@ fn six_populations_tagged_counted_with_contiguous_ids() {
     assert_eq!(s.len(), n, "total particle count");
 
     // The six populations partition the realization with the documented tags.
-    assert_eq!(indices(&s, Progenitor(0)).len(), NH1, "galaxy 1 halo = Progenitor(0)");
-    assert_eq!(indices(&s, Progenitor(1)).len(), ND1, "galaxy 1 disk = Progenitor(1)");
-    assert_eq!(indices(&s, Progenitor(4)).len(), NG1, "galaxy 1 gas = Progenitor(4)");
-    assert_eq!(indices(&s, Progenitor(2)).len(), NH2, "galaxy 2 halo = Progenitor(2)");
-    assert_eq!(indices(&s, Progenitor(3)).len(), ND2, "galaxy 2 disk = Progenitor(3)");
-    assert_eq!(indices(&s, Progenitor(5)).len(), NG2, "galaxy 2 gas = Progenitor(5)");
+    assert_eq!(
+        indices(&s, Progenitor(0)).len(),
+        NH1,
+        "galaxy 1 halo = Progenitor(0)"
+    );
+    assert_eq!(
+        indices(&s, Progenitor(1)).len(),
+        ND1,
+        "galaxy 1 disk = Progenitor(1)"
+    );
+    assert_eq!(
+        indices(&s, Progenitor(4)).len(),
+        NG1,
+        "galaxy 1 gas = Progenitor(4)"
+    );
+    assert_eq!(
+        indices(&s, Progenitor(2)).len(),
+        NH2,
+        "galaxy 2 halo = Progenitor(2)"
+    );
+    assert_eq!(
+        indices(&s, Progenitor(3)).len(),
+        ND2,
+        "galaxy 2 disk = Progenitor(3)"
+    );
+    assert_eq!(
+        indices(&s, Progenitor(5)).len(),
+        NG2,
+        "galaxy 2 gas = Progenitor(5)"
+    );
 
     // Contiguous unique ids 0..n.
     let ids: HashSet<u64> = s.id.iter().map(|p| p.0).collect();
     assert_eq!(ids.len(), n, "ids unique");
-    assert_eq!(ids, (0..n as u64).collect::<HashSet<_>>(), "ids contiguous 0..n");
+    assert_eq!(
+        ids,
+        (0..n as u64).collect::<HashSet<_>>(),
+        "ids contiguous 0..n"
+    );
 }
 
 #[test]
@@ -108,13 +136,17 @@ fn gas_free_galaxy_contributes_only_halo_and_disk() {
     let s = c.sample_gas(NH1, ND1, NG1, NH2, ND2, NG2, SEED);
 
     // Galaxy 2 requested NG2 gas but is gas-free, so it contributes none.
-    assert_eq!(s.len(), NH1 + ND1 + NG1 + NH2 + ND2, "gas-free galaxy 2 drops its gas");
-    assert_eq!(indices(&s, Progenitor(4)).len(), NG1, "galaxy 1 gas present");
-    assert!(indices(&s, Progenitor(5)).is_empty(), "galaxy 2 gas absent");
-    assert!(
-        (0..s.len()).all(|i| s.kind[i] == Species::Gas) == false,
-        "some particles are stellar"
+    assert_eq!(
+        s.len(),
+        NH1 + ND1 + NG1 + NH2 + ND2,
+        "gas-free galaxy 2 drops its gas"
     );
+    assert_eq!(
+        indices(&s, Progenitor(4)).len(),
+        NG1,
+        "galaxy 1 gas present"
+    );
+    assert!(indices(&s, Progenitor(5)).is_empty(), "galaxy 2 gas absent");
     let n_gas = (0..s.len()).filter(|&i| s.kind[i] == Species::Gas).count();
     assert_eq!(n_gas, NG1, "only galaxy 1 gas is present");
 }

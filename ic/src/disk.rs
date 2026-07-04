@@ -476,9 +476,20 @@ pub(crate) fn mix_seed(seed: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Derive a galaxy's gas PRNG seed from its base `seed`. The single source of truth
-/// for the gas stream, used by [`ExponentialDisk::sample_gas`] and asserted distinct
-/// from the six stellar stream seeds by the `DiskCollision` seed-separation gate.
+/// Salt XORed into a galaxy's base `seed` before one mix step to derive its GAS
+/// PRNG stream (D7). Placing the gas stream in a *salted* domain — orthogonal to the
+/// stellar mix-chain (halo `seed`, disk positions `mix(seed)`, disk velocities
+/// `mix²(seed)`) — is what lets `DiskCollision` keep its second galaxy spaced at
+/// `mix³(seed)` untouched: a plain `mix³(seed)` gas stream would draw galaxy 1's gas
+/// from the very seed that spaces galaxy 2's halo, correlating the two populations.
+/// The salt keeps gas independent of the mix-chain in both the single disk and the
+/// collision. The constant is ASCII `"gas_seed"`.
+pub(crate) const GAS_SALT: u64 = 0x6761_735F_7365_6564;
+
+/// Derive a galaxy's gas PRNG seed from its base `seed`: `mix(seed ^ GAS_SALT)`. The
+/// single source of truth for the gas stream, used by [`ExponentialDisk::sample_gas`]
+/// and asserted distinct from the six stellar stream seeds by the `DiskCollision`
+/// seed-separation gate.
 pub(crate) fn gas_stream_seed(seed: u64) -> u64 {
-    mix_seed(mix_seed(mix_seed(seed)))
+    mix_seed(seed ^ GAS_SALT)
 }

@@ -144,10 +144,11 @@ impl<H: SphericalHalo> DiskCollision<H> {
         let mut vel = Vec::with_capacity(n);
         let mut mass = Vec::with_capacity(n);
         let mut progenitor = Vec::with_capacity(n);
+        let mut kind = Vec::with_capacity(n);
 
         // Galaxy 1: rotate the body frame by its orientation, then rigidly place at
         // its COM orbital state. `ExponentialDisk::sample` already tags halo=0,
-        // disk=1, so galaxy 1 needs no remap.
+        // disk=1, so galaxy 1 (index 0) needs no remap.
         place_galaxy(
             &s1,
             self.orient1,
@@ -158,42 +159,28 @@ impl<H: SphericalHalo> DiskCollision<H> {
             &mut vel,
             &mut mass,
             &mut progenitor,
+            &mut kind,
         );
-        // Galaxy 2: same, but shift its progenitor tags by +2 so its halo becomes
+        // Galaxy 2 (index 1): its stellar tags shift by +2 so its halo becomes
         // Progenitor(2) and its disk Progenitor(3) — four distinct species overall.
         place_galaxy(
             &s2,
             self.orient2,
             r2,
             v2,
-            2,
+            1,
             &mut pos,
             &mut vel,
             &mut mass,
             &mut progenitor,
+            &mut kind,
         );
 
         // The per-galaxy COM split zeros the barycenter analytically, but rotation
         // roundoff and each galaxy's finite-N residual leave an O(machine-ε) offset;
         // a final mass-weighted recenter delivers the global zero-COM/zero-momentum
         // frame to roundoff.
-        let mtot: f64 = mass.iter().sum();
-        let mean_pos = pos
-            .iter()
-            .zip(&mass)
-            .fold(DVec3::ZERO, |acc, (p, m)| acc + *p * *m)
-            / mtot;
-        let mean_vel = vel
-            .iter()
-            .zip(&mass)
-            .fold(DVec3::ZERO, |acc, (v, m)| acc + *v * *m)
-            / mtot;
-        for p in &mut pos {
-            *p -= mean_pos;
-        }
-        for v in &mut vel {
-            *v -= mean_vel;
-        }
+        recenter_zero_com(&mut pos, &mut vel, &mass);
 
         let id = (0..n as u64).map(ParticleId).collect();
         State {
@@ -202,7 +189,7 @@ impl<H: SphericalHalo> DiskCollision<H> {
             mass,
             id,
             progenitor,
-            kind: vec![Species::Collisionless; n],
+            kind,
             time: 0.0,
             a: 1.0,
         }
@@ -237,33 +224,152 @@ impl<H: SphericalHalo> DiskCollision<H> {
         n_gas2: usize,
         seed: u64,
     ) -> State {
-        let _ = (n_halo1, n_disk1, n_gas1, n_halo2, n_disk2, n_gas2, seed);
-        todo!("DiskCollision::sample_gas — M7c gas encounter")
+        let ((r1, v1), (r2, v2)) = self.com_states();
+
+        // Each galaxy is sampled in its own body frame from disjoint stream sets.
+        // Galaxy 1 owns {seed, mix, mix², gas(seed)}; galaxy 2 starts at mix³(seed),
+        // clear of galaxy 1's THREE stellar streams — exactly the gas-free spacing
+        // (`sample`). The gas streams sit in a salted domain orthogonal to the mix
+        // chain (`disk::gas_stream_seed`), so adding a fourth (gas) stream per galaxy
+        // never disturbs that spacing: galaxy 1's gas cannot collide with galaxy 2's
+        // halo seed. A galaxy without a gas component ignores its gas count.
+        let s1 = sample_one(&self.galaxy1, n_halo1, n_disk1, n_gas1, seed);
+        let s2 = sample_one(
+            &self.galaxy2,
+            n_halo2,
+            n_disk2,
+            n_gas2,
+            mix_seed(mix_seed(mix_seed(seed))),
+        );
+
+        let n = s1.len() + s2.len();
+        let mut pos = Vec::with_capacity(n);
+        let mut vel = Vec::with_capacity(n);
+        let mut mass = Vec::with_capacity(n);
+        let mut progenitor = Vec::with_capacity(n);
+        let mut kind = Vec::with_capacity(n);
+
+        // Galaxy 1 (index 0): halo 0, disk 1, gas 4 — no remap. Galaxy 2 (index 1):
+        // halo→2, disk→3, gas→5. The gas remap is keyed on `kind`, not on a fragile
+        // arithmetic on the tag value (D1).
+        place_galaxy(
+            &s1,
+            self.orient1,
+            r1,
+            v1,
+            0,
+            &mut pos,
+            &mut vel,
+            &mut mass,
+            &mut progenitor,
+            &mut kind,
+        );
+        place_galaxy(
+            &s2,
+            self.orient2,
+            r2,
+            v2,
+            1,
+            &mut pos,
+            &mut vel,
+            &mut mass,
+            &mut progenitor,
+            &mut kind,
+        );
+
+        // Each galaxy's `sample`/`sample_gas` is already zero-COM in its body frame,
+        // and the COM split makes the placed barycenter vanish analytically; a final
+        // mass-weighted recenter removes the O(machine-ε) rotation/finite-N residual.
+        recenter_zero_com(&mut pos, &mut vel, &mass);
+
+        let id = (0..n as u64).map(ParticleId).collect();
+        State {
+            pos,
+            vel,
+            mass,
+            id,
+            progenitor,
+            kind,
+            time: 0.0,
+            a: 1.0,
+        }
+    }
+}
+
+/// Sample one galaxy for [`DiskCollision::sample_gas`]: with its gas layer if it
+/// carries one ([`ExponentialDisk::with_gas`]), else halo + disk only (its gas count
+/// is ignored). This is what makes a mixed gas-rich / gas-free pairing legal.
+fn sample_one<H: SphericalHalo>(
+    galaxy: &ExponentialDisk<H>,
+    n_halo: usize,
+    n_disk: usize,
+    n_gas: usize,
+    seed: u64,
+) -> State {
+    if galaxy.gas_params().is_some() {
+        galaxy.sample_gas(n_halo, n_disk, n_gas, seed)
+    } else {
+        galaxy.sample(n_halo, n_disk, seed)
+    }
+}
+
+/// Mass-weighted recenter of a placed realization to the global zero-COM /
+/// zero-momentum frame, in place. Shared by [`DiskCollision::sample`] and
+/// [`DiskCollision::sample_gas`].
+fn recenter_zero_com(pos: &mut [DVec3], vel: &mut [DVec3], mass: &[f64]) {
+    let mtot: f64 = mass.iter().sum();
+    let mean_pos = pos
+        .iter()
+        .zip(mass)
+        .fold(DVec3::ZERO, |acc, (p, m)| acc + *p * *m)
+        / mtot;
+    let mean_vel = vel
+        .iter()
+        .zip(mass)
+        .fold(DVec3::ZERO, |acc, (v, m)| acc + *v * *m)
+        / mtot;
+    for p in pos.iter_mut() {
+        *p -= mean_pos;
+    }
+    for v in vel.iter_mut() {
+        *v -= mean_vel;
     }
 }
 
 /// Rotate a body-frame galaxy by `orient`, boost/translate it to its COM orbital
-/// state `(r_com, v_com)`, remap its progenitor tags by `prog_shift`, and append
-/// the result to the output buffers. A rotation is rigid, so it preserves the
-/// galaxy's internal structure and its body-frame zero-COM/zero-momentum framing;
-/// the placement is then a pure rigid-body move.
+/// state `(r_com, v_com)`, remap its progenitor tags for galaxy `gal_index` (0 or 1),
+/// and append the result — carrying each particle's `kind` — to the output buffers.
+/// A rotation is rigid, so it preserves the galaxy's internal structure and its
+/// body-frame zero-COM/zero-momentum framing; the placement is then a pure
+/// rigid-body move.
+///
+/// Tag remap, keyed on `kind` so gas routing never depends on a fragile arithmetic
+/// on the tag value (D1):
+///   - stellar (body-frame halo 0 / disk 1): `tag + 2·gal_index` → galaxy 2 gets 2/3
+///   - gas      (body-frame Progenitor(4)):   `4 + gal_index`     → gas1 = 4, gas2 = 5
 #[allow(clippy::too_many_arguments)]
 fn place_galaxy(
     s: &State,
     orient: Orientation,
     r_com: DVec3,
     v_com: DVec3,
-    prog_shift: u16,
+    gal_index: u16,
     pos: &mut Vec<DVec3>,
     vel: &mut Vec<DVec3>,
     mass: &mut Vec<f64>,
     progenitor: &mut Vec<Progenitor>,
+    kind: &mut Vec<Species>,
 ) {
     for i in 0..s.len() {
         pos.push(orient.apply(s.pos[i]) + r_com);
         vel.push(orient.apply(s.vel[i]) + v_com);
         mass.push(s.mass[i]);
-        progenitor.push(Progenitor(s.progenitor[i].0 + prog_shift));
+        let tag = match s.kind[i] {
+            Species::Gas => Progenitor(4 + gal_index),
+            Species::Collisionless => Progenitor(s.progenitor[i].0 + 2 * gal_index),
+        };
+        progenitor.push(tag);
+        kind.push(s.kind[i]);
     }
 }
 
@@ -298,14 +404,14 @@ mod tests {
         // galaxy 1's stellar streams at mix³(seed) and owns {mix³, mix⁴, mix⁵, gas(mix³)}.
         let g2_base = mix_seed(mix_seed(mix_seed(SEED)));
         let seeds = [
-            SEED,                                   // g1 halo
-            mix_seed(SEED),                         // g1 disk positions
-            mix_seed(mix_seed(SEED)),               // g1 disk velocities
-            gas_stream_seed(SEED),                  // g1 gas
-            g2_base,                                // g2 halo
-            mix_seed(g2_base),                      // g2 disk positions
-            mix_seed(mix_seed(g2_base)),            // g2 disk velocities
-            gas_stream_seed(g2_base),               // g2 gas
+            SEED,                        // g1 halo
+            mix_seed(SEED),              // g1 disk positions
+            mix_seed(mix_seed(SEED)),    // g1 disk velocities
+            gas_stream_seed(SEED),       // g1 gas
+            g2_base,                     // g2 halo
+            mix_seed(g2_base),           // g2 disk positions
+            mix_seed(mix_seed(g2_base)), // g2 disk velocities
+            gas_stream_seed(g2_base),    // g2 gas
         ];
         let distinct: HashSet<u64> = seeds.iter().copied().collect();
         assert_eq!(

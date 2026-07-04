@@ -45,7 +45,7 @@ use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 
 use std::f64::consts::{PI, TAU};
 
-use crate::disk::{mix_seed, ExponentialDisk, SplitMix64};
+use crate::disk::{gas_stream_seed, ExponentialDisk, SplitMix64};
 use crate::SphericalHalo;
 
 /// The isothermal gas component of an [`ExponentialDisk`]: the fraction of the
@@ -219,12 +219,12 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
             return s;
         }
 
-        // 3. Gas: its own PRNG stream, mix³(seed) — past the halo (seed), stellar-
-        //    position (mix), and stellar-velocity (mix²) streams. Fluid-cold: v_r =
-        //    v_z = 0, a single deterministic pressure-corrected v_φ,gas(R). The thermal
-        //    sech²(z/z₀(R)) layer inverts its CDF as z = z₀·atanh(2Y−1).
-        let gas_seed = mix_seed(mix_seed(mix_seed(seed)));
-        let mut rng = SplitMix64::new(gas_seed);
+        // 3. Gas: its own PRNG stream, [`gas_stream_seed`] — separated from the halo
+        //    (seed), stellar-position (mix), and stellar-velocity (mix²) streams.
+        //    Fluid-cold: v_r = v_z = 0, a single deterministic pressure-corrected
+        //    v_φ,gas(R). The thermal sech²(z/z₀(R)) layer inverts its CDF as
+        //    z = z₀·atanh(2Y−1).
+        let mut rng = SplitMix64::new(gas_stream_seed(seed));
         let m_gas_each = f * self.disk_mass / n_gas as f64;
         let base = s.len();
         for k in 0..n_gas {

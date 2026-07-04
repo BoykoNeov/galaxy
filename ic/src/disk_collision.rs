@@ -207,6 +207,39 @@ impl<H: SphericalHalo> DiskCollision<H> {
             a: 1.0,
         }
     }
+
+    /// Sample the encounter with an isothermal SPH gas layer in each galaxy that
+    /// carries one (M7c): galaxy 1 gets `n_halo1` halo + `n_disk1` stellar + `n_gas1`
+    /// gas particles, galaxy 2 gets `n_halo2` + `n_disk2` + `n_gas2`. A galaxy built
+    /// *without* [`ExponentialDisk::with_gas`] ignores its gas count and contributes
+    /// only halo + disk, so a mixed gas-rich / gas-free pairing is legal.
+    ///
+    /// Up to **six** populations, tagged so the palette colors them apart and the
+    /// volumetric route keys on `kind`:
+    ///   - galaxy 1: halo `Progenitor(0)`, disk `Progenitor(1)`, gas `Progenitor(4)`
+    ///   - galaxy 2: halo `Progenitor(2)`, disk `Progenitor(3)`, gas `Progenitor(5)`
+    ///
+    /// The two galaxies draw from disjoint PRNG stream sets — galaxy 1 off `seed`,
+    /// galaxy 2 off `mix³(seed)` — with each galaxy's gas stream sitting in a salted
+    /// domain orthogonal to the stellar mix-chain (see [`crate::disk::gas_stream_seed`]),
+    /// so galaxy 1's gas never collides with galaxy 2's halo seed. The stellar and halo
+    /// particles stay bit-identical to the gas-free encounter at the same seed; the
+    /// whole system is delivered in the global zero-COM / zero-momentum frame with
+    /// contiguous unique ids. Deterministic in `seed`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_gas(
+        &self,
+        n_halo1: usize,
+        n_disk1: usize,
+        n_gas1: usize,
+        n_halo2: usize,
+        n_disk2: usize,
+        n_gas2: usize,
+        seed: u64,
+    ) -> State {
+        let _ = (n_halo1, n_disk1, n_gas1, n_halo2, n_disk2, n_gas2, seed);
+        todo!("DiskCollision::sample_gas — M7c gas encounter")
+    }
 }
 
 /// Rotate a body-frame galaxy by `orient`, boost/translate it to its COM orbital
@@ -241,4 +274,44 @@ fn mix_seed(seed: u64) -> u64 {
     let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::disk::{gas_stream_seed, mix_seed};
+    use std::collections::HashSet;
+
+    /// A gas-rich `DiskCollision` spends EIGHT independent PRNG stream seeds — four
+    /// per galaxy (halo, disk positions, disk velocities, gas) — and they must all be
+    /// distinct, or two populations draw from the same underlying sequence.
+    ///
+    /// This is the white-box gate the black-box gas tests cannot see: galaxy 2's halo
+    /// is seeded `mix³(seed)` whether or not the gas stream is salted, so "galaxy 2
+    /// stellar ≡ gas-free, bit-exact" passes even with a colliding gas stream. The
+    /// naive `gas_stream_seed = mix³` derivation makes galaxy 1's gas seed *equal*
+    /// galaxy 2's halo seed (both `mix³(seed)`) — this assertion is what forbids it and
+    /// forces the salted domain (D7).
+    #[test]
+    fn eight_stream_seeds_are_all_distinct() {
+        const SEED: u64 = 0x0D15_C011;
+        // Galaxy 1 owns {seed, mix, mix², gas(seed)}; galaxy 2 is spaced past all of
+        // galaxy 1's stellar streams at mix³(seed) and owns {mix³, mix⁴, mix⁵, gas(mix³)}.
+        let g2_base = mix_seed(mix_seed(mix_seed(SEED)));
+        let seeds = [
+            SEED,                                   // g1 halo
+            mix_seed(SEED),                         // g1 disk positions
+            mix_seed(mix_seed(SEED)),               // g1 disk velocities
+            gas_stream_seed(SEED),                  // g1 gas
+            g2_base,                                // g2 halo
+            mix_seed(g2_base),                      // g2 disk positions
+            mix_seed(mix_seed(g2_base)),            // g2 disk velocities
+            gas_stream_seed(g2_base),               // g2 gas
+        ];
+        let distinct: HashSet<u64> = seeds.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            seeds.len(),
+            "PRNG stream seeds collide (gas stream not orthogonal to the mix-chain): {seeds:0x?}"
+        );
+    }
 }

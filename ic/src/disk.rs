@@ -467,12 +467,18 @@ fn box_muller(u1: f64, u2: f64) -> (f64, f64) {
 /// One SplitMix64 step, deriving the disk's PRNG seed from the halo's so the two
 /// populations draw from well-separated streams. Mirrors `collision.rs`.
 ///
-/// `pub(crate)` so the gas layer derives its gas stream `mix³(seed)` past the
-/// halo (`seed`), stellar-position (`mix(seed)`), and stellar-velocity (`mix²(seed)`)
-/// streams.
+/// `pub(crate)` so the gas layer derives its gas stream past the halo (`seed`),
+/// stellar-position (`mix(seed)`), and stellar-velocity (`mix²(seed)`) streams.
 pub(crate) fn mix_seed(seed: u64) -> u64 {
     let z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+/// Derive a galaxy's gas PRNG seed from its base `seed`. The single source of truth
+/// for the gas stream, used by [`ExponentialDisk::sample_gas`] and asserted distinct
+/// from the six stellar stream seeds by the `DiskCollision` seed-separation gate.
+pub(crate) fn gas_stream_seed(seed: u64) -> u64 {
+    mix_seed(mix_seed(mix_seed(seed)))
 }

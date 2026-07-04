@@ -454,7 +454,7 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
             galaxy1,
             galaxy2,
             counts,
-            gas: _,
+            gas,
         } => {
             for (g, which) in [(galaxy1, "galaxy1"), (galaxy2, "galaxy2")] {
                 validate_disk(g, which)?;
@@ -467,7 +467,22 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                 ("halo2", counts.full.halo2, counts.quick.halo2),
                 ("disk2", counts.full.disk2, counts.quick.disk2),
             ])?;
-            4
+            // Gas (M7c): positive gas counts, plus the IC's admissibility rule
+            // (fraction ∈ (0,1), c_s > 0, min Q_gas ≥ 1) surfaced as a readable
+            // error instead of a panic in `with_gas`. Q_gas depends on each disk's
+            // Σ/κ, so both galaxies are checked with the shared (f, c_s).
+            if let Some(gas) = gas {
+                validate_counts(&[
+                    ("gas1", counts.full.gas1, counts.quick.gas1),
+                    ("gas2", counts.full.gas2, counts.quick.gas2),
+                ])?;
+                for (g, which) in [(galaxy1, "galaxy1"), (galaxy2, "galaxy2")] {
+                    let disk = disk_galaxy(g, Plummer::new(G, g.halo.mass, g.halo.scale));
+                    disk.check_gas(gas.fraction, gas.sound_speed)
+                        .map_err(|e| format!("{which} gas: {e}"))?;
+                }
+            }
+            4 // gas is not a splat, so the palette stays 4 stellar progenitors
         }
         ModelSpec::DiskNfw {
             galaxy1,
@@ -735,7 +750,22 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                     let info = disk_info("halo", &state, &c, unit_mass, orbit, spec.sim.eps, None);
                     (state, unit_mass, info, None)
                 }
-                Some(_gas) => todo!("gas-rich disk-plummer build — green 2b"),
+                Some(gas) => {
+                    let (state, unit_mass) =
+                        sample_disks_gas(galaxy1, galaxy2, h1, h2, orbit, c, gas, spec.seed);
+                    let info = disk_info(
+                        "halo",
+                        &state,
+                        &c,
+                        unit_mass,
+                        orbit,
+                        spec.sim.eps,
+                        Some(gas),
+                    );
+                    // The ONE c_s: baked into `state`'s pressure equilibrium here,
+                    // and handed to the force solver's HydroParams in `run_movie`.
+                    (state, unit_mass, info, Some(gas.sound_speed))
+                }
             }
         }
         ModelSpec::DiskNfw {
@@ -747,7 +777,15 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
             let h1 = truncated_nfw(&galaxy1.halo);
             let h2 = truncated_nfw(&galaxy2.halo);
             let (state, unit_mass) = sample_disks(galaxy1, galaxy2, h1, h2, orbit, c, spec.seed);
-            let info = disk_info("cuspy halo", &state, &c, unit_mass, orbit, spec.sim.eps, None);
+            let info = disk_info(
+                "cuspy halo",
+                &state,
+                &c,
+                unit_mass,
+                orbit,
+                spec.sim.eps,
+                None,
+            );
             (state, unit_mass, info, None)
         }
         ModelSpec::NfwMerger {
@@ -872,21 +910,19 @@ fn disk_galaxy<H: SphericalHalo, S>(g: &DiskGalaxySpec<S>, halo: H) -> Exponenti
     }
 }
 
-/// Sample a two-disk-galaxy encounter with each galaxy's Toomre orientation
-/// applied. Returns the realization and the disk-1 particle mass (the
-/// brightness unit).
-fn sample_disks<H: SphericalHalo, S>(
+/// Build the two-disk encounter with each galaxy's Toomre spin-orbit orientation
+/// applied. Shared by the gas-free and gas-rich paths so their orbit/orientation
+/// plumbing cannot drift; the two differ only in which sampler they then call.
+fn oriented_collision<H: SphericalHalo, S>(
+    d1: ExponentialDisk<H>,
+    d2: ExponentialDisk<H>,
     g1: &DiskGalaxySpec<S>,
     g2: &DiskGalaxySpec<S>,
-    halo1: H,
-    halo2: H,
     orbit: &OrbitSpec,
-    c: DiskCounts,
-    seed: u64,
-) -> (State, f64) {
+) -> DiskCollision<H> {
     let mut collision = DiskCollision::new(
-        disk_galaxy(g1, halo1),
-        disk_galaxy(g2, halo2),
+        d1,
+        d2,
         orbit.eccentricity,
         orbit.pericenter,
         orbit.separation,
@@ -899,8 +935,54 @@ fn sample_disks<H: SphericalHalo, S>(
         g2.inclination_deg.to_radians(),
         g2.argument_deg.to_radians(),
     );
+    collision
+}
+
+/// Sample a two-disk-galaxy encounter with each galaxy's Toomre orientation
+/// applied. Returns the realization and the disk-1 particle mass (the
+/// brightness unit).
+fn sample_disks<H: SphericalHalo, S>(
+    g1: &DiskGalaxySpec<S>,
+    g2: &DiskGalaxySpec<S>,
+    halo1: H,
+    halo2: H,
+    orbit: &OrbitSpec,
+    c: DiskCounts,
+    seed: u64,
+) -> (State, f64) {
+    let collision = oriented_collision(
+        disk_galaxy(g1, halo1),
+        disk_galaxy(g2, halo2),
+        g1,
+        g2,
+        orbit,
+    );
     let state = collision.sample(c.halo1, c.disk1, c.halo2, c.disk2, seed);
     (state, g1.disk_mass / c.disk1 as f64)
+}
+
+/// Sample a gas-rich two-disk encounter: both disks carry the shared gas
+/// component (same `f_gas` and `c_s`), giving the six-population
+/// [`DiskCollision::sample_gas`] realization. The brightness unit is the
+/// disk-1 **stellar** particle mass `(1 − f)·disk_mass/disk1` — gas splits the
+/// disk mass and renders volumetrically, so it must not dilute the splat unit.
+#[allow(clippy::too_many_arguments)]
+fn sample_disks_gas<H: SphericalHalo, S>(
+    g1: &DiskGalaxySpec<S>,
+    g2: &DiskGalaxySpec<S>,
+    halo1: H,
+    halo2: H,
+    orbit: &OrbitSpec,
+    c: DiskCounts,
+    gas: &GasSpec,
+    seed: u64,
+) -> (State, f64) {
+    let d1 = disk_galaxy(g1, halo1).with_gas(gas.fraction, gas.sound_speed);
+    let d2 = disk_galaxy(g2, halo2).with_gas(gas.fraction, gas.sound_speed);
+    let collision = oriented_collision(d1, d2, g1, g2, orbit);
+    let state = collision.sample_gas(c.halo1, c.disk1, c.gas1, c.halo2, c.disk2, c.gas2, seed);
+    let stellar_particle_mass = (1.0 - gas.fraction) * g1.disk_mass / c.disk1 as f64;
+    (state, stellar_particle_mass)
 }
 
 fn truncated_nfw(h: &NfwSpec) -> TruncatedNfw {

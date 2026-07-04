@@ -71,25 +71,47 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
     /// unstable gas layer (min Q_gas over the disk body < 1) is also rejected —
     /// see [`min_gas_toomre_q`](Self::min_gas_toomre_q).
     pub fn with_gas(mut self, gas_fraction: f64, sound_speed: f64) -> Self {
-        assert!(
-            gas_fraction > 0.0 && gas_fraction < 1.0,
-            "gas fraction f_gas must be in (0,1), got {gas_fraction}"
-        );
-        assert!(sound_speed > 0.0, "gas sound speed must be positive");
+        // The rejection rule and its messages live once, in `check_gas`; this is the
+        // panicking (programming-contract) face of it. A config front-end calls
+        // `check_gas` directly to fail loud with a readable error instead.
+        self.check_gas(gas_fraction, sound_speed)
+            .unwrap_or_else(|e| panic!("{e}"));
         self.gas = Some(GasParams {
             fraction: gas_fraction,
             sound_speed,
         });
-        // Reject a gravitationally unstable gas layer loudly: a min Q_gas < 1 over the
-        // disk body means the isothermal gas fragments, and the demo must never launch
-        // such an IC. (The message names "Q_gas" for the fail-loud gate.)
-        let min_q = self.min_gas_toomre_q();
-        assert!(
-            min_q >= 1.0,
-            "gas disk is gravitationally unstable: min Q_gas = {min_q} < 1 \
-             (raise the sound speed or lower the gas fraction)"
-        );
         self
+    }
+
+    /// Non-panicking counterpart to [`with_gas`](Self::with_gas)'s validation:
+    /// `Ok(())` if a gas layer with these parameters is admissible, else the
+    /// reason it is rejected. Lets a config front-end (`scenario.toml`) fail with a
+    /// readable message rather than a panic deep in the sampler, while `with_gas`
+    /// keeps its panic contract by delegating here.
+    ///
+    /// Rejects `gas_fraction ∉ (0,1)`, `sound_speed ≤ 0`, and a gravitationally
+    /// unstable gas layer (min Q_gas over the disk body < 1 — the isothermal gas
+    /// would fragment; the message names "Q_gas"). Callable on a gas-free disk: the
+    /// stability scan uses the *proposed* parameters, not `self.gas`.
+    pub fn check_gas(&self, gas_fraction: f64, sound_speed: f64) -> Result<(), String> {
+        if !(gas_fraction > 0.0 && gas_fraction < 1.0) {
+            return Err(format!(
+                "gas fraction f_gas must be in (0,1), got {gas_fraction}"
+            ));
+        }
+        if !(sound_speed.is_finite() && sound_speed > 0.0) {
+            return Err(format!(
+                "gas sound speed must be positive, got {sound_speed}"
+            ));
+        }
+        let min_q = self.min_gas_toomre_q_for(gas_fraction, sound_speed);
+        if min_q < 1.0 {
+            return Err(format!(
+                "gas disk is gravitationally unstable: min Q_gas = {min_q} < 1 \
+                 (raise the sound speed or lower the gas fraction)"
+            ));
+        }
+        Ok(())
     }
 
     /// The gas component, or `None` for a purely stellar disk.
@@ -175,12 +197,23 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
     /// diverges) and rises again toward `r_max` (Σ_gas → small), so the minimum sits
     /// in the disk body and a fine uniform scan over (0, r_max] captures it.
     pub fn min_gas_toomre_q(&self) -> f64 {
-        self.sound_speed().expect("gas-free disk has no Toomre Q");
+        let g = self.gas.expect("gas-free disk has no Toomre Q");
+        self.min_gas_toomre_q_for(g.fraction, g.sound_speed)
+    }
+
+    /// Minimum Q_gas over the disk body for a *proposed* gas layer, without
+    /// requiring `self.gas` to be set — the stability half of [`check_gas`](
+    /// Self::check_gas). Q_gas(R) = c_s κ(R) / (π G · f · Σ(R)); same uniform scan
+    /// and π prefactor as [`min_gas_toomre_q`](Self::min_gas_toomre_q), which
+    /// delegates here with its own `(f, c_s)`.
+    fn min_gas_toomre_q_for(&self, gas_fraction: f64, sound_speed: f64) -> f64 {
         const N: usize = 2000;
         let mut min = f64::INFINITY;
         for k in 1..=N {
             let r = self.r_max * k as f64 / N as f64;
-            min = min.min(self.gas_toomre_q(r));
+            let sigma_gas = gas_fraction * self.surface_density(r);
+            let q = sound_speed * self.epicyclic_frequency(r) / (PI * self.g * sigma_gas);
+            min = min.min(q);
         }
         min
     }

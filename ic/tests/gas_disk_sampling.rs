@@ -202,6 +202,32 @@ fn unstable_gas_disk_is_rejected_loudly() {
     let _ = fiducial_stellar().with_gas(0.5, 0.005);
 }
 
+#[test]
+fn check_gas_is_the_non_panicking_face_of_with_gas() {
+    // Same admissibility rule as `with_gas`, but as a `Result` a config front-end
+    // can surface — callable on a gas-free disk (uses the *proposed* parameters).
+    let d = fiducial_stellar();
+    assert!(
+        d.check_gas(0.5, 0.08).is_ok(),
+        "the fiducial layer is admissible"
+    );
+
+    // Each rejection path, with the message the front-end will show.
+    let unstable = d
+        .check_gas(0.5, 0.005)
+        .expect_err("tiny c_s ⇒ min Q_gas < 1");
+    assert!(
+        unstable.contains("Q_gas"),
+        "instability names Q_gas: {unstable}"
+    );
+    assert!(d.check_gas(0.0, 0.08).is_err(), "f_gas = 0 rejected");
+    assert!(d.check_gas(1.0, 0.08).is_err(), "f_gas = 1 rejected");
+    assert!(d.check_gas(0.5, 0.0).is_err(), "non-positive c_s rejected");
+
+    // Consistency with the panicking face: check_gas Ok ⟺ with_gas succeeds.
+    let _ = fiducial_stellar().with_gas(0.5, 0.08);
+}
+
 // ---------- 2. statistical validation of a realization ----------
 
 const N_HALO: usize = 2000;

@@ -198,8 +198,14 @@ fn gas_free_build_reports_no_sound_speed() {
 fn parse_rejects_broken_gas_physics() {
     let base = gas_toml();
     for (bad, why) in [
-        (base.replace("fraction = 0.3", "fraction = 1.5"), "f_gas > 1"),
-        (base.replace("fraction = 0.3", "fraction = 0.0"), "f_gas = 0"),
+        (
+            base.replace("fraction = 0.3", "fraction = 1.5"),
+            "f_gas > 1",
+        ),
+        (
+            base.replace("fraction = 0.3", "fraction = 0.0"),
+            "f_gas = 0",
+        ),
         (
             base.replace("sound_speed = 0.1", "sound_speed = 0.0"),
             "non-positive sound speed",
@@ -229,7 +235,10 @@ fn parse_rejects_unstable_gas_naming_q_gas() {
 #[test]
 fn parse_rejects_unknown_gas_key() {
     let bad = gas_toml().replace("sound_speed = 0.1", "sound_speeed = 0.1");
-    assert!(parse_scenario_toml(&bad).is_err(), "typo'd gas key must fail");
+    assert!(
+        parse_scenario_toml(&bad).is_err(),
+        "typo'd gas key must fail"
+    );
 }
 
 #[test]

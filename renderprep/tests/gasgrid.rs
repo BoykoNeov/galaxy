@@ -12,7 +12,7 @@ use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 use galaxy_renderprep::gasgrid::{
     deposit_fixed, deposit_fixed_serial, deposit_gas, sample_mix, GasGrid, GasGridConfig,
 };
-use galaxy_solvers::sph::{w, SUPPORT};
+use galaxy_solvers::sph::{density_adaptive, w, DensityConfig, SUPPORT};
 use glam::Vec3;
 
 /// Deterministic splitmix64 → f64 in [0, 1) — the test-local PRNG convention.
@@ -349,6 +349,67 @@ fn deposit_gas_bounds_contain_the_percentile_radius() {
     assert!(
         inside,
         "a percentile-radius particle fell outside the bounds"
+    );
+}
+
+#[test]
+fn deposit_gas_pad_tracks_bulk_not_the_sparsest_particle() {
+    // The pad beyond the percentile radius must scale with the BULK smoothing
+    // length, not one isolated particle's huge adaptive h. h is DERIVED (plan
+    // D2), so we engineer the layout: a dense core (small h) plus a handful of
+    // far, mutually isolated gas particles (each alone ⇒ large h). A max-based
+    // pad (SUPPORT·h_max) lets an outlier's h blow the box up — the diluted
+    // grid the M7c demo exposed; a robust (median) pad does not.
+    //
+    // pad = box half-edge − percentile radius. Because the test recomputes the
+    // percentile radius exactly as `deposit_gas` does (same centroid, same
+    // percentile, same index), pad equals the code's pad term to f32 rounding:
+    // SUPPORT·h_max on the buggy path, SUPPORT·h_med on the fixed one.
+    let mut pos = random_cloud(500, 1.0, 123); // dense core, |p| ≲ √3
+    for k in 0..6u32 {
+        let a = 6.0 + 2.0 * k as f64; // far and spread apart ⇒ each is isolated
+        pos.push(DVec3::new(a, a, a));
+    }
+    let state = gas_state(pos.clone());
+    let cfg = GasGridConfig {
+        dims: [32; 3],
+        percentile: 0.99,
+        ..Default::default()
+    };
+    let grid = deposit_gas(&state, &cfg).expect("gas rows present");
+
+    // Recover the pad: half-edge (cube) minus the percentile radius the code used.
+    let n = pos.len() as f64;
+    let centroid = pos.iter().fold(DVec3::ZERO, |acc, &p| acc + p) / n;
+    let mut d: Vec<f64> = pos.iter().map(|p| (*p - centroid).length()).collect();
+    d.sort_by(|a, b| a.total_cmp(b));
+    let r_p = d[((d.len() - 1) as f64 * 0.99).round() as usize];
+    let half = (grid.bounds_max.x - grid.bounds_min.x) as f64 / 2.0;
+    let pad = half - r_p;
+
+    // Median smoothing length: the robust pad scale (the far six blow up h_max
+    // but not h_med).
+    let mass = vec![1.0; pos.len()];
+    let h = density_adaptive(&pos, &mass, &DensityConfig::default(), None).h;
+    let mut hs = h.clone();
+    hs.sort_by(|a, b| a.total_cmp(b));
+    let h_med = hs[hs.len() / 2];
+    let h_max = hs[hs.len() - 1];
+
+    // Sanity: the layout really does make the outlier h dominate the median.
+    assert!(
+        h_max > 10.0 * h_med,
+        "layout failed to isolate outliers: h_max {h_max} vs h_med {h_med}"
+    );
+    // The load-bearing gate: the pad tracks the bulk, not the sparsest particle.
+    // Generous 6× slack over SUPPORT·h_med decouples the assertion from the
+    // exact median tie-break while still rejecting the SUPPORT·h_max pad.
+    assert!(
+        pad <= 6.0 * SUPPORT * h_med,
+        "pad {pad} scales with the sparse outlier (S·h_max = {}), not the bulk \
+         (S·h_med = {})",
+        SUPPORT * h_max,
+        SUPPORT * h_med
     );
 }
 

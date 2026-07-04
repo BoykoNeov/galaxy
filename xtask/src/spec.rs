@@ -244,6 +244,27 @@ pub struct LookSpec {
     pub ramps: Vec<RampSpec>,
     /// Progenitors the star-formation compression proxy applies to.
     pub sf_progenitors: Vec<u16>,
+    /// Volumetric gas look (`[look.gas]`, M7f). Present **iff** the model carries
+    /// `[model.gas]`: a gas-free scenario must not declare it (a dead
+    /// volumetric look → loud reject), and a gas-rich one that omits it renders
+    /// with [`GasLookValues::default`].
+    #[serde(default)]
+    pub gas: Option<GasLookSpec>,
+}
+
+/// The volumetric gas look (`[look.gas]`, M7f): the emission/absorption knobs the
+/// raymarcher applies to the density grid. Only the three aesthetic knobs are
+/// data; the grid **resolution** is a perf/quality global (the 64³ QUICK / 128³
+/// full constants, like the frame dimensions), not a per-scenario aesthetic.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GasLookSpec {
+    /// Linear-RGB tint of the gas emission.
+    pub color: [f32; 3],
+    /// Emissivity `j`: emitted radiance per unit (ρ · path length).
+    pub emissivity: f32,
+    /// Opacity `κ`: extinction per unit (ρ · path length). `0` = emission-only.
+    pub opacity: f32,
 }
 
 /// One progenitor's initial-radius color ramp.
@@ -425,6 +446,7 @@ pub const PRESETS: &[(&str, &str)] = &[
     ("bullseye", include_str!("../scenarios/bullseye.toml")),
     ("minor", include_str!("../scenarios/minor.toml")),
     ("dolly", include_str!("../scenarios/dolly.toml")),
+    ("gasrich", include_str!("../scenarios/gasrich.toml")),
 ];
 
 /// Look up a checked-in preset's toml text by canonical name.
@@ -699,7 +721,35 @@ pub struct Scenario {
     /// value into both the IC's pressure equilibrium (already baked into `state`)
     /// and the force solver's `HydroParams`, so the two cannot diverge.
     pub sound_speed: Option<f64>,
+    /// Volumetric gas look (M7f) when the scenario is gas-rich, else `None`.
+    /// `Some` **iff** [`sound_speed`](Self::sound_speed) is `Some` (both are
+    /// gas-only): the movie pipeline builds a `galaxy_render::GasLook` from it,
+    /// falling back to [`GasLookValues::default`] when the model has gas but
+    /// omits `[look.gas]`. Kept render-free (plain values, mirroring
+    /// `sound_speed`) so the lib seam stays decoupled from the renderer.
+    pub gas_look: Option<GasLookValues>,
     pub info: String,
+}
+
+/// The runtime form of [`GasLookSpec`] (render-free, mirroring how `sound_speed`
+/// carries the gas c_s as a plain value). Its `Default` matches
+/// `galaxy_render::GasLook::default` so a gas-rich scenario that omits `[look.gas]`
+/// renders with the same neutral look the renderer would fall back to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasLookValues {
+    pub color: [f32; 3],
+    pub emissivity: f32,
+    pub opacity: f32,
+}
+
+impl Default for GasLookValues {
+    fn default() -> Self {
+        GasLookValues {
+            color: [1.0, 1.0, 1.0],
+            emissivity: 1.0,
+            opacity: 1.0,
+        }
+    }
 }
 
 /// Per-scenario camera choreography (M6d), the runtime form of [`RigSpec`].
@@ -890,6 +940,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         ramp: spec.look.ramps.iter().map(|r| (r.inner, r.outer)).collect(),
         sf_progenitors: spec.look.sf_progenitors.clone(),
         sound_speed,
+        gas_look: None, // TODO(M7f GREEN): thread the gas look, Some iff gas-rich
         info,
     }
 }
@@ -1131,6 +1182,7 @@ mod tests {
                 palette: vec![HALO1, DISK1, HALO2, DISK2],
                 ramps: disk_family_ramps(),
                 sf_progenitors: vec![1, 3],
+                gas: None,
             },
             rig: RigSpec::Static,
         };
@@ -1193,6 +1245,7 @@ mod tests {
                     },
                 ],
                 sf_progenitors: vec![0, 1],
+                gas: None,
             },
             rig: RigSpec::OrbitTilt {
                 azimuth_deg: [-90.0, 90.0],
@@ -1276,6 +1329,7 @@ mod tests {
                 palette: vec![HALO1, DISK1, HALO2, DISK2],
                 ramps: disk_family_ramps(),
                 sf_progenitors: vec![1, 3],
+                gas: None,
             },
             rig: RigSpec::OrbitTilt {
                 azimuth_deg: [-90.0, 40.0],
@@ -1422,6 +1476,57 @@ mod tests {
         );
         assert!(near_frac > 0.0 && near_frac < distance_frac[1]);
         assert!(fov_deg > 0.0 && fov_deg < 180.0);
+    }
+
+    // --- the gasrich showpiece: gas-rich `disk` twin (M7f) ----------------------
+
+    #[test]
+    fn gasrich_is_the_disk_encounter_with_a_stable_volumetric_gas_layer() {
+        let g = parse_preset("gasrich");
+        let ModelSpec::DiskPlummer {
+            galaxy1,
+            galaxy2,
+            counts,
+            gas,
+        } = &g.model
+        else {
+            panic!("gasrich must be a disk-plummer model, got {:?}", g.model);
+        };
+        let gas = gas.expect("gasrich carries a [model.gas] component");
+        // Gas-rich by design (the whole point — dark dust lanes need column depth).
+        assert!(
+            (0.15..=0.35).contains(&gas.fraction),
+            "f_gas {} is not gas-rich",
+            gas.fraction
+        );
+        // Marginally STABLE: min Q_gas ≥ 1 for BOTH disks (else `with_gas` panics in
+        // the pipeline). Checked through the same IC helper `validate` gates on.
+        for (gxy, which) in [(galaxy1, "galaxy1"), (galaxy2, "galaxy2")] {
+            let disk = disk_galaxy(gxy, Plummer::new(G, gxy.halo.mass, gxy.halo.scale));
+            disk.check_gas(gas.fraction, gas.sound_speed)
+                .unwrap_or_else(|e| panic!("gasrich {which} gas unstable: {e}"));
+        }
+        // Declares a volumetric look (the tuned showpiece knobs, not the default).
+        assert!(g.look.gas.is_some(), "gasrich must declare [look.gas]");
+        // QUICK gas counts are positive and modest so the demo stays runnable.
+        assert!(
+            counts.quick.gas1 > 0 && counts.quick.gas2 > 0,
+            "gasrich QUICK must carry gas particles"
+        );
+        assert!(
+            counts.quick.gas1 + counts.quick.gas2 <= 4000,
+            "gasrich QUICK gas count should stay demo-runnable"
+        );
+    }
+
+    #[test]
+    fn gasrich_build_threads_the_gas_look_and_sound_speed() {
+        // The runtime `Scenario` carries BOTH gas-only fields (`Some`) for gasrich.
+        let s = build_scenario(&parse_preset("gasrich"), true);
+        assert!(s.sound_speed.is_some(), "gasrich threads its c_s");
+        let gl = s.gas_look.expect("gasrich threads its [look.gas]");
+        // The declared look, not the neutral default.
+        assert_ne!(gl, GasLookValues::default());
     }
 
     // --- registry + validation --------------------------------------------------

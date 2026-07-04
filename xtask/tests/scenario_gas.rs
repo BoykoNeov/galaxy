@@ -192,6 +192,83 @@ fn gas_free_build_reports_no_sound_speed() {
     assert_eq!(s.sound_speed, None);
 }
 
+// --- [look.gas] volumetric look threading (M7f) ---------------------------------
+
+#[test]
+fn gas_scenario_defaults_gas_look_when_look_gas_absent() {
+    // `gas_toml` carries `[model.gas]` but NO `[look.gas]`: the runtime still gets
+    // a gas look (`Some`), the neutral default the renderer would fall back to.
+    let s = build_scenario(&parse_scenario_toml(&gas_toml()).unwrap(), true);
+    assert_eq!(
+        s.gas_look,
+        Some(galaxy_xtask::spec::GasLookValues::default())
+    );
+}
+
+#[test]
+fn gas_scenario_carries_a_declared_look_gas() {
+    // A `[look.gas]` table overrides the default and threads onto the `Scenario`.
+    let toml = gas_toml().replace(
+        "[rig]",
+        "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\n\n[rig]",
+    );
+    let s = build_scenario(&parse_scenario_toml(&toml).unwrap(), true);
+    assert_eq!(
+        s.gas_look,
+        Some(galaxy_xtask::spec::GasLookValues {
+            color: [0.5, 0.6, 0.95],
+            emissivity: 0.25,
+            opacity: 12.0,
+        })
+    );
+}
+
+#[test]
+fn gas_free_build_has_no_gas_look() {
+    // Gas-only field: `None` on the gas-free path, exactly like `sound_speed`.
+    let disk = parse_scenario_toml(galaxy_xtask::spec::preset("disk").unwrap()).unwrap();
+    assert_eq!(build_scenario(&disk, true).gas_look, None);
+}
+
+#[test]
+fn look_gas_on_a_gas_free_model_is_rejected() {
+    // The `disk` preset is gas-free; a `[look.gas]` there renders nothing — a dead
+    // knob, so it must fail loud, not silently do nothing.
+    let disk = galaxy_xtask::spec::preset("disk").unwrap();
+    let bad =
+        format!("{disk}\n[look.gas]\ncolor = [1.0, 1.0, 1.0]\nemissivity = 1.0\nopacity = 1.0\n");
+    assert!(
+        parse_scenario_toml(&bad).is_err(),
+        "look.gas on a gas-free model must be rejected"
+    );
+}
+
+#[test]
+fn look_gas_rejects_an_unknown_key() {
+    // A typo'd volumetric knob must fail, not silently do nothing (deny_unknown_fields).
+    let toml = gas_toml().replace(
+        "[rig]",
+        "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\nkappa = 3.0\n\n[rig]",
+    );
+    assert!(
+        parse_scenario_toml(&toml).is_err(),
+        "unknown look.gas key must fail"
+    );
+}
+
+#[test]
+fn look_gas_rejects_negative_knobs() {
+    // Emissivity/opacity are physical rates ≥ 0; a negative value is nonsense.
+    let toml = gas_toml().replace(
+        "[rig]",
+        "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = -1.0\n\n[rig]",
+    );
+    assert!(
+        parse_scenario_toml(&toml).is_err(),
+        "negative opacity must fail"
+    );
+}
+
 // --- physics is gated: readable rejects, not galaxy-ic panics -------------------
 
 #[test]

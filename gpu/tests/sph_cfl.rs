@@ -255,12 +255,15 @@ fn gpu_cfl_matches_cpu_per_target() {
         );
     }
     // dt_i is a single max + a single divide — NO accumulation — so the GPU-vs-oracle
-    // agreement is tight f32 (measured below and bounded with margin). A LOOSE result
-    // here is a smell (a coupling-gate or radius mismatch on some particle), not
-    // roundoff to be absorbed into a wide bound.
+    // agreement is tight f32: measured worst ≈ 1.0e-6 (one f32 divide plus a lone
+    // near-boundary particle whose v_sig differs by a marginal-approacher ulp). The
+    // bound sits ~10× above that — a REAL bug (wrong coupling cutoff, per-target radius,
+    // or w/r² instead of w/r) is ≫ 1%, so this fails hard on any of them while keeping
+    // cross-device f32 headroom. A loose MEASURED value here would be a smell (a
+    // coupling/radius mismatch), not roundoff to absorb — hence the tight bound.
     let worst = worst_rel(&gpu, &cpu);
     assert!(
-        worst < 1.0e-4,
+        worst < 1.0e-5,
         "GPU CFL per-target worst rel err {worst:.3e}"
     );
 }
@@ -289,8 +292,10 @@ fn gpu_cfl_matches_oracle_scalar() {
         "bound must be finite positive: {gpu}"
     );
     let rel = (gpu - cpu).abs() / cpu;
+    // Measured ≈ 2.2e-8 (essentially the one f32 divide of the minimizing particle);
+    // bound at 1e-5 leaves room for the minimizer to shift across adapters.
     assert!(
-        rel < 1.0e-4,
+        rel < 1.0e-5,
         "GPU max_stable_dt {gpu} vs oracle {cpu} (rel {rel:.3e})"
     );
 }
@@ -341,10 +346,12 @@ fn gpu_cfl_matches_oracle_cross_support() {
     let cpu = max_stable_dt(&state, &params, &cfg, C_CFL);
     let gpu = cfl().max_stable_dt(&pos, &vel, &dens.h, &params, C_CFL);
     let rel = (gpu - cpu).abs() / cpu;
-    // A per-target-radius bug returns the static floor C_cfl·h_min/(2c_s), which is
-    // v_sig/(2c_s) = (2c_s+3V)/(2c_s) ≈ 150× larger — so any real bug here is ≫ 1.
+    // Measured ≈ 8.0e-8 (the GPU sees the cross-support approacher exactly as the oracle
+    // does). A per-target-radius bug returns the static floor C_cfl·h_min/(2c_s), which
+    // is v_sig/(2c_s) = (2c_s+3V)/(2c_s) ≈ 150× larger (rel ≈ 149) — so the 1e-4 bound
+    // cleanly separates the correct answer from the bug by nine orders of magnitude.
     assert!(
-        rel < 1.0e-3,
+        rel < 1.0e-4,
         "GPU max_stable_dt {gpu} vs oracle {cpu} (rel {rel:.3e}). A per-target-h_i gather \
          would return the static floor {} — {}× too large.",
         C_CFL * h_min / (2.0 * c_s),

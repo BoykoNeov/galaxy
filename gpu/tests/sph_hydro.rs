@@ -218,10 +218,12 @@ fn gpu_hydro_matches_cpu() {
     }
     let rms = rms_rel_err(&gpu, &cpu);
     let worst = worst_rel_err(&gpu, &cpu);
-    // TODO(green): measure and tighten. Placeholder bounds — the red stub panics
-    // (todo!()) so these never gate until the green implementation lands.
-    assert!(rms < 1.0e-2, "GPU hydro RMS rel err {rms:.3e}");
-    assert!(worst < 5.0e-2, "GPU hydro worst rel err {worst:.3e}");
+    // Pure f32 summation over the same neighbor set with no catastrophic cancellation
+    // (moderate coordinates, smooth kernel) → measured rms ≈ 2.9e-7, worst ≈ 1.2e-5.
+    // Bounds sit ~300×/~80× above the measured values: ample cross-device f32 headroom
+    // while still failing hard on any wrong kernel/coeff/index bug (those are ≫1%).
+    assert!(rms < 1.0e-4, "GPU hydro RMS rel err {rms:.3e}");
+    assert!(worst < 1.0e-3, "GPU hydro worst rel err {worst:.3e}");
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +254,11 @@ fn gpu_hydro_momentum_drift_bounded() {
         scale += a.length() * m;
     }
     let rel = net.length() / scale.max(1e-300);
-    // TODO(green): measure and tighten. Placeholder — expected ~reduction roundoff.
-    assert!(rel < 1.0e-3, "GPU hydro net momentum drift {rel:.3e}");
+    // Exact per-pair f32 antisymmetry ⇒ only reduction roundoff survives: measured
+    // ≈ 2.1e-9. A broken antisymmetry (radius leak / grad sign / asymmetric coeff)
+    // produces O(1e-2–1) drift — many orders above this bound, which sits ~5000× over
+    // the measured roundoff floor with cross-device margin.
+    assert!(rel < 1.0e-5, "GPU hydro net momentum drift {rel:.3e}");
 }
 
 // ---------------------------------------------------------------------------

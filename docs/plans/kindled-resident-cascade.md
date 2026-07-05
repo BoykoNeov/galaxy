@@ -233,9 +233,24 @@ Sub-milestones, roughly in dependency order. Each lands red→green with its own
   host-side (unique root ⇒ `h` seed-independent, so CPU's occupancy seed is skipped).
   Plain f32 accumulation, NO DS barrier (ρ/N aren't error-free-transforms; D3 not
   triggered). Endpoint still LBVH (grid mirrors CPU cell at measured-regime scale).
-- **G3 — GPU hydro force**: symmetric P/ρ² + Monaghan viscosity, coupling-range-gated
-  (`r < 2·max(h_i,h_j)`), gather-per-target (D2). Gate = f32-tolerance vs
-  `hydro_accelerations` on the same cloud + a bounded momentum-drift check.
+- **G3 — GPU hydro force** ✅ **DONE** (commit `8789743`; `gpu::sph_hydro::GpuHydro`).
+  Symmetric P/ρ² pressure + Monaghan viscosity against the kernel-average grad
+  `½(∇W(h_i)+∇W(h_j))`, gather-per-target (D2), all f32 on the GPU. Reuses G1's
+  `GRID_HELPERS_WGSL` (one source of truth). `ρ`/`h` are INPUTS (density ran first), so
+  NO root-find / all-rooted subtlety — `h` is bit-identical to both paths. **Gather
+  radius = global `SUPPORT·h_max`, never per-target** (the load-bearing invariant: a
+  pair with `2h_i < r < 2h_j` gives force to BOTH i and j; per-target would break
+  Newton's third law). Gates (measure-then-tighten): accuracy vs `hydro_accelerations`
+  rms 2.9e-7 / worst 1.2e-5 → 1e-4 / 1e-3 (house `rms/worst_rel_err` metric); **momentum
+  drift 2.1e-9** — the sharp antisymmetry detector: per-pair f32 antisymmetry is EXACT
+  under equal mass (`grad_w(−r)=−grad_w(r)`, `coeff` commutative-equal), so drift is
+  reduction roundoff only and an O(1e-2) drift = radius-leak/sign/asymmetric-coeff bug.
+  Advisor-hardened: momentum gate asserts its cloud HAS asymmetric-coupling pairs
+  (`SUPPORT·min ≤ r < SUPPORT·max`, measured ~52%) so it can't silently degrade;
+  viscosity gate uses a MIXED velocity field + asserts the vr split (both branch sides
+  live); accuracy gate uses VARYING mass (catches a `mass[i]`/`mass[j]` swap). Plain f32
+  accumulation, NO DS barrier (D3 not triggered). 8-storage-buffer limit → mass/ρ/h
+  packed into one `scalars` buffer (crate stays on `Limits::default()`).
 - **G4 — GPU CFL reduction**: min over gas of `C·h/v_sig` (projected signal
   velocity). Gate = f32-tolerance vs `max_stable_dt`. Exposes the per-batch bound
   (D6) — the adaptive-dt substrate.

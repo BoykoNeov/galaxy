@@ -270,10 +270,40 @@ Sub-milestones, roughly in dependency order. Each lands red→green with its own
   static floor ~150× too large). Guards: v_sig-above-floor incl. the minimizer,
   asymmetric-coupling approaching pairs exist (19463), `c_cfl ≠ 1`. Empty ⇒ `+∞` (NOT 0 —
   a 0 falsely says every dt is too large); single ⇒ finite floor `C·h/(2c_s)`.
-- **G5 — wire into `GpuResidentLeapfrog`**: add the hydro stage to the resident step
-  (gravity over all + hydro on gas subset before the kick); block-adaptive dt plumbing
-  (D6, compute+expose only). Gate = the long-run invariants + coarse-statistics
-  profiles (D5), NOT a trajectory match.
+- **G5 — wire into `GpuResidentLeapfrog`** (gravity over all + hydro on gas subset before
+  the kick; block-adaptive dt plumbing D6, compute+expose only). Decomposed into three
+  red→green landings (advisor-vetted): **G5a density → G5b hydro+scatter-add → G5c CFL
+  no-readback min**. Gate = long-run invariants + coarse-statistics profiles (D5), NOT a
+  trajectory match.
+  - **G5a — resident gas density ✅ DONE** (commit `6d87995`; `Sph` in `gpu_resident`).
+    Fully resident on `FusedCore`'s device: each force eval gathers the gas subset off
+    `bodies` (a small gather kernel; `bodies.xyz` is the DS hi limb the gravity force also
+    reads — D1), builds the gas grid, root-finds (ρ, h), left resident for G5b. Reuses the
+    G2 density WGSL VERBATIM (`DENSITY_DECLS + GRID_HELPERS_WGSL + DENSITY_KERNELS`, now
+    `pub(crate)`) → one source of truth with `GpuDensity`. Density seed params extracted to
+    `sph_density::density_params` (shared). **Gate is vs the CPU oracle `density_adaptive`
+    over the gas subset**, NOT the standalone GPU (which shares the WGSL and so couldn't
+    catch a shared bug): measured h 7.5e-4 / ρ 9.1e-4 → 1e-3 / 1.3e-3, in line with G2.
+    Interleaved gas map (non-trivial → catches an identity-map bug); prime-path inclusion
+    (density runs in `upload`'s prime, so `a(x₀)` is complete); gas map rebuilt from
+    `state.kind` each upload. **Two caveats carried to G5b (advisor):** (1) density seed
+    params (esp. grid `cell`) are FIXED at upload from the initial gas bbox — benign for
+    `h_seed` (seed-independent root, G2), but frozen `cell` is a residency artifact (merger
+    contraction = safe stale-large direction; uniform expansion clips at MAX_SPAN). Validated
+    only at/near the primed config. (2) **The G5a gate never steps** — so per-step density
+    (gather off drifted `bodies`, frozen `cell` vs evolved positions) is assumed, not tested.
+    **G5b's gate MUST step** (contracting-then-mixing cloud, bounded resident-vs-CPU drift);
+    if drift shows, build the on-GPU gas-bbox reduction then (same machinery as G5c's CFL
+    min). Shock tube NOT run this batch — defensible: G5a doesn't touch the hydro path, and
+    the only shared change (`density_params` extraction) is confirmed behavior-preserving by
+    the passing standalone `sph_density` gate. Run it at G5b when hydro is wired.
+  - **G5b — resident hydro force + scatter-add** (next): hydro on gas → `gas_acc`, scattered
+    additively into `accel`'s gas rows AFTER gravity-traverse (unique gas indices ⇒ no race).
+    Gate = accuracy vs the CPU oracle + the **isolated momentum-antisymmetry drift** (G3's
+    2.1e-9 floor) run on `gas_acc` BEFORE the gravity add (LBVH gravity isn't antisymmetric
+    and would bury the floor — it's the detector for a bad gas-index map). Plus a STEPPED run
+    (per G5a caveat 2) and the `--release --ignored` shock tube.
+  - **G5c — CFL no-readback min + block-adaptive dt expose** (compute only, no dt policy).
 - **G6 — `simulate_snapshots` GPU branch + re-run the QUICK gasrich merger**:
   GPU path selectable alongside the CPU `GravitySph` branch; gate = QUICK gasrich
   GPU-vs-CPU coarse statistics agree, wall-clock recorded. (Full-res still blocked on

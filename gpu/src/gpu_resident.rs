@@ -426,9 +426,20 @@ impl Sph {
                 _pad: [0; 3],
             }),
         );
-        // Bracket seed / cap / grid cell fixed at upload from the initial gas positions.
-        // Correct for rooted particles because the root is seed-independent (G2); a strongly
-        // evolved config is the D4/LBVH scale endpoint's job, not this grid's.
+        // Density seed params (h_seed / h_cap / grid cell) fixed at upload from the initial
+        // gas positions. Two distinct staleness stories, only the first fully settled:
+        //   • h_seed / h_cap staleness is BENIGN — the bracket expands 64 doublings / 60
+        //     halvings, so a stale seed only costs iterations, never the root (seed-
+        //     independence, G2). Validated here at/near the primed config.
+        //   • The grid `cell` is a residency-specific artifact: the standalone GpuDensity
+        //     recomputes it each call to keep the median walk span ~2–3, so freezing it lets
+        //     the span drift as the global gas scale evolves. Merger CONTRACTION (the dominant
+        //     direction) makes the frozen cell stale-large ⇒ smaller span ⇒ the safe direction;
+        //     uniform EXPANSION grows the span toward MAX_SPAN and then clips (undercount). The
+        //     wide-h tail clips in BOTH paths (that part is shared D4, not this artifact).
+        // Correct at/near the primed config (gated in G5a); per-step behavior over a stepped
+        // run is gated in G5b — if drift shows, an on-GPU gas-bbox reduction recomputes `cell`
+        // (the same reduction G5c's no-readback CFL min needs).
         let dparams = crate::sph_density::density_params(
             gas_pos_host,
             self.density.n_ngb,

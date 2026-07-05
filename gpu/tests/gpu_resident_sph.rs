@@ -411,7 +411,10 @@ fn resident_hydro_accel_matches_cpu_oracle() {
     let gd = stepper.snapshot_gas_density();
     let gpu_acc = stepper.snapshot_gas_accel();
 
-    // Feed the CPU oracle the GPU's (ρ, h) so only the force f32 error is measured.
+    // Feed the CPU oracle the GPU's (ρ, h) so only the force f32 error is measured. The
+    // mixed velocity field keeps the viscosity branch live on both sides of vr=0; that the
+    // branch is materially exercised is guaranteed transitively — the resident hydro WGSL is
+    // byte-identical to the standalone G3, whose `gpu_hydro_viscosity_is_exercised` asserts it.
     let rho: Vec<f64> = gd.rho.iter().map(|&x| x as f64).collect();
     let h: Vec<f64> = gd.h.iter().map(|&x| x as f64).collect();
     let cpu = hydro_accelerations(&gpos, &gvel, &gmass, &rho, &h, &params);

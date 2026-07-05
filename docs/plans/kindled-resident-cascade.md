@@ -297,17 +297,48 @@ Sub-milestones, roughly in dependency order. Each lands red→green with its own
     min). Shock tube NOT run this batch — defensible: G5a doesn't touch the hydro path, and
     the only shared change (`density_params` extraction) is confirmed behavior-preserving by
     the passing standalone `sph_density` gate. Run it at G5b when hydro is wired.
-  - **G5b — resident hydro force + scatter-add** (next): hydro on gas → `gas_acc`, scattered
-    additively into `accel`'s gas rows AFTER gravity-traverse (unique gas indices ⇒ no race).
-    Gate = accuracy vs the CPU oracle + the **isolated momentum-antisymmetry drift** (G3's
-    2.1e-9 floor) run on `gas_acc` BEFORE the gravity add (LBVH gravity isn't antisymmetric
-    and would bury the floor — it's the detector for a bad gas-index map). Plus a STEPPED run
-    (per G5a caveat 2) and the `--release --ignored` shock tube.
+  - **G5b — resident hydro force + scatter-add ✅ DONE** (commit `40af380`; `Sph` in
+    `gpu_resident`). Each force eval: gather gas pos/vel/mass off `bodies`/`vel` → density
+    root-find (G5a) → pack `[mass,ρ,h]` → hydro force (G3 `sph_hydro` WGSL VERBATIM) →
+    `gas_acc` → scatter-add into `accel`'s gas rows AFTER the gravity traverse (unique gas
+    indices ⇒ race-free). Density (cell=SUPPORT·h_seed) and hydro (cell=SUPPORT·h_max) keep
+    SEPARATE grids. **Grid sizing (advisor-vetted):** `h_max` is GPU-resident, so `upload`
+    runs a density-only CALIBRATION submit, reads back `h`, and freezes the hydro gather
+    radius = SUPPORT·h_max before the prime (one extra submit at upload only; per-step stays
+    a single submit). Reuse: `sph_hydro` DECLS/KERNELS/Params/SUPPORT + `sph_density`
+    Params.cell exposed `pub(crate)` (one source of truth — byte-identical to `GpuHydro`).
+    New API: `snapshot_gas_accel` (pre-scatter hydro force) + `snapshot_accel` (full accel).
+    **4 gates (measured, Vulkan):** accuracy `gas_acc` vs `hydro_accelerations` fed the GPU
+    (ρ,h) — rms 1.6e-7 / worst 3.9e-6; momentum drift 1.6e-8 on a DEDICATED equal-mass
+    non-uniform cloud (52% asym-coupling); scatter GPU-vs-GPU (gravity-only vs gas-mode —
+    star rows exact, gas rows differ by exactly `gas_acc`); stepped contracting blob (21%
+    contraction) ρ/h/gas_acc vs CPU at snapshot positions (h 8.7e-4 / ρ 1.4e-3 / rms 3.2e-7),
+    viscosity off (pure pressure ⇒ position-deterministic). Shock tube via the transitive
+    argument (option b): resident `gas_acc` ≈ CPU hydro (accuracy gate) ≈ analytic Riemann
+    (the CPU shock tube), WGSL byte-identical — NOT re-run resident (no gravity-off mode).
+    **⚠ Gates only exercise the frozen-grid SAFE direction — see the G6 precondition below.**
   - **G5c — CFL no-readback min + block-adaptive dt expose** (compute only, no dt policy).
 - **G6 — `simulate_snapshots` GPU branch + re-run the QUICK gasrich merger**:
   GPU path selectable alongside the CPU `GravitySph` branch; gate = QUICK gasrich
   GPU-vs-CPU coarse statistics agree, wall-clock recorded. (Full-res still blocked on
   adaptive dt — do not expect a producible full-res showpiece here.)
+  - **⚠ PRECONDITION (advisor) — the frozen-`h_max` expansion landmine.** G5b freezes the
+    hydro gather radius = SUPPORT·h_max at upload. Contraction over-covers (safe, gated);
+    **expansion under-covers → missing hydro pairs → Newton-3 breaks and gas forces silently
+    weaken, with NO gate red.** The QUICK gasrich merger EXPANDS post-pericenter (tidal tails,
+    diffusion), so a single-upload + thousands-of-steps run hits this. **Compounder:** one
+    clamped (non-rooted) `h` in the IC — an escapee clamps to `h_cap`≈64·h_seed, which sets
+    `h_max`, which freezes `cell`=SUPPORT·h_cap → the hydro grid collapses to ~1 bucket →
+    O(N²) per target for the WHOLE run (standalone G3 recomputes per call and rides it out;
+    the resident freezes it; real ICs have escapees). **Cheap mitigation already in code:**
+    `upload` recalibrates `h_max` every call, so G6 should **re-upload each snapshot interval**
+    (bounds staleness) rather than upload-once — deferring the on-GPU gas-bbox reduction (the
+    "if drift shows" item, shared with G5c's CFL min) until a true single-upload long run needs
+    it. Decide re-upload-per-interval EXPLICITLY in G6.
+  - **API note (advisor):** `snapshot()` rebuilds `State` via `from_phase_space`, which
+    defaults every species to `Collisionless` — it DROPS `kind`. G6's simulate branch must
+    re-attach `Species` after each snapshot or the gas subset comes back empty (the exact
+    failure the G5b stepped gate hit and now guards against by restoring `kind`).
 
 Isothermal shock tube (`--release --ignored`) stays a gate throughout: the GPU hydro
 path must match the analytic Riemann solution to the same tolerance the CPU path does.

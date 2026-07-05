@@ -126,7 +126,11 @@ fn main_gate_cloud_fully_rooted() {
 #[test]
 fn gpu_density_fixed_h_matches_cpu() {
     let pos = concentrated_cloud(0xF15ED, 3000, 5.0);
-    let mass = vec![1.0; pos.len()];
+    // VARYING mass so the `m_j` factor is actually exercised: with uniform mass this
+    // gate would pass identically for `Σ W`, `Σ m_i W` (wrong index), or no mass at
+    // all. Per-`j` mass distinguishes all three (the project is equal-mass by
+    // invariant, but G3's force consumes this ρ — catch a mass-indexing bug here).
+    let mass: Vec<f64> = (0..pos.len()).map(|j| 1.0 + (j % 7) as f64).collect();
     let h: Vec<f64> = pos
         .iter()
         .map(|p| 0.1 + 0.15 * (p.length() / 5.0))

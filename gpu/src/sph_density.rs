@@ -60,7 +60,7 @@ pub struct DensityField {
 /// Density kernels: the cubic-spline `W`, the centered neighborhood sum, and the two
 /// per-target passes (adaptive root-find / fixed-`h` summation). Concatenated after
 /// [`GRID_HELPERS_WGSL`], which supplies `pos_of`/`cell_of`/`hash_cell`/`build`.
-const DENSITY_DECLS: &str = r#"
+pub(crate) const DENSITY_DECLS: &str = r#"
 struct Params {
     n: u32,
     table_mask: u32,   // table_size = table_mask + 1 (power of two)
@@ -83,7 +83,7 @@ struct Params {
 @group(0) @binding(8) var<storage, read_write> rho_out: array<f32>;     // n
 "#;
 
-const DENSITY_KERNELS: &str = r#"
+pub(crate) const DENSITY_KERNELS: &str = r#"
 const SUPPORT: f32 = 2.0;
 const PI: f32 = 3.1415926535897931;
 // TDR backstop: a rooted particle's walk is ≤ a few cells; only a non-rooted h blow-up
@@ -213,7 +213,7 @@ fn density_fixed(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// (from [`GRID_HELPERS_WGSL`]) compiles unchanged here.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Params {
+pub(crate) struct Params {
     n: u32,
     table_mask: u32,
     cell: f32,
@@ -222,6 +222,45 @@ struct Params {
     h_seed: f32,
     h_cap: f32,
     _pad: u32,
+}
+
+/// Compute the adaptive-h density [`Params`] (bracket seed / cap / grid cell) from the
+/// gas positions — the single source of truth for the root-find's seeding, shared by
+/// [`GpuDensity::densities`] and the GPU-resident stepper (which fixes these at upload,
+/// leveraging the root's seed-independence — G2). `n_ngb`/`h_tol_rel` come from the
+/// caller's [`DensityConfig`]. Caller guarantees `pos` is non-empty.
+pub(crate) fn density_params(pos: &[DVec3], n_ngb: f64, h_tol_rel: f64) -> Params {
+    let n = pos.len();
+    // Global spacing estimate → bracket seed and cap (mirrors density_adaptive).
+    let (mut lo_c, mut hi_c) = (pos[0], pos[0]);
+    for p in pos {
+        lo_c = lo_c.min(*p);
+        hi_c = hi_c.max(*p);
+    }
+    let extent = hi_c - lo_c;
+    let diag = extent.length();
+    let vol = extent.x * extent.y * extent.z;
+    let s_est = if vol > 0.0 {
+        (vol / n as f64).cbrt()
+    } else if diag > 0.0 {
+        diag / (n as f64).cbrt()
+    } else {
+        1.0
+    };
+    let h_seed = s_est * (3.0 * n_ngb / (32.0 * PI)).cbrt();
+    let h_cap = (64.0 * h_seed).max(4.0 * diag);
+    let cell = (SUPPORT * h_seed).max(1e-12);
+    let table_size = table_size_for(n);
+    Params {
+        n: n as u32,
+        table_mask: table_size - 1,
+        cell: cell as f32,
+        n_ngb: n_ngb as f32,
+        h_tol_rel: h_tol_rel as f32,
+        h_seed: h_seed as f32,
+        h_cap: h_cap as f32,
+        _pad: 0,
+    }
 }
 
 /// GPU adaptive-h density. Reusable wgpu compute context built once ([`new`](Self::new))
@@ -501,38 +540,11 @@ impl GpuDensity {
             };
         }
 
-        // Global spacing estimate → bracket seed and cap (mirrors density_adaptive).
-        let (mut lo_c, mut hi_c) = (pos[0], pos[0]);
-        for p in pos {
-            lo_c = lo_c.min(*p);
-            hi_c = hi_c.max(*p);
-        }
-        let extent = hi_c - lo_c;
-        let diag = extent.length();
-        let vol = extent.x * extent.y * extent.z;
-        let s_est = if vol > 0.0 {
-            (vol / n as f64).cbrt()
-        } else if diag > 0.0 {
-            diag / (n as f64).cbrt()
-        } else {
-            1.0
-        };
-        let h_seed = s_est * (3.0 * n_ngb / (32.0 * PI)).cbrt();
-        let h_cap = (64.0 * h_seed).max(4.0 * diag);
-        let cell = (SUPPORT * h_seed).max(1e-12);
-
         let table_size = table_size_for(n);
         self.ensure_capacity(n, table_size);
-        let params = Params {
-            n: n as u32,
-            table_mask: table_size - 1,
-            cell: cell as f32,
-            n_ngb: n_ngb as f32,
-            h_tol_rel: h_tol_rel as f32,
-            h_seed: h_seed as f32,
-            h_cap: h_cap as f32,
-            _pad: 0,
-        };
+        // Bracket seed / cap / grid cell — the single source of truth shared with the
+        // GPU-resident stepper.
+        let params = density_params(pos, n_ngb, h_tol_rel);
         self.upload_inputs(&params, pos, mass);
         let (rho, h) = self.dispatch(n, true);
         DensityField { rho, h }
@@ -676,7 +688,7 @@ impl GpuDensity {
 
 /// Hash-table size for `n` bodies: the next power of two ≥ `2n`, floored at 64
 /// (same policy as `sph_grid`). Power-of-two so the slot reduction is a mask.
-fn table_size_for(n: usize) -> u32 {
+pub(crate) fn table_size_for(n: usize) -> u32 {
     let target = (2 * n).max(64) as u32;
     target.next_power_of_two()
 }

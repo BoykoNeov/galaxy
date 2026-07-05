@@ -187,14 +187,390 @@ struct ResidentResources {
     capacity: usize,
 }
 
-/// SPH configuration carried by a resident stepper brought up in **gas mode** (via
-/// [`GpuResidentLeapfrog::new_with_sph`]). Holds the isothermal hydro parameters and the
-/// adaptive-h density root-find configuration — the resident analogue of the CPU
-/// composite [`galaxy_solvers::sph::GravitySph`]'s fields (minus the `h_hint` warm-start,
-/// which the seed-independent GPU root-find does not need — G2 finding).
-struct SphConfig {
+/// Gather the gas subset off the resident `bodies` buffer into the compact,
+/// interleaved-f32 layout the SPH density/hydro kernels expect. `bodies.xyz` is the
+/// double-single *hi* limb (the same f32 position the gravity force reads — D1: SPH is
+/// f32 anyway); `bodies.w` is mass. One invocation per gas particle; unique gas indices
+/// ⇒ no scatter race. This is the resident analogue of the CPU composite's
+/// `gas.iter().map(|&i| state.pos[i])` compaction.
+const GATHER_GAS_SHADER: &str = r#"
+struct GParams { n_gas: u32, pad0: u32, pad1: u32, pad2: u32 };
+@group(0) @binding(0) var<uniform>             gp:       GParams;
+@group(0) @binding(1) var<storage, read>       bodies:   array<vec4<f32>>; // xyz=pos hi, w=mass
+@group(0) @binding(2) var<storage, read>       gas_idx:  array<u32>;
+@group(0) @binding(3) var<storage, read_write> gas_pos:  array<f32>;       // 3*n_gas interleaved
+@group(0) @binding(4) var<storage, read_write> gas_mass: array<f32>;       // n_gas
+
+@compute @workgroup_size(256)
+fn gather_gas(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let k = gid.x;
+    if (k >= gp.n_gas) { return; }
+    let b = bodies[gas_idx[k]];
+    gas_pos[3u * k]      = b.x;
+    gas_pos[3u * k + 1u] = b.y;
+    gas_pos[3u * k + 2u] = b.z;
+    gas_mass[k]          = b.w;
+}
+"#;
+
+/// Uniform for the gas-gather kernel (just the gas count; padded to 16 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GatherParams {
+    n_gas: u32,
+    _pad: [u32; 3],
+}
+
+/// Resident SPH per-upload resources. Only the buffers a later pass re-touches are kept:
+/// `rho`/`h` (the density outputs, copied out by [`Sph::snapshot`]), their readbacks, and
+/// the two bind groups (which run in [`Sph::encode`]). The gather/grid intermediates
+/// (`gas_idx`/`gas_pos`/`gas_mass`/`slot_count`/`cursor`/`cell_start`/`sorted_idx`) are
+/// **not** stored — each is bound into a bind group above, and a wgpu bind group retains
+/// its resources for its own lifetime, so they live exactly as long as these bind groups
+/// (the same idiom as [`crate::fused_core`]'s `FusedResources`).
+struct SphResources {
+    rho: wgpu::Buffer,
+    h: wgpu::Buffer,
+    rho_readback: wgpu::Buffer,
+    h_readback: wgpu::Buffer,
+    gather_bg: wgpu::BindGroup,
+    density_bg: wgpu::BindGroup,
+}
+
+/// Resident isothermal-SPH state carried by a stepper in **gas mode** (via
+/// [`GpuResidentLeapfrog::new_with_sph`]). Holds the config, the gather + density (build /
+/// adaptive-h root-find) pipelines built on [`FusedCore`]'s device, the two fixed-size
+/// uniform buffers (written at upload), and the lazily-sized [`SphResources`]. The
+/// resident analogue of the CPU composite [`galaxy_solvers::sph::GravitySph`] — minus the
+/// `h_hint` warm-start, which the seed-independent GPU root-find does not need (G2). The
+/// hydro-force stage lands in G5b; G5a builds density only.
+struct Sph {
+    #[allow(dead_code)] // consumed by the G5b hydro-force stage
     hydro: HydroParams,
     density: DensityConfig,
+    gather_pl: wgpu::ComputePipeline,
+    build_pl: wgpu::ComputePipeline,
+    density_pl: wgpu::ComputePipeline,
+    gather_bgl: wgpu::BindGroupLayout,
+    density_bgl: wgpu::BindGroupLayout,
+    gather_params_buf: wgpu::Buffer,
+    density_params_buf: wgpu::Buffer,
+    res: Option<SphResources>,
+}
+
+/// Map a resident f32 readback buffer, block, and copy out the first `count` scalars.
+fn map_read_f32(device: &wgpu::Device, readback: &wgpu::Buffer, count: usize) -> Vec<f32> {
+    let bytes = (count * std::mem::size_of::<f32>()) as u64;
+    let slice = readback.slice(..bytes);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("gpu poll failed");
+    rx.recv()
+        .expect("map channel closed")
+        .expect("gpu buffer map failed");
+    let data = slice.get_mapped_range();
+    let out = bytemuck::cast_slice::<u8, f32>(&data)[..count].to_vec();
+    drop(data);
+    readback.unmap();
+    out
+}
+
+impl Sph {
+    /// Build the gather + density (build / adaptive-h) pipelines on the resident
+    /// [`FusedCore`] device. Reuses the G2 density WGSL verbatim
+    /// (`DENSITY_DECLS + GRID_HELPERS_WGSL + DENSITY_KERNELS`) so the root-find is one
+    /// source of truth with the standalone [`crate::GpuDensity`].
+    fn new(device: &wgpu::Device, hydro: HydroParams, density: DensityConfig) -> Self {
+        let module = |label: &str, src: &str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            })
+        };
+        let gather_mod = module("resident-sph-gather", GATHER_GAS_SHADER);
+        let density_src = format!(
+            "{}{}{}",
+            crate::sph_density::DENSITY_DECLS,
+            crate::sph_grid::GRID_HELPERS_WGSL,
+            crate::sph_density::DENSITY_KERNELS,
+        );
+        let density_mod = module("resident-sph-density", &density_src);
+
+        let bgl = |label: &str, entries: &[wgpu::BindGroupLayoutEntry]| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(label),
+                entries,
+            })
+        };
+        // gather: 0 uniform, 1 bodies(r), 2 gas_idx(r), 3 gas_pos(rw), 4 gas_mass(rw)
+        let gather_bgl = bgl(
+            "resident-sph-gather-bgl",
+            &[
+                uniform_entry(0),
+                storage_entry(1, true),
+                storage_entry(2, true),
+                storage_entry(3, false),
+                storage_entry(4, false),
+            ],
+        );
+        // density (build + root-find share it): 0 uniform, 1 pos(r), 2 mass(r),
+        // 3 slot_count(rw), 4 cursor(rw), 5 cell_start(rw), 6 sorted_idx(rw), 7 h_io(rw),
+        // 8 rho_out(rw) — matches DENSITY_DECLS.
+        let density_bgl = bgl(
+            "resident-sph-density-bgl",
+            &[
+                uniform_entry(0),
+                storage_entry(1, true),
+                storage_entry(2, true),
+                storage_entry(3, false),
+                storage_entry(4, false),
+                storage_entry(5, false),
+                storage_entry(6, false),
+                storage_entry(7, false),
+                storage_entry(8, false),
+            ],
+        );
+
+        let pipeline = |label: &str,
+                        layout: &wgpu::BindGroupLayout,
+                        module: &wgpu::ShaderModule,
+                        entry: &str| {
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[Some(layout)],
+                immediate_size: 0,
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pl),
+                module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let gather_pl = pipeline(
+            "resident-sph-gather",
+            &gather_bgl,
+            &gather_mod,
+            "gather_gas",
+        );
+        let build_pl = pipeline("resident-sph-build", &density_bgl, &density_mod, "build");
+        let density_pl = pipeline(
+            "resident-sph-density",
+            &density_bgl,
+            &density_mod,
+            "density_adaptive",
+        );
+
+        let uniform_buf = |label: &str, size: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let gather_params_buf = uniform_buf(
+            "resident-sph-gather-params",
+            std::mem::size_of::<GatherParams>() as u64,
+        );
+        let density_params_buf = uniform_buf(
+            "resident-sph-density-params",
+            std::mem::size_of::<crate::sph_density::Params>() as u64,
+        );
+
+        Sph {
+            hydro,
+            density,
+            gather_pl,
+            build_pl,
+            density_pl,
+            gather_bgl,
+            density_bgl,
+            gather_params_buf,
+            density_params_buf,
+            res: None,
+        }
+    }
+
+    /// (Re)allocate the SPH buffers, write both uniforms + the gas map, and rebuild the
+    /// gather/density bind groups referencing the current `bodies`. Called from
+    /// [`GpuResidentLeapfrog::upload`] in gas mode with `gas_idx` non-empty.
+    ///
+    /// Allocated fresh every upload (not lazily grown): the gather bind group references
+    /// `bodies`, which can be reallocated independently of the gas count when the total N
+    /// grows, so a cached bind group could point at a stale buffer. Upload is rare (once
+    /// per run / per re-IC), so a per-upload realloc of ~10 small buffers is negligible —
+    /// the per-*step* SPH path touches none of this.
+    fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bodies: &wgpu::Buffer,
+        gas_idx: &[usize],
+        gas_pos_host: &[DVec3],
+    ) {
+        let n_gas = gas_idx.len();
+        let table_size = crate::sph_density::table_size_for(n_gas);
+
+        queue.write_buffer(
+            &self.gather_params_buf,
+            0,
+            bytemuck::bytes_of(&GatherParams {
+                n_gas: n_gas as u32,
+                _pad: [0; 3],
+            }),
+        );
+        // Bracket seed / cap / grid cell fixed at upload from the initial gas positions.
+        // Correct for rooted particles because the root is seed-independent (G2); a strongly
+        // evolved config is the D4/LBVH scale endpoint's job, not this grid's.
+        let dparams = crate::sph_density::density_params(
+            gas_pos_host,
+            self.density.n_ngb,
+            self.density.h_tol_rel,
+        );
+        queue.write_buffer(&self.density_params_buf, 0, bytemuck::bytes_of(&dparams));
+
+        let store = wgpu::BufferUsages::STORAGE;
+        let cdst = wgpu::BufferUsages::COPY_DST;
+        let csrc = wgpu::BufferUsages::COPY_SRC;
+        let mapread = wgpu::BufferUsages::MAP_READ;
+        let mk = |label: &str, count: usize, elem: usize, usage: wgpu::BufferUsages| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (count * elem) as u64,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let f32sz = std::mem::size_of::<f32>();
+        let u32sz = std::mem::size_of::<u32>();
+        let ts = table_size as usize;
+        let gas_idx_buf = mk("resident-sph-gas-idx", n_gas, u32sz, store | cdst);
+        let gas_pos = mk("resident-sph-gas-pos", 3 * n_gas, f32sz, store);
+        let gas_mass = mk("resident-sph-gas-mass", n_gas, f32sz, store);
+        let slot_count = mk("resident-sph-slot-count", ts, u32sz, store);
+        let cursor = mk("resident-sph-cursor", ts, u32sz, store);
+        let cell_start = mk("resident-sph-cell-start", ts + 1, u32sz, store);
+        let sorted_idx = mk("resident-sph-sorted-idx", n_gas, u32sz, store);
+        let rho = mk("resident-sph-rho", n_gas, f32sz, store | csrc);
+        let h = mk("resident-sph-h", n_gas, f32sz, store | csrc);
+        let rho_readback = mk("resident-sph-rho-readback", n_gas, f32sz, cdst | mapread);
+        let h_readback = mk("resident-sph-h-readback", n_gas, f32sz, cdst | mapread);
+
+        let gi: Vec<u32> = gas_idx.iter().map(|&i| i as u32).collect();
+        queue.write_buffer(&gas_idx_buf, 0, bytemuck::cast_slice(&gi));
+
+        let gather_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident-sph-gather-bg"),
+            layout: &self.gather_bgl,
+            entries: &[
+                bg_entry(0, &self.gather_params_buf),
+                bg_entry(1, bodies),
+                bg_entry(2, &gas_idx_buf),
+                bg_entry(3, &gas_pos),
+                bg_entry(4, &gas_mass),
+            ],
+        });
+        let density_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident-sph-density-bg"),
+            layout: &self.density_bgl,
+            entries: &[
+                bg_entry(0, &self.density_params_buf),
+                bg_entry(1, &gas_pos),
+                bg_entry(2, &gas_mass),
+                bg_entry(3, &slot_count),
+                bg_entry(4, &cursor),
+                bg_entry(5, &cell_start),
+                bg_entry(6, &sorted_idx),
+                bg_entry(7, &h),
+                bg_entry(8, &rho),
+            ],
+        });
+
+        self.res = Some(SphResources {
+            rho,
+            h,
+            rho_readback,
+            h_readback,
+            gather_bg,
+            density_bg,
+        });
+    }
+
+    /// Append the resident SPH density stages onto `enc`: gather gas off `bodies`, build
+    /// the gas grid, root-find (ρ, h). Left resident for the hydro force (G5b). Each stage
+    /// is its own compute pass, so wgpu inserts the read-after-write barriers between them.
+    fn encode(&self, enc: &mut wgpu::CommandEncoder, n_gas: usize) {
+        let res = self
+            .res
+            .as_ref()
+            .expect("sph resources prepared before encode");
+        let pass = |enc: &mut wgpu::CommandEncoder,
+                    label: &str,
+                    pipeline: &wgpu::ComputePipeline,
+                    bg: &wgpu::BindGroup,
+                    groups: u32| {
+            let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+            p.set_pipeline(pipeline);
+            p.set_bind_group(0, bg, &[]);
+            p.dispatch_workgroups(groups, 1, 1);
+        };
+        let wide = (n_gas as u32).div_ceil(WG);
+        pass(
+            enc,
+            "resident-sph-gather",
+            &self.gather_pl,
+            &res.gather_bg,
+            wide,
+        );
+        pass(
+            enc,
+            "resident-sph-build",
+            &self.build_pl,
+            &res.density_bg,
+            1,
+        );
+        pass(
+            enc,
+            "resident-sph-density",
+            &self.density_pl,
+            &res.density_bg,
+            wide,
+        );
+    }
+
+    /// Copy resident gas (ρ, h) to the host. Caller submits nothing else in between; the
+    /// last force evaluation left them resident.
+    fn snapshot(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        n_gas: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let res = self
+            .res
+            .as_ref()
+            .expect("sph resources prepared before snapshot");
+        let bytes = (n_gas * std::mem::size_of::<f32>()) as u64;
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("resident-sph-density-readback"),
+        });
+        enc.copy_buffer_to_buffer(&res.rho, 0, &res.rho_readback, 0, bytes);
+        enc.copy_buffer_to_buffer(&res.h, 0, &res.h_readback, 0, bytes);
+        queue.submit([enc.finish()]);
+        let rho = map_read_f32(device, &res.rho_readback, n_gas);
+        let h = map_read_f32(device, &res.h_readback, n_gas);
+        (rho, h)
+    }
 }
 
 /// Gas-subset density readback (the G5a gate surface). The resident stepper leaves gas
@@ -231,7 +607,7 @@ pub struct GpuResidentLeapfrog {
     res: Option<ResidentResources>,
     // SPH gas mode (None = gravity-only). `gas_idx` is the ascending-index gas map, rebuilt
     // from `state.kind` on each [`upload`](Self::upload); empty in gravity-only mode.
-    sph: Option<SphConfig>,
+    sph: Option<Sph>,
     gas_idx: Vec<usize>,
     // Host-tracked bookkeeping.
     n: usize,
@@ -373,7 +749,7 @@ impl GpuResidentLeapfrog {
         density: DensityConfig,
     ) -> Result<Self, GpuError> {
         let mut s = Self::new(g, softening, theta)?;
-        s.sph = Some(SphConfig { hydro, density });
+        s.sph = Some(Sph::new(&s.core.device, hydro, density));
         Ok(s)
     }
 
@@ -524,15 +900,35 @@ impl GpuResidentLeapfrog {
     /// Append the resident SPH stages onto `enc`: gather gas positions off `bodies`, build
     /// the gas grid, root-find (ρ, h) — left resident — then (G5b) the hydro force scattered
     /// additively into `accel`'s gas rows. Requires gas mode + a non-empty gas map.
-    fn encode_sph_force(&self, _enc: &mut wgpu::CommandEncoder) {
-        todo!("G5a: resident SPH density + G5b hydro/scatter-add onto the gas subset")
+    fn encode_sph_force(&self, enc: &mut wgpu::CommandEncoder) {
+        if let Some(sph) = &self.sph {
+            sph.encode(enc, self.gas_idx.len());
+        }
     }
 
     /// Copy the resident gas (ρ, h) back to the host paired with the gas map (the G5a gate
     /// surface). Runs after an [`upload`](Self::upload) (its prime evaluates density) or any
     /// [`step`](Self::step). Requires gas mode.
     pub fn snapshot_gas_density(&mut self) -> GasDensity {
-        todo!("G5a: read back resident gas ρ/h")
+        let n_gas = self.gas_idx.len();
+        let sph = self
+            .sph
+            .as_ref()
+            .expect("snapshot_gas_density requires gas mode (new_with_sph)");
+        if n_gas == 0 {
+            return GasDensity {
+                gas_idx: Vec::new(),
+                rho: Vec::new(),
+                h: Vec::new(),
+            };
+        }
+        let (rho, h) = sph.snapshot(&self.core.device, &self.core.queue, n_gas);
+        self.submits += 1;
+        GasDensity {
+            gas_idx: self.gas_idx.clone(),
+            rho,
+            h,
+        }
     }
 
     /// Upload `state` (f64→f32 narrowed) into the resident GPU buffers, (re)allocating as `N`
@@ -597,6 +993,22 @@ impl GpuResidentLeapfrog {
             self.core
                 .queue
                 .write_buffer(&res.vel, 0, bytemuck::cast_slice(&vels));
+        }
+
+        // Gas mode: (re)allocate the SPH buffers, write the density seed params + gas map,
+        // and rebuild the SPH bind groups against the just-written `bodies`. Must precede the
+        // prime so `a(x₀)` already includes the gas density (→ hydro, G5b).
+        if !self.gas_idx.is_empty() {
+            let gas_pos: Vec<DVec3> = self.gas_idx.iter().map(|&i| state.pos[i]).collect();
+            let core_res = self.core.res.as_ref().expect("core resources ensured");
+            let sph = self.sph.as_mut().expect("gas map non-empty ⇒ gas mode");
+            sph.prepare(
+                &self.core.device,
+                &self.core.queue,
+                &core_res.bodies,
+                &self.gas_idx,
+                &gas_pos,
+            );
         }
 
         // Prime accel = a(x₀). No readback.

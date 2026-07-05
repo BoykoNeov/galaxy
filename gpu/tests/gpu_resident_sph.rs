@@ -145,11 +145,16 @@ fn resident_gas_density_matches_cpu_oracle() {
 
     let h_err = max_rel_err(&gd.h, &reference.h);
     let rho_err = max_rel_err(&gd.rho, &reference.rho);
-    // G2's measured worst was h 9e-4 / ρ 1.3e-3 vs this same oracle; the resident path
-    // fixes the bracket seed at upload (vs GpuDensity's fresh seed) but the root is
-    // seed-independent, so the numbers track G2. Tolerances are measure-then-tighten.
-    assert!(h_err < 2e-3, "resident h rel err {h_err:e} exceeds 2e-3");
-    assert!(rho_err < 3e-3, "resident ρ rel err {rho_err:e} exceeds 3e-3");
+    // Measured on the Vulkan test adapter: h 7.5e-4, ρ 9.1e-4 — in line with the standalone
+    // G2 gate (worst h 9e-4 / ρ 1.3e-3 vs this same oracle), confirming the resident path
+    // (which fixes the bracket seed at upload, vs GpuDensity's fresh seed) tracks G2 because
+    // the root is seed-independent. Gates are measure-then-tighten, with headroom for
+    // cross-adapter f32 variation.
+    assert!(h_err < 1e-3, "resident h rel err {h_err:e} exceeds 1e-3");
+    assert!(
+        rho_err < 1.3e-3,
+        "resident ρ rel err {rho_err:e} exceeds 1.3e-3"
+    );
 }
 
 /// The resident gas map must survive a re-upload of a DIFFERENT gas/star split without
@@ -157,9 +162,14 @@ fn resident_gas_density_matches_cpu_oracle() {
 /// `state.kind` each time (not once).
 #[test]
 fn resident_gas_map_rebuilt_on_reupload() {
-    let mut stepper =
-        GpuResidentLeapfrog::new_with_sph(G, EPS, THETA, HydroParams::default(), DensityConfig::default())
-            .expect("wgpu adapter required for GPU-SPH resident gates");
+    let mut stepper = GpuResidentLeapfrog::new_with_sph(
+        G,
+        EPS,
+        THETA,
+        HydroParams::default(),
+        DensityConfig::default(),
+    )
+    .expect("wgpu adapter required for GPU-SPH resident gates");
 
     let mut a = gas_star_mix(0x1111, 80, 160);
     narrow_state(&mut a);

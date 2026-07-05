@@ -942,6 +942,22 @@ impl GpuResidentLeapfrog {
         }
     }
 
+    /// Read the resident gas hydro acceleration back to the host, in ascending gas-index
+    /// order (the G5b gate surface). This is the PURE hydro force `gas_acc` — the value the
+    /// hydro pass leaves resident BEFORE the scatter-add folds it into `accel`'s gas rows —
+    /// so the isolated momentum-antisymmetry and hydro-accuracy gates see it uncontaminated
+    /// by the (non-antisymmetric) gravity contribution. Requires gas mode.
+    pub fn snapshot_gas_accel(&mut self) -> Vec<DVec3> {
+        todo!("G5b: read the resident gas_acc (pre-scatter hydro force) back to the host")
+    }
+
+    /// Read the full resident acceleration buffer (`accel`, all particles) back to the
+    /// host. The G5b scatter gate uses this to check the hydro force landed in the gas rows
+    /// and left the star rows untouched (gravity-only vs gas-mode stepper).
+    pub fn snapshot_accel(&mut self) -> Vec<DVec3> {
+        todo!("G5b: read the resident accel buffer back to the host")
+    }
+
     /// Upload `state` (f64→f32 narrowed) into the resident GPU buffers, (re)allocating as `N`
     /// changes, and **prime** the acceleration (one force evaluation, no readback) so the first
     /// [`step`](Self::step)'s opening half-kick uses `a(x₀)`, not a stale value. Resets the clock.

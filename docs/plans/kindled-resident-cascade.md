@@ -218,10 +218,21 @@ Sub-milestones, roughly in dependency order. Each lands red→green with its own
   `query_all` so grid↔LBVH is a module change. Endpoint remains the max-h LBVH range
   query per the measured 34×+ h-range; grid survives afterward as CPU-parity oracle /
   small-N fallback.
-- **G2 — GPU adaptive-h density**: per-gas-particle bisection on the kernel-weighted
-  count → (ρ, h). Gate = f32-tolerance vs `density_adaptive` on a
-  centrally-concentrated cloud (wide h range). DS XOR-barrier if a compensated sum
-  is used (D3).
+- **G2 — GPU adaptive-h density** ✅ **DONE** (commit `a5390eb`;
+  `gpu::sph_density::GpuDensity`). Per-gas-particle bracket/bisection `N_i(h)=n_ngb`
+  → (ρ, h) = `Σ m_j W`, all GPU-SIDE (each thread re-walks the spatial hash per trial
+  `h` — no host CSR). Shares G1's hash/bin math via `GRID_HELPERS_WGSL` (one source of
+  truth). 6 gates green, DECOUPLED per advisor: summation (`densities_at` vs
+  `density_fixed`, worst 1e-6) split from the root-find (`densities` vs
+  `density_adaptive`, worst h 9e-4 / ρ 1.3e-3). Key advisor traps handled: (1)
+  clamp/rootless divergence is worst in wide-h → main-gate cloud ASSERTED fully rooted
+  (`|N_i(h_i)−n_ngb|<0.5` ∀i; robust h-range ~48×), single-particle edge gated
+  STRUCTURALLY not against the seed-dependent clamped h; (2) the walk is NOT
+  walk-cappable (per-particle radius = D4) — centered walk + `MAX_SPAN` backstop so a
+  non-rooted `h` blow-up is a bounded wrong answer, not a GPU hang. Global seed+cap
+  host-side (unique root ⇒ `h` seed-independent, so CPU's occupancy seed is skipped).
+  Plain f32 accumulation, NO DS barrier (ρ/N aren't error-free-transforms; D3 not
+  triggered). Endpoint still LBVH (grid mirrors CPU cell at measured-regime scale).
 - **G3 — GPU hydro force**: symmetric P/ρ² + Monaghan viscosity, coupling-range-gated
   (`r < 2·max(h_i,h_j)`), gather-per-target (D2). Gate = f32-tolerance vs
   `hydro_accelerations` on the same cloud + a bounded momentum-drift check.

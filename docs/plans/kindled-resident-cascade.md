@@ -251,9 +251,25 @@ Sub-milestones, roughly in dependency order. Each lands red→green with its own
   live); accuracy gate uses VARYING mass (catches a `mass[i]`/`mass[j]` swap). Plain f32
   accumulation, NO DS barrier (D3 not triggered). 8-storage-buffer limit → mass/ρ/h
   packed into one `scalars` buffer (crate stays on `Limits::default()`).
-- **G4 — GPU CFL reduction**: min over gas of `C·h/v_sig` (projected signal
-  velocity). Gate = f32-tolerance vs `max_stable_dt`. Exposes the per-batch bound
-  (D6) — the adaptive-dt substrate.
+- **G4 — GPU CFL reduction — ✅ DONE** (commit `8edae61`). `gpu::sph_cfl::GpuCfl`.
+  Per-gas `dt_i = C·h_i/v_sig,i` (Gadget projected signal velocity `v_sig = max` over
+  approaching neighbors of `2c_s−3w_ij`, floored at `2c_s`), gathered per target over the
+  global `SUPPORT·h_max`, reused from G1's `GRID_HELPERS_WGSL`. `h` is an INPUT (density
+  ran first). **Two load-bearing differences from the G3 force, both gated:** the coupling
+  cutoff is EXPLICIT (`r >= SUPPORT·max(h_i,h_j) ⇒ skip` — no `grad_w` to vanish), and `w`
+  divides by `r` (length) not `r²`. CFL needs neither mass nor ρ → eight storage buffers
+  = pos/vel/h + four grid + dt_out (no packing). **SCOPE DIVERGENCE from line ~288 below
+  ("compute the CFL reduction on-GPU"):** the O(N·ngb) signal-velocity work IS on GPU; the
+  trivial O(N) `min_i dt_i` collapse is reduced HOST-side in G4 (f32 `min` is exact and
+  order-independent, so no numerics live there). The GPU-resident NO-READBACK min is
+  deferred to **G5**, where the resident stepper's dt-threading defines its interface —
+  advisor-endorsed (building it now risks the wrong shape). Gate = f32-tolerance vs
+  `max_stable_dt`: per-target VECTOR (sharp — the scalar min masks a per-target-radius bug
+  unless the affected particle IS the minimizer) worst 1.0e-6 → 1e-5; scalar-min 2.2e-8 →
+  1e-5; cross-support approacher 8.0e-8 → 1e-4 (a per-target-`h_i` gather returns the
+  static floor ~150× too large). Guards: v_sig-above-floor incl. the minimizer,
+  asymmetric-coupling approaching pairs exist (19463), `c_cfl ≠ 1`. Empty ⇒ `+∞` (NOT 0 —
+  a 0 falsely says every dt is too large); single ⇒ finite floor `C·h/(2c_s)`.
 - **G5 — wire into `GpuResidentLeapfrog`**: add the hydro stage to the resident step
   (gravity over all + hydro on gas subset before the kick); block-adaptive dt plumbing
   (D6, compute+expose only). Gate = the long-run invariants + coarse-statistics

@@ -38,7 +38,8 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use galaxy_core::{DVec3, State};
+use galaxy_core::{DVec3, Species, State};
+use galaxy_solvers::sph::{DensityConfig, HydroParams};
 
 use crate::fused_core::{bg_entry, storage_entry, uniform_entry, FusedCore};
 use crate::GpuError;
@@ -186,8 +187,37 @@ struct ResidentResources {
     capacity: usize,
 }
 
+/// SPH configuration carried by a resident stepper brought up in **gas mode** (via
+/// [`GpuResidentLeapfrog::new_with_sph`]). Holds the isothermal hydro parameters and the
+/// adaptive-h density root-find configuration — the resident analogue of the CPU
+/// composite [`galaxy_solvers::sph::GravitySph`]'s fields (minus the `h_hint` warm-start,
+/// which the seed-independent GPU root-find does not need — G2 finding).
+struct SphConfig {
+    hydro: HydroParams,
+    density: DensityConfig,
+}
+
+/// Gas-subset density readback (the G5a gate surface). The resident stepper leaves gas
+/// (ρ, h) on the device across steps; [`GpuResidentLeapfrog::snapshot_gas_density`]
+/// copies them back paired with the gas map for oracle comparison. `f32` because the
+/// device computes in f32 (D1 — the gate is an f32-tolerance comparison, never bit-exact).
+pub struct GasDensity {
+    /// Global particle indices of the gas rows, ascending — the resident gas map
+    /// (`kind == Species::Gas`, matching the CPU composite's gas order).
+    pub gas_idx: Vec<usize>,
+    /// Per-gas density `ρ_i`.
+    pub rho: Vec<f32>,
+    /// Per-gas adaptive smoothing length `h_i`.
+    pub h: Vec<f32>,
+}
+
 /// GPU-resident kick-drift-kick leapfrog over the M4h fused LBVH force pipeline. State stays in
 /// GPU buffers across [`step`](Self::step)s; only [`snapshot`](Self::snapshot) reads it back.
+///
+/// With [`new_with_sph`](Self::new_with_sph) the stepper additionally runs isothermal SPH on
+/// the **gas subset** (`kind == Species::Gas`) each force evaluation — gravity over all
+/// particles, hydro added to the gas rows — the resident analogue of
+/// [`galaxy_solvers::sph::GravitySph`] (GPU-SPH G5).
 pub struct GpuResidentLeapfrog {
     core: FusedCore,
     // kick/drift/reset pipelines + layouts (built once).
@@ -199,6 +229,10 @@ pub struct GpuResidentLeapfrog {
     drift_bgl: wgpu::BindGroupLayout,
     step_params_buf: wgpu::Buffer,
     res: Option<ResidentResources>,
+    // SPH gas mode (None = gravity-only). `gas_idx` is the ascending-index gas map, rebuilt
+    // from `state.kind` on each [`upload`](Self::upload); empty in gravity-only mode.
+    sph: Option<SphConfig>,
+    gas_idx: Vec<usize>,
     // Host-tracked bookkeeping.
     n: usize,
     time: f64,
@@ -318,11 +352,29 @@ impl GpuResidentLeapfrog {
             drift_bgl,
             step_params_buf,
             res: None,
+            sph: None,
+            gas_idx: Vec::new(),
             n: 0,
             time: 0.0,
             mass: Vec::new(),
             submits: 0,
         })
+    }
+
+    /// Bring up a resident stepper in **gas mode** (GPU-SPH G5): the shared LBVH gravity
+    /// pipeline plus resident isothermal SPH on the gas subset. `hydro`/`density` mirror
+    /// the CPU composite [`galaxy_solvers::sph::GravitySph`]'s parameters. Gravity acts on
+    /// ALL particles; hydro (and its density prerequisite) on `kind == Species::Gas` only.
+    pub fn new_with_sph(
+        g: f64,
+        softening: f64,
+        theta: f64,
+        hydro: HydroParams,
+        density: DensityConfig,
+    ) -> Result<Self, GpuError> {
+        let mut s = Self::new(g, softening, theta)?;
+        s.sph = Some(SphConfig { hydro, density });
+        Ok(s)
     }
 
     /// (Re)allocate the resident velocity + readback buffers and rebuild the kick/drift/reset bind
@@ -461,6 +513,26 @@ impl GpuResidentLeapfrog {
             let core_res = self.core.res.as_ref().expect("core resources ensured");
             enc.clear_buffer(&core_res.accel, 0, None);
         }
+        // Gas mode: add the resident SPH force onto the gas rows of `accel` (density
+        // root-find → hydro → scatter-add). Encoded AFTER gravity-traverse so the RMW on
+        // `accel` sees the gravity contribution (wgpu barriers honor encode order).
+        if self.sph.is_some() && !self.gas_idx.is_empty() {
+            self.encode_sph_force(enc);
+        }
+    }
+
+    /// Append the resident SPH stages onto `enc`: gather gas positions off `bodies`, build
+    /// the gas grid, root-find (ρ, h) — left resident — then (G5b) the hydro force scattered
+    /// additively into `accel`'s gas rows. Requires gas mode + a non-empty gas map.
+    fn encode_sph_force(&self, _enc: &mut wgpu::CommandEncoder) {
+        todo!("G5a: resident SPH density + G5b hydro/scatter-add onto the gas subset")
+    }
+
+    /// Copy the resident gas (ρ, h) back to the host paired with the gas map (the G5a gate
+    /// surface). Runs after an [`upload`](Self::upload) (its prime evaluates density) or any
+    /// [`step`](Self::step). Requires gas mode.
+    pub fn snapshot_gas_density(&mut self) -> GasDensity {
+        todo!("G5a: read back resident gas ρ/h")
     }
 
     /// Upload `state` (f64→f32 narrowed) into the resident GPU buffers, (re)allocating as `N`
@@ -471,6 +543,13 @@ impl GpuResidentLeapfrog {
         self.n = n;
         self.time = 0.0;
         self.mass = state.mass.clone();
+        // Rebuild the gas map from `state.kind` every upload (a re-upload with a different
+        // gas/star split must not carry a stale map). Empty in gravity-only mode.
+        self.gas_idx = if self.sph.is_some() {
+            (0..n).filter(|&i| state.kind[i] == Species::Gas).collect()
+        } else {
+            Vec::new()
+        };
         if n == 0 {
             return;
         }

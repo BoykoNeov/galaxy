@@ -40,7 +40,7 @@ use crate::GpuError;
 /// Kernel support radius in units of `h` (`W = 0` for `r ≥ SUPPORT·h`); matches
 /// [`galaxy_solvers::sph::SUPPORT`]. Hardcoded (not imported) to keep the WGSL literal
 /// and this host constant a matched pair, as in `sph_grid` / `sph_density`.
-const SUPPORT: f64 = 2.0;
+pub(crate) const SUPPORT: f64 = 2.0;
 
 /// Local group size for the per-target hydro pass (mirrors the resident stepper).
 const QUERY_WG: u32 = 256;
@@ -48,7 +48,7 @@ const QUERY_WG: u32 = 256;
 /// Hydro `Params` + bind-group declarations. The first three fields `{n, table_mask,
 /// cell}` and the vars `pos`/`slot_count`/`cursor`/`cell_start`/`sorted_idx` match what
 /// [`GRID_HELPERS_WGSL`]'s shared `build` expects, so that text compiles unchanged here.
-const HYDRO_DECLS: &str = r#"
+pub(crate) const HYDRO_DECLS: &str = r#"
 struct Params {
     n: u32,
     table_mask: u32,     // table_size = table_mask + 1 (power of two)
@@ -75,7 +75,7 @@ struct Params {
 @group(0) @binding(8)  var<storage, read_write> acc_out: array<f32>;     // 3*n
 "#;
 
-const HYDRO_KERNELS: &str = r#"
+pub(crate) const HYDRO_KERNELS: &str = r#"
 const SUPPORT: f32 = 2.0;
 const PI: f32 = 3.1415926535897931;
 // TDR backstop (vestigial here — cell = radius so span ≈ 2 regardless of h_max; kept
@@ -189,15 +189,15 @@ fn hydro_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// [`GRID_HELPERS_WGSL`]) compiles unchanged.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Params {
-    n: u32,
-    table_mask: u32,
-    cell: f32,
-    radius: f32,
-    sound_speed: f32,
-    alpha: f32,
-    beta: f32,
-    visc_eps2: f32,
+pub(crate) struct Params {
+    pub(crate) n: u32,
+    pub(crate) table_mask: u32,
+    pub(crate) cell: f32,
+    pub(crate) radius: f32,
+    pub(crate) sound_speed: f32,
+    pub(crate) alpha: f32,
+    pub(crate) beta: f32,
+    pub(crate) visc_eps2: f32,
 }
 
 /// GPU isothermal hydro force. Reusable wgpu compute context built once

@@ -216,7 +216,9 @@ fn density_fixed(@builtin(global_invocation_id) gid: vec3<u32>) {
 pub(crate) struct Params {
     n: u32,
     table_mask: u32,
-    cell: f32,
+    /// Grid bucket edge (SUPPORT·h_seed). Read by the resident stepper to seed a
+    /// placeholder hydro radius before the calibration submit overwrites it.
+    pub(crate) cell: f32,
     n_ngb: f32,
     h_tol_rel: f32,
     h_seed: f32,

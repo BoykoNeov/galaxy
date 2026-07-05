@@ -422,8 +422,11 @@ fn resident_hydro_accel_matches_cpu_oracle() {
     }
     let rms = rms_rel_err(&gpu_acc, &cpu);
     let worst = worst_rel_err(&gpu_acc, &cpu);
-    // TODO(measure-then-tighten): bounds set after the green measurement. Placeholder
-    // bounds mirror the standalone G3 gate (rms 1e-4 / worst 1e-3).
+    // Measured on the Vulkan test adapter: rms 1.6e-7, worst 3.9e-6 — in line with the
+    // standalone G3 gate (rms 2.9e-7 / worst 1.2e-5), confirming the resident hydro force
+    // (reusing the G3 WGSL verbatim) reproduces the CPU oracle to f32 roundoff. Bounds match
+    // G3 (~600×/~250× headroom for cross-adapter f32 variation; a wrong kernel/coeff/index
+    // bug is ≫1%).
     assert!(rms < 1.0e-4, "resident hydro RMS rel err {rms:.3e}");
     assert!(worst < 1.0e-3, "resident hydro worst rel err {worst:.3e}");
 }
@@ -463,7 +466,11 @@ fn resident_hydro_momentum_drift_is_roundoff() {
     let gpu_acc = stepper.snapshot_gas_accel();
 
     let rel = momentum_drift(&gpu_acc, &gmass);
-    // TODO(measure-then-tighten): standalone G3 measured ≈2.1e-9; placeholder 1e-5.
+    // Exact per-pair f32 antisymmetry ⇒ only reduction roundoff survives: measured 1.6e-8
+    // (standalone G3 saw 2.1e-9; the resident path's extra gather/pack stages shuffle the
+    // reduction order but keep it roundoff-scale). Measured 29036 of 55462 coupled pairs
+    // (52%) are asymmetric-coupling. A radius leak / grad-sign / asymmetric-coeff bug produces
+    // O(1e-2–1) drift, so the 1e-5 bound (~600× over the floor) is sharp.
     assert!(rel < 1.0e-5, "resident hydro net momentum drift {rel:.3e}");
 }
 
@@ -535,7 +542,12 @@ fn resident_hydro_matches_cpu_over_stepped_run() {
     for _ in 0..30 {
         stepper.step(dt);
     }
-    let evolved = stepper.snapshot();
+    // snapshot() rebuilds State via from_phase_space, which defaults every species to
+    // Collisionless; the resident stepper preserves particle order, so restore the kinds
+    // from the original state before any gas filtering. (G6's simulate branch will do the
+    // same re-attach when it threads Species through the GPU path.)
+    let mut evolved = stepper.snapshot();
+    evolved.kind = state.kind.clone();
     let r1 = gas_rms_radius(&evolved);
     assert!(
         r1 < 0.98 * r0,
@@ -551,17 +563,24 @@ fn resident_hydro_matches_cpu_over_stepped_run() {
     let dens = density_adaptive(&gpos, &gmass, &dcfg, None);
     let rho_err = max_rel_err(&gd.rho, &dens.rho);
     let h_err = max_rel_err(&gd.h, &dens.h);
-    // TODO(measure-then-tighten): placeholders; frozen-grid staleness adds to the f32
-    // floor, so these are looser than the no-step G5a gate (h 7.5e-4 / ρ 9.1e-4).
-    assert!(h_err < 5.0e-3, "stepped resident h rel err {h_err:.3e}");
-    assert!(rho_err < 5.0e-3, "stepped resident ρ rel err {rho_err:.3e}");
+    // Measured after a 21% contraction (r0 1.74 → r1 1.37): h 8.7e-4, ρ 1.4e-3 — barely above
+    // the no-step G5a floor (h 7.5e-4 / ρ 9.1e-4), confirming contraction is the frozen-grid
+    // SAFE direction (the frozen density cell over-covers, so per-step density stays accurate
+    // off the drifted `bodies`). Bounds ~2× the measured values: tight enough that an
+    // expansion-clip staleness blow-up (≫1e-2) fails hard, loose enough for cross-adapter
+    // trajectory variation.
+    assert!(h_err < 2.0e-3, "stepped resident h rel err {h_err:.3e}");
+    assert!(rho_err < 3.0e-3, "stepped resident ρ rel err {rho_err:.3e}");
 
-    // CPU hydro (inviscid) fed the GPU (ρ, h): isolates the frozen hydro-grid staleness.
+    // CPU hydro (inviscid) fed the GPU (ρ, h): isolates the frozen HYDRO-grid staleness.
     let rho: Vec<f64> = gd.rho.iter().map(|&x| x as f64).collect();
     let h: Vec<f64> = gd.h.iter().map(|&x| x as f64).collect();
     let cpu_acc = hydro_accelerations(&gpos, &gvel, &gmass, &rho, &h, &inviscid);
     let rms = rms_rel_err(&gpu_acc, &cpu_acc);
-    assert!(rms < 5.0e-3, "stepped resident hydro RMS rel err {rms:.3e}");
+    // Measured 3.2e-7 (pure pressure ⇒ position + GPU-(ρ,h) determined): the frozen hydro grid
+    // (cell = radius = SUPPORT·h_max at upload) stays accurate under contraction. Bound 1e-4
+    // (~300× headroom), matching the no-step accuracy gate's style.
+    assert!(rms < 1.0e-4, "stepped resident hydro RMS rel err {rms:.3e}");
 }
 
 /// Gas-subset velocities in ascending global index (helper for the momentum guard).

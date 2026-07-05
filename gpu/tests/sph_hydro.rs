@@ -143,6 +143,28 @@ fn approach_split(pos: &[DVec3], vel: &[DVec3], h: &[f64]) -> (usize, usize) {
     (approaching, receding)
 }
 
+/// Count ASYMMETRIC-coupling pairs: `SUPPORT·min(h_i,h_j) ≤ r < SUPPORT·max(h_i,h_j)`.
+/// These are exactly the pairs where one particle's per-target radius would reach the
+/// other but not vice-versa — so they make the momentum-drift gate a real test of the
+/// "gather at the GLOBAL h_max" invariant (a per-target-radius bug would drop one half
+/// of each such pair and blow up the drift). A cloud with none of these would keep the
+/// drift at roundoff no matter what — the gate would pass while testing nothing.
+fn asymmetric_coupling_count(pos: &[DVec3], h: &[f64]) -> usize {
+    let n = pos.len();
+    let mut count = 0usize;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let r = (pos[i] - pos[j]).length();
+            let lo = SUPPORT * h[i].min(h[j]);
+            let hi = SUPPORT * h[i].max(h[j]);
+            if r >= lo && r < hi {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 // ---------------------------------------------------------------------------
 // CPU-only precondition guard (advisor refinement 1): the viscosity branch is
 // exercised on BOTH sides of vr = 0, and it materially changes the force.
@@ -245,6 +267,24 @@ fn gpu_hydro_momentum_drift_bounded() {
     let params = HydroParams::default();
     let dens = density_adaptive(&pos, &mass, &cfg, None);
 
+    // Precondition (advisor): the drift only tests the global-h_max invariant if the
+    // cloud HAS asymmetric-coupling pairs (one particle's radius reaches the other but
+    // not vice-versa). Assert a material count so a future narrow-h cloud change can't
+    // silently reduce this to a roundoff-passes-trivially gate.
+    let asym = asymmetric_coupling_count(&pos, &dens.h);
+    let coupled = {
+        let (a, r) = approach_split(&pos, &vel, &dens.h);
+        a + r
+    };
+    // Measured: ≈29k of ≈55k coupled pairs (52%) are asymmetric on this wide-h cloud,
+    // so >1% is a comfortable, robust floor that still fails if a future narrow-h cloud
+    // change drops them to ~zero (which would gut this detector).
+    assert!(
+        asym > coupled / 100,
+        "cloud must contain a material fraction of asymmetric-coupling pairs \
+         (got {asym} of {coupled} coupled) for the drift gate to test the global radius"
+    );
+
     let gpu = hydro().accelerations(&pos, &vel, &mass, &dens.rho, &dens.h, &params);
 
     let mut net = DVec3::ZERO;
@@ -287,4 +327,18 @@ fn gpu_hydro_deterministic() {
 fn gpu_hydro_empty() {
     let a = hydro().accelerations(&[], &[], &[], &[], &[], &HydroParams::default());
     assert!(a.is_empty());
+}
+
+/// A lone particle has no neighbors, and the self term is skipped (`grad_w(0) = 0`
+/// anyway), so its force is exactly zero — the G2 single-particle edge parity, and a
+/// clean check that the walk finds nothing to add for an isolated body.
+#[test]
+fn gpu_hydro_single_particle_zero() {
+    let pos = [DVec3::new(0.5, -0.5, 2.0)];
+    let vel = [DVec3::new(0.1, 0.2, -0.3)];
+    let mass = [1.0];
+    let rho = [1.0];
+    let h = [0.3];
+    let a = hydro().accelerations(&pos, &vel, &mass, &rho, &h, &HydroParams::default());
+    assert_eq!(a, vec![DVec3::ZERO], "a lone particle feels no hydro force");
 }

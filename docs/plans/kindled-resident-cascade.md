@@ -204,15 +204,20 @@ batches" policy is the adaptive-dt follow-up (shared substrate, below).
 
 Sub-milestones, roughly in dependency order. Each lands red→green with its own gate.
 
-- **G1 — GPU neighbor structure** (D4 — endpoint is the **max-h LBVH range query**
-  per the measured 34×+ h-range; G1 *starts* grid-first as de-risking, or go straight
-  to LBVH as **G1′** — an explicit de-risk-vs-throwaway call, not settled by the
-  number): buckets/queries gas positions at the coupling radius; gate = equality of
-  the **filtered pair set** (post
-  `r < SUPPORT·max(h_i,h_j)`) vs `sph::grid::HashGrid` on synthetic clouds
-  (set equality, order-independent — radius-policy-invariant, so it survives an
-  (a)→(b) swap). Net-new GPU code; carries the determinism gates. Keep it isolated so
-  the grid↔LBVH swap is a module change.
+- **G1 — GPU neighbor structure** ✅ **DONE** (grid-first, commit `ad31013`;
+  `gpu::sph_grid::GpuNeighborGrid`). Green-style counting-sort spatial hash on wgpu:
+  single-invocation build (histogram → scan → stable scatter, GpuSorter discipline),
+  per-target-parallel two-pass query (count → host exclusive-scan → fill, gather so
+  deterministic). All 10 gates green (filtered pair set vs `HashGrid`, order-
+  independent — radius-policy-invariant so it survives the (a)→(b)/LBVH swap).
+  **Walk cap (advisor-vetted):** bucket edge = `max(cell, radius/4)` bounds the walk
+  to ≤9³ cells — correctness-neutral (coarser bucket only enlarges buckets), and the
+  thing that makes `cell ≪ radius` (wide-h) feasible on a uniform grid at all; the
+  251-cell literal walk is infeasible and is exactly what the LBVH endpoint (D4) is
+  for. Cell-match acceptance dedups far-debris hash collisions. Kept isolated behind
+  `query_all` so grid↔LBVH is a module change. Endpoint remains the max-h LBVH range
+  query per the measured 34×+ h-range; grid survives afterward as CPU-parity oracle /
+  small-N fallback.
 - **G2 — GPU adaptive-h density**: per-gas-particle bisection on the kernel-weighted
   count → (ρ, h). Gate = f32-tolerance vs `density_adaptive` on a
   centrally-concentrated cloud (wide h range). DS XOR-barrier if a compensated sum

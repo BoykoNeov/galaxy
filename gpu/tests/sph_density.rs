@@ -141,8 +141,11 @@ fn gpu_density_fixed_h_matches_cpu() {
         let rel = (gpu[i] as f64 - cpu[i]).abs() / cpu[i].max(1e-12);
         worst = worst.max(rel);
     }
+    // Pure summation over the same neighbor set → essentially f32-roundoff (measured
+    // worst ≈ 1e-6, only the sum order differs). 1e-3 keeps ~1000× headroom for
+    // cross-device f32 while still failing hard on any wrong kernel/neighbor bug.
     assert!(
-        worst < 2.0e-2,
+        worst < 1.0e-3,
         "GPU fixed-h ρ must match density_fixed to f32 tolerance; worst rel = {worst:.3e}"
     );
 }
@@ -178,14 +181,17 @@ fn gpu_density_adaptive_matches_cpu() {
         worst_h = worst_h.max((gpu.h[i] as f64 - cpu.h[i]).abs() / cpu.h[i]);
         worst_rho = worst_rho.max((gpu.rho[i] as f64 - cpu.rho[i]).abs() / cpu.rho[i].max(1e-12));
     }
-    // h: two independent bisections (±h_tol_rel each) to the same unique root + f32
-    // noise → floor ~2·h_tol_rel; ρ inherits d ln ρ/d ln h ≈ O(1–3) × that.
+    // h: two independent bisections (±h_tol_rel = ±1e-3 each) to the same unique root
+    // + f32 noise → theoretical floor ~2·h_tol_rel = 2e-3; measured worst ≈ 9e-4.
+    // 5e-3 sits above the floor with ~5× margin over the measured value.
     assert!(
-        worst_h < 1.0e-2,
+        worst_h < 5.0e-3,
         "GPU adaptive h must match to f32+bisection tolerance; worst rel = {worst_h:.3e}"
     );
+    // ρ inherits d ln ρ/d ln h ≈ O(1–3) × the h error → measured worst ≈ 1.3e-3.
+    // 1e-2 gives ~8× margin while still catching a real (≫1%) regression.
     assert!(
-        worst_rho < 3.0e-2,
+        worst_rho < 1.0e-2,
         "GPU adaptive ρ must match to f32 tolerance; worst rel = {worst_rho:.3e}"
     );
 }

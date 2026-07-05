@@ -89,10 +89,9 @@ impl GpuNeighbours {
     }
 }
 
-/// The build (counting sort) + query (count/fill) kernels. `build` is a single
-/// invocation; `query_count`/`query_fill` are per-target parallel and call the same
-/// `gather` traversal so the fill writes exactly the count the scan reserved.
-const SHADER: &str = r#"
+/// The G1 `Params` + bind-group declarations. Assembled with [`GRID_HELPERS_WGSL`]
+/// and [`GRID_QUERY`] into the full query shader in [`GpuNeighborGrid::new`].
+const GRID_DECLS: &str = r#"
 struct Params {
     n: u32,
     table_mask: u32,   // table_size = table_mask + 1 (power of two)
@@ -113,7 +112,15 @@ struct Params {
 @group(0) @binding(6) var<storage, read_write> nbr_count: array<u32>;   // n
 @group(0) @binding(7) var<storage, read>       starts: array<u32>;      // n + 1 (host scan)
 @group(0) @binding(8) var<storage, read_write> flat: array<u32>;        // total candidates
+"#;
 
+/// WGSL helpers shared with the G2 density shader (`crate::sph_density`): position
+/// fetch, cell binning, cell hash, and the single-invocation counting-sort build.
+/// Both shaders declare a `Params` whose first three fields are `{n, table_mask,
+/// cell}` and vars named `pos`/`slot_count`/`cursor`/`cell_start`/`sorted_idx`, so
+/// this text compiles unchanged in either — keeping the hash/bin math one source of
+/// truth (a divergence would silently corrupt neighbor sets).
+pub(crate) const GRID_HELPERS_WGSL: &str = r#"
 fn pos_of(i: u32) -> vec3<f32> {
     return vec3<f32>(pos[3u * i], pos[3u * i + 1u], pos[3u * i + 2u]);
 }
@@ -161,7 +168,11 @@ fn build() {
         sorted_idx[p] = i;
     }
 }
+"#;
 
+/// The G1 query kernels: the gather traversal + the per-target count/fill passes.
+/// Concatenated after [`GRID_DECLS`] + [`GRID_HELPERS_WGSL`].
+const GRID_QUERY: &str = r#"
 // Walk the box of cells covering pos[i] ± radius; for each candidate j, accept it
 // only under its OWN cell (dedup: a j reached via two colliding cells is counted
 // once, and a far flier colliding into a near slot is rejected here) and only if the
@@ -287,9 +298,10 @@ impl GpuNeighborGrid {
             .await
             .map_err(|e| GpuError::Device(e.to_string()))?;
 
+        let src = format!("{GRID_DECLS}{GRID_HELPERS_WGSL}{GRID_QUERY}");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gpu-sph-grid-shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
         });
 
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {

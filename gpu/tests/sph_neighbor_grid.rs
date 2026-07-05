@@ -142,7 +142,8 @@ fn assert_filtered_pairs_match(pos: &[DVec3], h: &[f64], cell: f64) {
     let cpu = cpu_filtered_pairs(pos, h);
     let gpu = gpu_filtered_pairs(&mut grid(), pos, h, cell);
     assert_eq!(
-        gpu, cpu,
+        gpu,
+        cpu,
         "GPU filtered pair set ({} pairs) must equal HashGrid's ({} pairs)",
         gpu.len(),
         cpu.len()
@@ -165,15 +166,20 @@ fn gpu_grid_matches_hashgrid_uniform() {
 }
 
 /// Centrally-concentrated cloud with a wide synthetic `h` range, queried with a
-/// SMALL cell (`cell = SUPPORT·h_min ≪ SUPPORT·h_max = radius`) — this is the
-/// `ceil(r/cell) ≫ 1` neighborhood walk the wide-`h` gas disk forces, and the case
-/// a uniform-cloud test cannot reach. The advisor's flagged stressor.
+/// SMALL cell (`cell = SUPPORT·h_min ≪ SUPPORT·h_max = radius`) — the wide-`h` gas
+/// disk regime a uniform-cloud test cannot reach. `GpuNeighborGrid` internally CAPS
+/// the bucket edge at `max(cell, radius/4)`, so the raw `cell ≪ radius` here does NOT
+/// literally drive a `ceil(r/cell) ≈ 250`-cell walk — that workload is infeasible on
+/// a uniform grid and is exactly what the LBVH endpoint exists for (D4). The cap is
+/// correctness-neutral (a coarser bucket only enlarges buckets), so this still
+/// exercises the genuine multi-cell walk + hash-collision + cell-match-dedup path
+/// (≤ 9³ cells) against the widest-`h` cloud — the assertion is unchanged.
 #[test]
 fn gpu_grid_matches_hashgrid_wide_h_small_cell() {
     for seed in [2u64, 13, 99] {
         let (pos, h) = concentrated_cloud(seed, 2000, 5.0);
         let h_min = h.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let cell = SUPPORT * h_min; // ≪ SUPPORT·h_max ⇒ many-cell walk
+        let cell = SUPPORT * h_min; // ≪ SUPPORT·h_max (grid caps the walk; see D4)
         assert_filtered_pairs_match(&pos, &h, cell);
     }
 }
@@ -226,7 +232,10 @@ fn gpu_grid_query_is_deterministic() {
         let mut bi = b.neighbours(i).to_vec();
         ai.sort_unstable();
         bi.sort_unstable();
-        assert_eq!(ai, bi, "query for particle {i} must be run-to-run identical");
+        assert_eq!(
+            ai, bi,
+            "query for particle {i} must be run-to-run identical"
+        );
     }
 }
 
@@ -293,8 +302,14 @@ fn throwaway_forka_raw_candidates_match_hashgrid() {
     let g_cpu = HashGrid::build(&pos, radius);
     let ngb = grid().query_all(&pos, cell, radius);
     for i in 0..pos.len() {
-        let cpu: HashSet<usize> = g_cpu.neighbours_within(&pos, pos[i], radius).into_iter().collect();
+        let cpu: HashSet<usize> = g_cpu
+            .neighbours_within(&pos, pos[i], radius)
+            .into_iter()
+            .collect();
         let gpu: HashSet<usize> = ngb.neighbours(i).iter().map(|&j| j as usize).collect();
-        assert_eq!(gpu, cpu, "raw candidate set for particle {i} must match (fork(a) sanity)");
+        assert_eq!(
+            gpu, cpu,
+            "raw candidate set for particle {i} must match (fork(a) sanity)"
+        );
     }
 }

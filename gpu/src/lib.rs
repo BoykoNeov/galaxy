@@ -50,6 +50,7 @@ pub mod lbvh_flatten;
 pub mod lbvh_morton;
 pub mod lbvh_sort;
 pub mod lbvh_tree;
+pub mod sph_density;
 pub mod sph_grid;
 
 pub use gpu_direct_sum::GpuDirectSum;
@@ -61,6 +62,7 @@ pub use lbvh_flatten::{GpuLbvhFlat, GpuLbvhFlattener};
 pub use lbvh_morton::{GpuMorton, GpuMortonBuilder};
 pub use lbvh_sort::{GpuSort, GpuSorter};
 pub use lbvh_tree::{GpuLbvhBuilder, GpuLbvhTree};
+pub use sph_density::{DensityField, GpuDensity};
 pub use sph_grid::{GpuNeighborGrid, GpuNeighbours};
 
 /// Errors bringing up or driving the GPU compute context. Returned rather than

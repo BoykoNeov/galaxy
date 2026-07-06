@@ -86,13 +86,21 @@ eps = 0.05
 splat_size = 0.12
 # Screen-space PSF cap (pinprick-starfield): the breathing orbit-tilt zoom makes
 # the fixed WORLD-space splats balloon to ~12 px blobs in the compact early shots
-# (reads as defocus) and shrink to sharp ~3 px points once the tails widen the
-# framing. The cap is the point-source camera model — stars stay point-like at
-# any zoom, flux-conserving (clamping down concentrates emission; bright cores
-# saturate like a real astrophoto). HALF-extent in pixels, resolution-LITERAL:
-# tuned on QUICK 360p; a FULL 1080p render wants ~3x this value for the same
-# relative look. Remove the knob to restore the uncapped M6g behavior bit-for-bit.
-max_splat_px = 3.0
+# (reads as defocus) and shrink to sharp points once the tails widen the framing.
+# The cap is the point-source camera model — stars stay point-like at any zoom,
+# flux-conserving (clamping down concentrates emission; bright cores saturate like
+# a real astrophoto). It ALSO helps the approach WHITE-BLOB: on approach the tight
+# framing packs disk stars to ~inter-star spacing near the cap, so their splats
+# overlap and additively saturate into a washed sheet; a tighter cap separates them
+# so more individual stars read (single-variable A/B at cap 3.0/2.0/1.5 —
+# M:\claud_projects\temp\splatcap_blob_ab — total frame flux identical, peak pixel
+# rising 3.67->5.11->6.78: flux is REDISTRIBUTED not reduced, so the core stays
+# bright but shrinks — a PARTIAL fix, not a cure; fully taming core saturation is
+# the deferred luminance/local-tonemap job). 2.0 shipped (best of the A/B: 3.0
+# washed the approach cores; 1.5 edged into a clinical pinprick field). HALF-extent
+# in pixels, resolution-LITERAL: tuned on QUICK 360p; a FULL 1080p render wants ~3x
+# this value. Remove the knob to restore the uncapped M6g behavior bit-for-bit.
+max_splat_px = 2.0
 frame_percentile = 0.92 # tighter than `disk` — keep the frame on the gassy cores
 # progenitor palette: halo1 (dim warm), disk1 (warm), halo2 (dim cool), disk2 (cool).
 # Gas is NOT a splat (it renders volumetrically) — its color lives in [look.gas].

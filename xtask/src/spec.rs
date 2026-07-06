@@ -296,6 +296,15 @@ pub struct GasLookSpec {
     /// with a positive `scattering` zeroes the term and is rejected loud (set
     /// `scattering = 0` instead). Every component must be finite and ≥ 0.
     pub scatter_tint: Option<[f32; 3]>,
+    /// Fixed scatter softening length ε (galaxy-render controls): replaces each
+    /// light cluster's own cell radius as the single-scatter `1/d²` softening,
+    /// so the scattered brightness is invariant to the octree `REFINE_TOL`
+    /// (the hidden clustering→brightness coupling is removed). The renderer
+    /// floors it at the gas voxel scale. Omitted = the v1 per-cluster radius
+    /// softening (bit-identical to the shipped path). Requires a positive
+    /// `scattering` — present without one it is a dead knob and is rejected
+    /// loud; must be finite and `> 0`.
+    pub scatter_softening: Option<f32>,
 }
 
 /// One progenitor's initial-radius color ramp.
@@ -884,6 +893,9 @@ pub struct GasLookValues {
     /// Chromatic scattering albedo; `[1.0; 3]` = neutral. Meaningful only with
     /// `scattering > 0`.
     pub scatter_tint: [f32; 3],
+    /// Fixed scatter softening ε; `None` = v1 per-cluster radius softening
+    /// (bit-compat). Meaningful only with `scattering > 0`.
+    pub scatter_softening: Option<f32>,
 }
 
 impl Default for GasLookValues {
@@ -896,6 +908,7 @@ impl Default for GasLookValues {
             anisotropy: 0.0,
             shadows: false,
             scatter_tint: [1.0; 3],
+            scatter_softening: None,
         }
     }
 }
@@ -1103,6 +1116,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                     anisotropy: g.anisotropy.unwrap_or(0.0),
                     shadows: g.shadows.unwrap_or(false),
                     scatter_tint: g.scatter_tint.unwrap_or([1.0; 3]),
+                    scatter_softening: None, // STUB (red): threaded in the green pass
                 })
                 .unwrap_or_default()
         }),
@@ -1854,5 +1868,63 @@ mod tests {
         let minor = preset("minor").unwrap();
         let bad = minor.replace("separation = 6.5", "separation = 7.5");
         assert!(parse_scenario_toml(&bad).is_err());
+    }
+
+    // --- [look.gas] scatter_softening (galaxy-render controls pass) -------------
+
+    /// A declared `scatter_softening` threads parse → build into the resolved gas
+    /// look as `Some(ε)`; absent, it resolves to `None` (the v1 per-cluster radius
+    /// softening the shipped gasrich uses).
+    #[test]
+    fn look_gas_scatter_softening_threads_to_values() {
+        let gasrich = preset("gasrich").unwrap();
+        // Absent by default: the shipped gasrich keeps the v1 radius softening.
+        let s0 = build_scenario(&parse_scenario_toml(gasrich).unwrap(), true);
+        assert_eq!(
+            s0.gas_look.unwrap().scatter_softening,
+            None,
+            "absent scatter_softening must resolve to None (v1 radius softening)"
+        );
+        // Declared: threads through as Some(ε).
+        let with = gasrich.replace("shadows = true", "shadows = true\nscatter_softening = 0.08");
+        let s1 = build_scenario(&parse_scenario_toml(&with).unwrap(), true);
+        assert_eq!(
+            s1.gas_look.unwrap().scatter_softening,
+            Some(0.08),
+            "declared scatter_softening must thread through to the gas look"
+        );
+    }
+
+    /// `scatter_softening` without a positive `scattering` shapes nothing — the
+    /// same dead-knob discipline as anisotropy / shadows / scatter_tint.
+    #[test]
+    fn scatter_softening_without_scattering_is_a_dead_knob() {
+        let gasrich = preset("gasrich").unwrap();
+        // Isolate softening as the ONLY scatter knob over a dead (0) scattering,
+        // so the rejection is attributable to softening, not aniso/shadows.
+        let bad = gasrich
+            .replace("scattering = 800.0", "scattering = 0.0")
+            .replace("anisotropy = 0.5", "")
+            .replace("shadows = true", "scatter_softening = 0.08");
+        assert!(
+            parse_scenario_toml(&bad).is_err(),
+            "scatter_softening without a positive scattering must be rejected"
+        );
+    }
+
+    /// `scatter_softening` is a length: finite and strictly positive.
+    #[test]
+    fn scatter_softening_must_be_positive_finite() {
+        let gasrich = preset("gasrich").unwrap();
+        for bad_val in ["-0.1", "0.0", "nan"] {
+            let bad = gasrich.replace(
+                "shadows = true",
+                &format!("shadows = true\nscatter_softening = {bad_val}"),
+            );
+            assert!(
+                parse_scenario_toml(&bad).is_err(),
+                "scatter_softening = {bad_val} must be rejected"
+            );
+        }
     }
 }

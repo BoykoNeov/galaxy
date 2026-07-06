@@ -484,6 +484,54 @@ mod tests {
     }
 
     #[test]
+    fn regrade_parses_levels_flags() {
+        // Photoshop-style levels for contrast (galaxy-render controls): the
+        // black/white window + midtone gamma reach GradeConfig from the CLI.
+        let r = parse_regrade_args(&args(&[
+            "e",
+            "p",
+            "--black-point",
+            "0.05",
+            "--white-point",
+            "0.9",
+            "--gamma",
+            "1.4",
+        ]))
+        .unwrap();
+        assert_eq!(r.grade.black_point, 0.05);
+        assert_eq!(r.grade.white_point, 0.9);
+        assert_eq!(r.grade.gamma, 1.4);
+    }
+
+    #[test]
+    fn regrade_levels_default_to_neutral() {
+        // Omitted levels flags leave the neutral (0, 1, 1) grade — the shipped
+        // regrade stays bit-identical.
+        let r = parse_regrade_args(&args(&["e", "p"])).unwrap();
+        assert_eq!(r.grade.black_point, 0.0);
+        assert_eq!(r.grade.white_point, 1.0);
+        assert_eq!(r.grade.gamma, 1.0);
+    }
+
+    #[test]
+    fn regrade_rejects_invalid_levels() {
+        for bad in [
+            // Inverted window (black ≥ white).
+            &["e", "p", "--black-point", "0.8", "--white-point", "0.2"][..],
+            // Non-positive gamma.
+            &["e", "p", "--gamma", "0"][..],
+            &["e", "p", "--gamma", "-1"][..],
+            // Non-finite level.
+            &["e", "p", "--black-point", "nan"][..],
+        ] {
+            assert!(
+                parse_regrade_args(&args(bad)).is_err(),
+                "should reject invalid levels: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
     fn regrade_parses_full_asinh_invocation() {
         let r = parse_regrade_args(&args(&[
             "e",
@@ -792,7 +840,7 @@ mod tests {
         for (bad, why) in [
             (&["only_one"][..], "missing png_dir"),
             (&["a", "b", "c"][..], "extra positional"),
-            (&["e", "p", "--gamma", "2.2"][..], "unknown flag"),
+            (&["e", "p", "--frobnicate", "2.2"][..], "unknown flag"),
             (&["e", "p", "--exposure"][..], "flag missing its value"),
             (&["e", "p", "--exposure", "abc"][..], "non-numeric exposure"),
             (&["e", "p", "--exposure", "-1"][..], "non-positive exposure"),

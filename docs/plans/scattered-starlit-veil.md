@@ -97,10 +97,20 @@ xtask (`tests/scenario_gas.rs`):
 
 - **S1 [red]**: gates above + API stubs (`todo!()` bodies), mechanical
   `scatter: None` / `lights: &[]` literal updates so the workspace builds.
+  DONE (a805100).
 - **S1 [green]**: CPU reference + WGSL mirror + renderer plumbing.
+  DONE (a31a340) — all 13 gates green.
 - **S2**: xtask knob plumbing + movie path (`cluster_lights` per emitted
   frame), gasrich preset tuned by eyeball (QUICK A/B render, scatter
-  on/off), retained demo under `M:\claud_projects\temp`.
+  on/off), retained demo under `M:\claud_projects\temp`. DONE — knob
+  plumbing landed with S1-green; tuning bracket σ ∈ {2, 200, 800} picked
+  **800** (σ=2 peaks at 1/255 post-tonemap — flux ~ L/(4π d²) with d² in
+  the hundreds needs O(10²–10³) strengths; 200 reads timid; 800 gives a
+  per-disk ambient glow + a lit gas bridge at approach, black background
+  intact). Off-run frames verified PIXEL-IDENTICAL to the retained m7f
+  demo (the off path restores plain M7e end-to-end, not just in unit
+  gates). Retained A/B: `M:\claud_projects\temp\scatter_ab`
+  (off / on=σ2 / s200 / s800, each with movie.mp4).
 - **S3**: docs (DESIGN.md note, roadmap tick), memory, quality gate, push.
 
 ## Deferrals (named)

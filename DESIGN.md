@@ -44,6 +44,14 @@ cosmological expansion (10^8 particles, comoving integration).
   operator, which is **ordered / NOT commutative**. A different compositing
   model from stars (emission-only vs emission+absorption). Do NOT reuse the
   splat path for gas.
+- Gas single-scatter starlight (optional, plan `scattered-starlit-veil`): the
+  march may add `σ_s·ρ·Σ_k p_HG(cosθ_k)·L_k/(4π(d²+r²))` from the stellar
+  splats clustered into ≤ 8³ emission-weighted point lights. UNSHADOWED v1
+  (light→sample shadow volumes are the named deferral); the phase angle is the
+  only view-dependent factor and evaluates at render time (D9-safe); knobs
+  (`[look.gas] scattering`/`anisotropy`) live in the look, `scattering = 0` is
+  gated bit-identical to the pre-scatter march — the M7e-sufficiency judgement
+  stays a one-knob decision.
 
 ## Architecture: 3-stage offline pipeline
 

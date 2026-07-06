@@ -113,7 +113,10 @@ opacity = 100.0
 # backlit gas. DISABLE by setting `scattering = 0` (and removing `anisotropy`) —
 # that path is gated bit-identical to the pre-scatter renderer. Like κ/j these are
 # density-regime knobs, tuned by eyeball on the QUICK render at re-render cost.
-scattering = 2.0
+# Scale note: the flux ~ L/(4π d²) with d in sim units (tens), so useful strengths
+# are O(10²–10³) — the QUICK A/B bracket (2 / 200 / 800) picked 800: per-disk
+# ambient glow + a lit gas bridge at approach, background stays black (no fog).
+scattering = 800.0
 anisotropy = 0.5
 
 [[look.ramps]]

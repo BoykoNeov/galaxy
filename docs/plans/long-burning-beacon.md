@@ -66,10 +66,14 @@ steps) for a complete merger sim.
 
 Ordered by value-per-effort; all compatible with the landed M7 contracts.
 
-1. **Starlight scattering on gas** — single-scatter illumination of the gas
-   volume from the stellar distribution. The real look upgrade beyond
-   emission+absorption. Judge the plain M7e look *first*; it may already
-   read well.
+1. **Starlight scattering on gas** — DONE (plan `scattered-starlit-veil`):
+   unshadowed single scatter from ≤ 8³ clustered stellar point lights,
+   HG phase, `[look.gas] scattering`/`anisotropy` knobs, gasrich ships it
+   ON (σ=800, g=0.5 from the QUICK A/B bracket).
+   `scattering = 0` is gated bit-identical to the pre-scatter render,
+   so the "judge the plain M7e look" decision stays open as a one-knob
+   toggle. Named deferrals: per-light shadow volumes, octree clustering,
+   scatter tint.
 2. **Camera / cinematics** — more rigs, orbit paths, presets. Orthogonal to
    everything; cheap filler between larger sessions.
 3. **HDR video encode** — long-standing deferral; EXR chain is ready for it.

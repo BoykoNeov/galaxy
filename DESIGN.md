@@ -54,11 +54,19 @@ cosmological expansion (10^8 particles, comoving integration).
   splat path for gas.
 - Gas single-scatter starlight (optional, plan `scattered-starlit-veil`): the
   march may add `σ_s·ρ·Σ_k p_HG(cosθ_k)·L_k/(4π(d²+r²))` from the stellar
-  splats clustered into ≤ 8³ emission-weighted point lights. The phase angle is
-  the only view-dependent factor and evaluates at render time (D9-safe); knobs
-  (`[look.gas] scattering`/`anisotropy`) live in the look, `scattering = 0` is
-  gated bit-identical to the pre-scatter march — the M7e-sufficiency judgement
-  stays a one-knob decision.
+  splats clustered into emission-weighted point lights (adaptive octree cut,
+  plan `tinted-octree-lanterns`). The phase angle is the only view-dependent
+  factor and evaluates at render time (D9-safe); knobs (`[look.gas]
+  scattering`/`anisotropy`) live in the look, `scattering = 0` is gated
+  bit-identical to the pre-scatter march — the M7e-sufficiency judgement stays
+  a one-knob decision.
+- Scatter softening decoupling (optional, plan `radiant-*` "more controls"):
+  the `1/d²` softening length `r` defaults to each cluster's own cell radius —
+  which makes the scattered core brightness silently track the octree
+  refinement tolerance (finer cut ⇒ smaller radii ⇒ brighter cores). Setting
+  `[look.gas] scatter_softening = ε` replaces it with one fixed ε (floored at
+  the gas voxel scale), so the integrated scattered energy is invariant to the
+  tolerance. Omitted = the v1 per-cluster radius softening, bit-identical.
 - Per-light shadow volumes (optional v2, plan `umbral-lantern-lattice`): with
   `[look.gas] shadows = true` each light's incident term is multiplied by a
   baked light→sample transmittance `T_k` — one 32³ lattice per light over the
@@ -202,8 +210,11 @@ late-time positions — N-body is chaotic).
   The camera is **stable across the run**: centered on the origin (zero-COM
   barycenter) and sized to a robust percentile radius (`framing_radius`), because the
   naive union AABB framed the few escaping particles and shrank the galaxies to dots.
-  Per-frame EXR is retained so the sequence regrades (exposure/tonemap) without
-  re-simulating.
+  Per-frame EXR is retained so the sequence regrades (exposure/tonemap, plus
+  Photoshop-style **levels** — `--black-point`/`--white-point`/`--gamma`, applied
+  after the tone curve and before the sRGB OETF for contrast/star separation)
+  without re-simulating. Neutral levels `(0, 1, 1)` are bit-identical to the
+  pre-levels grade.
   - **Accuracy of the "tidal-tail" goal:** classic thin Toomre tails come from
     *rotating, dynamically cold disks* (coherent disk angular momentum, resonantly
     amplified in a prograde passage). The current IC samples two **isotropic,

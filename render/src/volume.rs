@@ -765,10 +765,15 @@ pub fn march_gas(
                 inc[1] += l.rgb[1] * f;
                 inc[2] += l.rgb[2] * f;
             }
+            // Chromatic scattering albedo (tinted-octree-lanterns): a per-channel
+            // multiplier on the scattered radiance, constant across lights so
+            // applied once here OUTSIDE the per-light sum. The `* tint` is LAST
+            // so a neutral `[1.0; 3]` reduces to `es * inc[ch]` bit-for-bit
+            // (×1.0 is the exact identity; left-associative parse).
             let es = t * sl.strength * rho * ds;
-            c[0] += es * inc[0];
-            c[1] += es * inc[1];
-            c[2] += es * inc[2];
+            c[0] += es * inc[0] * sl.tint[0];
+            c[1] += es * inc[1] * sl.tint[1];
+            c[2] += es * inc[2] * sl.tint[2];
         }
         t *= (-(gas.look.opacity * rho * ds)).exp();
         if t < EXIT_TRANSMITTANCE {

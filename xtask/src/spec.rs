@@ -700,6 +700,29 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                      knob (add scattering > 0, or remove shadows)"
                     .into());
             }
+            // Chromatic scattering albedo (tinted-octree-lanterns): a physical
+            // albedo — every component finite and ≥ 0. Present without a live
+            // scatter term it shapes nothing (the dead-knob discipline); an
+            // all-zero tint zeroes the term, which is `scattering = 0` said
+            // louder — reject rather than silently blanking the scatter.
+            if let Some(tint) = gl.scatter_tint {
+                if !tint.iter().all(|c| c.is_finite() && *c >= 0.0) {
+                    return Err(format!(
+                        "look.gas scatter_tint components must be finite and \
+                         non-negative, got {tint:?}"
+                    ));
+                }
+                if !gl.scattering.is_some_and(|sc| sc > 0.0) {
+                    return Err("look.gas scatter_tint without a positive scattering is a \
+                         dead knob (add scattering > 0, or remove scatter_tint)"
+                        .into());
+                }
+                if tint.iter().all(|c| *c == 0.0) {
+                    return Err("look.gas scatter_tint is all-zero, which zeroes the \
+                         scattered term — set scattering = 0 instead"
+                        .into());
+                }
+            }
         }
         (None, _) => {}
     }

@@ -287,6 +287,9 @@ struct GasUniforms {
     // z = light count (0 disables — bit-compat off path), w = shadow-volume
     // flag (1 = multiply each light by its baked transmittance, 0 = v1).
     scat: vec4<f32>,
+    // Chromatic scattering albedo (tinted-octree-lanterns): xyz = per-channel
+    // multiplier on the scattered radiance, w unused. [1,1,1] is neutral.
+    tint: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> g: GasUniforms;
 @group(1) @binding(1) var rho0: texture_3d<f32>;
@@ -498,7 +501,7 @@ fn fs_gas(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
                 }
                 inc += lights[k].rgb * f;
             }
-            c += (t * g.scat.x * rho * ds) * inc;
+            c += (t * g.scat.x * rho * ds) * inc * g.tint.xyz;
         }
         t = t * exp(-(g.kms.x * rho * ds));
         if (t < {exit}) {
@@ -654,6 +657,9 @@ struct GasUniforms {
     /// Single-scatter starlight: x = strength σ_s, y = HG anisotropy g,
     /// z = light count (0 = off, the bit-compat path), w = shadow-volume flag.
     scat: [f32; 4],
+    /// Chromatic scattering albedo (tinted-octree-lanterns): xyz = per-channel
+    /// multiplier on the scattered radiance, w unused. `[1, 1, 1, _]` neutral.
+    tint: [f32; 4],
 }
 
 /// One point light as uploaded to the GPU, mirroring the WGSL `PointLight`
@@ -1210,10 +1216,10 @@ impl Renderer {
                 // Scatter lights: uploaded only when the look scatters (a
                 // positive strength). Empty/off binds one zeroed dummy light
                 // with count 0 — the shader's guard never reads it.
-                let (strength, anisotropy, want_shadows) = gf
-                    .look
-                    .scatter
-                    .map_or((0.0, 0.0, false), |s| (s.strength, s.anisotropy, s.shadows));
+                let (strength, anisotropy, want_shadows, tint) =
+                    gf.look.scatter.map_or((0.0, 0.0, false, [1.0f32; 3]), |s| {
+                        (s.strength, s.anisotropy, s.shadows, s.tint)
+                    });
                 let gpu_lights: Vec<GpuLight> = if strength > 0.0 {
                     gf.lights
                         .iter()
@@ -1289,6 +1295,7 @@ impl Renderer {
                             n_lights as f32,
                             if shadows_on { 1.0 } else { 0.0 },
                         ],
+                        tint: [tint[0], tint[1], tint[2], 0.0],
                     }),
                 );
                 let v0 = self.upload_grid(gf.grid0, "gas-rho0");

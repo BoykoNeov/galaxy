@@ -547,6 +547,18 @@ pub struct ScatterLook {
     /// exact identity, CPU and WGSL). Applied once per step OUTSIDE the
     /// per-light sum (it is constant across lights).
     pub tint: [f32; 3],
+    /// Fixed scatter softening ε (galaxy-render controls pass): decouples the
+    /// single-scatter 1/d² softening length from the light-cluster cell size.
+    /// `None` = the v1 per-cluster radius softening (`d² + r_k²`), bit-identical
+    /// to the pre-ε march and to the shipped path. `Some(ε)` replaces each
+    /// `r_k` with one physical ε — floored at the gas voxel scale (sub-voxel ε
+    /// is unresolvable spike noise and the worst temporal-flicker case) — so the
+    /// INTEGRATED scattered energy is invariant to the octree [`REFINE_TOL`]
+    /// (refinement stops being a hidden brightness knob). `strength` and ε then
+    /// set the glow level/spread. Mirrored operation-for-operation by the WGSL
+    /// march via a uniform slot; the floor is applied CPU-side before upload so
+    /// both paths see the same ε.
+    pub softening: Option<f32>,
 }
 
 /// Gas look uniforms (plan D8: the grid carries ρ only; everything visual lives

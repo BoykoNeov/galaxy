@@ -52,6 +52,17 @@ pub struct GradeConfig {
     /// tone curve (`None` ⇒ off). An image-space op — `grade_file` runs it; the
     /// per-pixel [`tonemap`] cannot and does not.
     pub bloom: Option<BloomConfig>,
+    /// Levels black point: the display-referred tone-curve output that maps to
+    /// true black. Lifting it crushes background haze and separates faint stars
+    /// from a scatter glow (contrast). `0.0` is neutral. See [`apply_levels`].
+    pub black_point: f32,
+    /// Levels white point: the tone-curve output that maps to display white
+    /// (values above clip). `1.0` is neutral.
+    pub white_point: f32,
+    /// Levels midtone gamma (the Photoshop midpoint slider): `out = n^(1/gamma)`
+    /// on the black/white-normalized signal. `> 1` brightens mids, `< 1` crushes
+    /// them (haze suppression). `1.0` is neutral. Must be `> 0`.
+    pub gamma: f32,
 }
 
 impl Default for GradeConfig {
@@ -60,7 +71,19 @@ impl Default for GradeConfig {
             exposure: 1.0,
             tonemap: ToneMap::AcesApprox,
             bloom: None,
+            black_point: 0.0,
+            white_point: 1.0,
+            gamma: 1.0,
         }
+    }
+}
+
+impl GradeConfig {
+    /// Validate the levels window and gamma. `black < white` (finite) and
+    /// `gamma > 0` (finite); the neutral defaults `(0, 1, 1)` pass. Called by
+    /// [`grade_file`] before a frame is touched.
+    pub fn validate(&self) -> Result<(), GradeError> {
+        todo!("apply_levels/levels validation (galaxy-render controls pass)")
     }
 }
 
@@ -76,6 +99,9 @@ pub enum GradeError {
     /// Underlying I/O failure.
     #[error("grade I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// A malformed grading configuration (bad levels window or gamma).
+    #[error("invalid grade config: {0}")]
+    Config(String),
 }
 
 /// Apply the tone curve `op` to a linear (already exposure-scaled) RGB triple,
@@ -118,8 +144,18 @@ pub fn linear_to_srgb(x: f32) -> f32 {
     }
 }
 
+/// The levels curve on a display-referred value `x ∈ [0, 1]`:
+/// `clamp((x − black)/(white − black), 0, 1) ^ (1/gamma)`. The neutral triple
+/// `(0, 1, 1)` is the EXACT identity (special-cased so no `powf(1.0)` bit drift
+/// leaks into the shipped neutral grade). Assumes a validated config
+/// (`black < white`, `gamma > 0` — see [`GradeConfig::validate`]).
+pub fn apply_levels(x: f32, black: f32, white: f32, gamma: f32) -> f32 {
+    let _ = (x, black, white, gamma);
+    todo!("levels curve (galaxy-render controls pass)")
+}
+
 /// Grade one linear-HDR pixel to a 16-bit sRGB triple: exposure → tone curve →
-/// sRGB encode → quantize to `[0, 65535]`.
+/// levels → sRGB encode → quantize to `[0, 65535]`.
 pub fn tonemap(linear: [f32; 3], cfg: &GradeConfig) -> [u16; 3] {
     let exposed = linear.map(|c| c * cfg.exposure);
     let toned = tone_curve(exposed, cfg.tonemap);

@@ -173,6 +173,7 @@ fn exposure_scales_before_the_curve() {
             exposure: 2.0,
             tonemap: ToneMap::AcesApprox,
             bloom: None,
+            ..GradeConfig::default()
         },
     );
     let b = tonemap(
@@ -181,6 +182,7 @@ fn exposure_scales_before_the_curve() {
             exposure: 1.0,
             tonemap: ToneMap::AcesApprox,
             bloom: None,
+            ..GradeConfig::default()
         },
     );
     assert_eq!(a, b);

@@ -210,6 +210,7 @@ fn scatter_far_field_slab_analytic() {
                     anisotropy: aniso as f32,
                     shadows: false,
                     tint: [1.0; 3],
+                    softening: None,
                 }),
             },
         };
@@ -263,6 +264,7 @@ fn scatter_inverse_square() {
                     anisotropy: 0.0,
                     shadows: false,
                     tint: [1.0; 3],
+                    softening: None,
                 }),
             },
         };
@@ -328,6 +330,7 @@ fn scatter_off_is_bit_identical() {
                 anisotropy: 0.5,
                 shadows: false,
                 tint: [1.0; 3],
+                softening: None,
             }),
             std::slice::from_ref(&light),
         ),
@@ -341,6 +344,7 @@ fn scatter_off_is_bit_identical() {
                 anisotropy: 0.5,
                 shadows: false,
                 tint: [1.0; 3],
+                softening: None,
             }),
             &[],
         ),
@@ -383,6 +387,7 @@ fn scatter_strength_linear_exact() {
                         anisotropy: 0.3,
                         shadows: false,
                         tint: [1.0; 3],
+                        softening: None,
                     }),
                 },
             },
@@ -436,6 +441,7 @@ fn scatter_forward_anisotropy_backlights() {
                     anisotropy: aniso,
                     shadows: false,
                     tint: [1.0; 3],
+                    softening: None,
                 }),
             },
         };
@@ -517,6 +523,7 @@ fn gpu_scatter_matches_cpu_reference_ortho() {
                 anisotropy: 0.4,
                 shadows: false,
                 tint: [1.0; 3],
+                softening: None,
             }),
         },
     };
@@ -599,6 +606,7 @@ fn gpu_scatter_matches_cpu_reference_perspective() {
                 anisotropy: -0.5,
                 shadows: false,
                 tint: [1.0; 3],
+                softening: None,
             }),
         },
     };
@@ -690,6 +698,7 @@ fn gpu_scatter_off_bit_identical() {
                 anisotropy: 0.7,
                 shadows: false,
                 tint: [1.0; 3],
+                softening: None,
             }),
             &lights,
         ),
@@ -703,6 +712,7 @@ fn gpu_scatter_off_bit_identical() {
                 anisotropy: 0.7,
                 shadows: false,
                 tint: [1.0; 3],
+                softening: None,
             }),
             &[],
         ),
@@ -743,6 +753,7 @@ fn gpu_scatter_strength_linear_exact() {
                     anisotropy: 0.3,
                     shadows: false,
                     tint: [1.0; 3],
+                    softening: None,
                 }),
             },
         };
@@ -775,6 +786,7 @@ fn gpu_scatter_strength_linear_exact() {
                 anisotropy: 0.3,
                 shadows: false,
                 tint: [1.0; 3],
+                softening: None,
             }),
         },
     };
@@ -835,6 +847,7 @@ fn scatter_tint_neutral_matches_analytic_oracle() {
                     anisotropy: aniso as f32,
                     shadows: false,
                     tint: [1.0; 3], // neutral: must reproduce the oracle exactly
+                    softening: None,
                 }),
             },
         };
@@ -897,6 +910,7 @@ fn scatter_tint_per_channel_linear_exact() {
                         anisotropy: 0.3,
                         shadows: false,
                         tint,
+                        softening: None,
                     }),
                 },
             },
@@ -960,6 +974,7 @@ fn scatter_tint_zero_equals_scatter_none() {
         anisotropy: 0.5,
         shadows: false,
         tint: [0.0, 0.0, 0.0],
+        softening: None,
     }));
     assert_eq!(
         zero_tint, base,
@@ -1043,6 +1058,7 @@ fn gpu_scatter_tint_matches_cpu_reference() {
                 anisotropy: 0.4,
                 shadows: true,
                 tint,
+                softening: None,
             }),
         };
         let cfg = RenderConfig {
@@ -1172,6 +1188,7 @@ fn gpu_scatter_tint_off_paths_intact() {
                 anisotropy: 0.4,
                 shadows: false,
                 tint: [1.0; 3],
+                softening: None,
             }),
         },
     };

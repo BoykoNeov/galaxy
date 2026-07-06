@@ -291,6 +291,7 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
             exposure,
             tonemap,
             bloom,
+            ..GradeConfig::default()
         },
     })
 }
@@ -477,6 +478,7 @@ mod tests {
                 exposure: 1.0,
                 tonemap: ToneMap::AcesApprox,
                 bloom: None,
+                ..GradeConfig::default()
             }
         );
     }
@@ -500,6 +502,7 @@ mod tests {
                 exposure: 2.5,
                 tonemap: ToneMap::Asinh { beta: 0.05 },
                 bloom: None,
+                ..GradeConfig::default()
             }
         );
     }

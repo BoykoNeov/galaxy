@@ -103,6 +103,7 @@ fn grade_file_applies_bloom_before_the_tone_curve() {
         exposure: 2.0,
         tonemap: ToneMap::Reinhard,
         bloom: Some(bloom_cfg),
+        ..GradeConfig::default()
     };
     grade_file(&exr_path, &png_path, &cfg).unwrap();
 

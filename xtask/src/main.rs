@@ -483,6 +483,7 @@ fn gas_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             exposure: 1.0,
             tonemap: ToneMap::AcesApprox,
             bloom: None,
+            ..GradeConfig::default()
         },
     )?;
     println!("contact sheet (∫ρ dz | ∫ρ dy | ∫ρ dx) → {}", png.display());
@@ -711,6 +712,7 @@ fn volume_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             levels: DEFAULT_BLOOM_LEVELS,
             radius: DEFAULT_BLOOM_RADIUS,
         }),
+        ..GradeConfig::default()
     };
     let gas_color = [0.55_f32, 0.62, 0.95];
     let emit = |name: &str, gas: Option<&GasFrame>| -> Result<(), Box<dyn std::error::Error>> {
@@ -1036,6 +1038,7 @@ fn run_movie(
                 anisotropy: gl.anisotropy,
                 shadows: gl.shadows,
                 tint: gl.scatter_tint,
+                softening: None, // [look.gas] scatter_softening wired in the green pass
             }),
         },
         None => galaxy_render::GasLook::default(),
@@ -1140,6 +1143,7 @@ fn run_movie(
             levels: DEFAULT_BLOOM_LEVELS,
             radius: DEFAULT_BLOOM_RADIUS,
         }),
+        ..GradeConfig::default()
     };
     let renderer = Renderer::new()?;
 

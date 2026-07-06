@@ -317,7 +317,31 @@ Sub-milestones, roughly in dependency order. Each lands red→green with its own
     argument (option b): resident `gas_acc` ≈ CPU hydro (accuracy gate) ≈ analytic Riemann
     (the CPU shock tube), WGSL byte-identical — NOT re-run resident (no gravity-off mode).
     **⚠ Gates only exercise the frozen-grid SAFE direction — see the G6 precondition below.**
-  - **G5c — CFL no-readback min + block-adaptive dt expose** (compute only, no dt policy).
+  - **G5c — CFL no-readback min + block-adaptive dt expose ✅ DONE** (commit `0f469b3`;
+    `Sph` in `gpu_resident`). Ports the G4 CFL onto the resident stepper: `min_stable_dt(c_cfl)`
+    computes per-gas `dt_i = C·h_i/v_sig,i` on the resident (pos/vel/h) the last force eval
+    left in place, then reduces `min_i dt_i` ON the device and copies back ONLY that 1 scalar
+    (never the N-vector — the no-readback substrate a block-adaptive stepper writes into a dt
+    uniform). CFL WGSL is the G4 `sph_cfl` text VERBATIM (`CFL_DECLS/CFL_KERNELS/Params` now
+    `pub(crate)`, one source of truth with `GpuCfl`); own CFL grid at the frozen
+    `cell=radius=SUPPORT·h_max` (stored at upload — inherits the SAME G6 frozen-`h_max`
+    precondition as hydro). **New `REDUCE_MIN_SHADER`:** one-workgroup grid-stride + tree
+    min-reduction with NO double-single barrier — `min` SELECTS an input so it is
+    order-independent bit-for-bit (`dt_i>0` finite ⇒ no NaN), the clean contrast to the M4j
+    drift two-sum the f32 optimizer collapsed. **5 no-step gates (advisor-vetted; measured,
+    Vulkan):** (1) full-chain `min_stable_dt` vs `max_stable_dt` rel 8.2e-5 (density-limited,
+    bound 2e-3); (2) SHARP per-target `dt` vector vs `cpu_per_target_dt` fed the GPU `h`
+    (isolates CFL from density) worst 2.2e-7 over 19477 asymmetric-approaching pairs; (3) the
+    **no-readback proof** — the scalar path (1-elem readback only, never the vector) equals the
+    host fold of `snapshot_gas_dt` BIT-FOR-BIT, structurally pinning the reduction on-device;
+    (4) determinism (vector + scalar); (5) all-star ⇒ `+∞` NOT 0. **Advisor call rejected the
+    original bundled `snapshot_gas_cfl`:** reading the N-vector alongside the min left NO gate
+    protecting the milestone's named property (a host fold would stay green) — hence the
+    scalar-only `min_stable_dt`. Stepped gate deliberately SKIPPED: CFL's `v_sig` is velocity-
+    dependent and cannot turn off (unlike G5b's viscosity), so a stepped gate would measure the
+    `v_{n+1/2}`-vs-`v_{n+1}` half-kick timing skew, not correctness; frozen-grid staleness is
+    already G5b-gated on the same `gas_pos`/`h`. **Block-adaptive dt POLICY still deferred**
+    (D6/G6) — G5c is compute+expose only. This completes G5; **G6 is next.**
 - **G6 — `simulate_snapshots` GPU branch + re-run the QUICK gasrich merger**:
   GPU path selectable alongside the CPU `GravitySph` branch; gate = QUICK gasrich
   GPU-vs-CPU coarse statistics agree, wall-clock recorded. (Full-res still blocked on

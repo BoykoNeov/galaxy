@@ -270,8 +270,55 @@ fn scatter_gas(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// On-device min-reduction over the per-gas CFL `dt_out` → the single `min_dt[0]` (GPU-SPH
+/// G5c). ONE workgroup: each of the 256 threads grid-strides over `dt_out` folding into a
+/// per-thread min, then a shared-memory tree reduce leaves `min_i dt_i` in `min_dt[0]`. No
+/// double-single barrier is needed — unlike the M4j drift two-sum (which the f32 optimizer
+/// collapsed to zero), `min` merely SELECTS one input, so `min(min(a,b),c) == min(a,min(b,c))`
+/// bit-for-bit for any tree order, and `dt_i > 0` finite ⇒ no NaN to make it order-dependent.
+/// This is the "no-readback" min: only `min_dt[0]` crosses the bus, never the N-vector the
+/// CPU G4 path folded host-side. Lanes past `n_gas` keep the `F32_MAX` seed, which `min`
+/// ignores; `n_gas == 0` never dispatches (the host returns `+∞`).
+const REDUCE_MIN_SHADER: &str = r#"
+struct RParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
+@group(0) @binding(0) var<uniform>             rp:      RParams;
+@group(0) @binding(1) var<storage, read>       dt_in:   array<f32>;   // n
+@group(0) @binding(2) var<storage, read_write> min_out: array<f32>;   // 1
+
+const WG_RED: u32 = 256u;
+const F32_MAX: f32 = 3.40282347e38;  // seed: any real dt_i (finite, > 0) is smaller
+var<workgroup> scratch: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn reduce_min(@builtin(local_invocation_id) lid: vec3<u32>) {
+    let t = lid.x;
+    var local = F32_MAX;
+    var i = t;
+    loop {
+        if (i >= rp.n) { break; }
+        local = min(local, dt_in[i]);
+        i = i + WG_RED;
+    }
+    scratch[t] = local;
+    workgroupBarrier();
+    // Tree reduce; `stride` is uniform so every thread hits each barrier the same number of
+    // times (the `t < stride` guard is INSIDE the loop, the barrier OUTSIDE it).
+    var stride = WG_RED / 2u;
+    loop {
+        if (stride == 0u) { break; }
+        if (t < stride) {
+            scratch[t] = min(scratch[t], scratch[t + stride]);
+        }
+        workgroupBarrier();
+        stride = stride / 2u;
+    }
+    if (t == 0u) { min_out[0] = scratch[0]; }
+}
+"#;
+
 /// Uniform carrying just the gas count (padded to 16 bytes) — shared by the gather, pack,
-/// and scatter kernels (all one-invocation-per-gas passes that need only `n_gas`).
+/// scatter, AND reduce-min kernels (all one-invocation-per-gas passes, or the reduction,
+/// that need only `n_gas`; its `{n_gas, _pad[3]}` layout matches the reduce `RParams`).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GatherParams {
@@ -295,12 +342,22 @@ struct SphResources {
     rho_readback: wgpu::Buffer,
     h_readback: wgpu::Buffer,
     gas_acc_readback: wgpu::Buffer,
+    // CFL (G5c): the per-gas `dt_out` and the single on-device-reduced `min_dt`, plus their
+    // readbacks. `min_dt_readback` is 1 element — the "no-readback" min transfers only it.
+    dt_out: wgpu::Buffer,
+    min_dt: wgpu::Buffer,
+    dt_readback: wgpu::Buffer,
+    min_dt_readback: wgpu::Buffer,
     gather_bg: wgpu::BindGroup,
     density_bg: wgpu::BindGroup,
     pack_bg: wgpu::BindGroup,
     // Build and force share one bind group (identical bindings + hydro grid), as G3 does.
     hydro_bg: wgpu::BindGroup,
     scatter_bg: wgpu::BindGroup,
+    // CFL build + per-target pass share one bind group (its own grid, cell = SUPPORT·h_max);
+    // reduce_bg folds `dt_out` → `min_dt`.
+    cfl_bg: wgpu::BindGroup,
+    reduce_bg: wgpu::BindGroup,
 }
 
 /// Resident isothermal-SPH state carried by a stepper in **gas mode** (via
@@ -321,14 +378,26 @@ struct Sph {
     hydro_build_pl: wgpu::ComputePipeline,
     hydro_force_pl: wgpu::ComputePipeline,
     scatter_pl: wgpu::ComputePipeline,
+    // CFL (G5c): build (shared grid `build`) + per-target `cfl_main`, both the G4 `sph_cfl`
+    // WGSL verbatim, plus the resident-only `reduce_min` for the on-device no-readback min.
+    cfl_build_pl: wgpu::ComputePipeline,
+    cfl_main_pl: wgpu::ComputePipeline,
+    reduce_pl: wgpu::ComputePipeline,
     gather_bgl: wgpu::BindGroupLayout,
     density_bgl: wgpu::BindGroupLayout,
     pack_bgl: wgpu::BindGroupLayout,
     hydro_bgl: wgpu::BindGroupLayout,
     scatter_bgl: wgpu::BindGroupLayout,
+    cfl_bgl: wgpu::BindGroupLayout,
+    reduce_bgl: wgpu::BindGroupLayout,
     gather_params_buf: wgpu::Buffer,
     density_params_buf: wgpu::Buffer,
     hydro_params_buf: wgpu::Buffer,
+    cfl_params_buf: wgpu::Buffer,
+    // Global gather radius = SUPPORT·h_max frozen at upload (from the density calibration).
+    // The CFL pass reuses it as its grid `cell`/`radius`, exactly as the hydro force does —
+    // so the same frozen-h_max G6 precondition applies (contraction over-covers = safe).
+    frozen_radius: f64,
     res: Option<SphResources>,
 }
 
@@ -384,6 +453,16 @@ impl Sph {
         );
         let hydro_mod = module("resident-sph-hydro", &hydro_src);
         let scatter_mod = module("resident-sph-scatter", SCATTER_GAS_SHADER);
+        // CFL: the G4 `sph_cfl` WGSL VERBATIM (DECLS + shared grid helpers + kernels), so the
+        // resident stable-dt is one source of truth with the standalone `GpuCfl`.
+        let cfl_src = format!(
+            "{}{}{}",
+            crate::sph_cfl::CFL_DECLS,
+            crate::sph_grid::GRID_HELPERS_WGSL,
+            crate::sph_cfl::CFL_KERNELS,
+        );
+        let cfl_mod = module("resident-sph-cfl", &cfl_src);
+        let reduce_mod = module("resident-sph-reduce-min", REDUCE_MIN_SHADER);
 
         let bgl = |label: &str, entries: &[wgpu::BindGroupLayoutEntry]| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -460,6 +539,31 @@ impl Sph {
                 storage_entry(3, false),
             ],
         );
+        // cfl (build + per-target share it): matches CFL_DECLS — 0 uniform, 1 pos(r), 2 vel(r),
+        // 3 h(r), 4 slot_count(rw), 5 cursor(rw), 6 cell_start(rw), 7 sorted_idx(rw), 8 dt_out(rw).
+        let cfl_bgl = bgl(
+            "resident-sph-cfl-bgl",
+            &[
+                uniform_entry(0),
+                storage_entry(1, true),
+                storage_entry(2, true),
+                storage_entry(3, true),
+                storage_entry(4, false),
+                storage_entry(5, false),
+                storage_entry(6, false),
+                storage_entry(7, false),
+                storage_entry(8, false),
+            ],
+        );
+        // reduce-min: 0 uniform (n_gas), 1 dt_in(r), 2 min_out(rw)
+        let reduce_bgl = bgl(
+            "resident-sph-reduce-bgl",
+            &[
+                uniform_entry(0),
+                storage_entry(1, true),
+                storage_entry(2, false),
+            ],
+        );
 
         let pipeline = |label: &str,
                         layout: &wgpu::BindGroupLayout,
@@ -508,6 +612,16 @@ impl Sph {
             &scatter_mod,
             "scatter_gas",
         );
+        // CFL build reuses the shared grid `build`; per-target is the G4 `cfl_main`. Both bound
+        // against the cfl layout / cfl grid (its own, cell = SUPPORT·h_max).
+        let cfl_build_pl = pipeline("resident-sph-cfl-build", &cfl_bgl, &cfl_mod, "build");
+        let cfl_main_pl = pipeline("resident-sph-cfl-main", &cfl_bgl, &cfl_mod, "cfl_main");
+        let reduce_pl = pipeline(
+            "resident-sph-reduce-min",
+            &reduce_bgl,
+            &reduce_mod,
+            "reduce_min",
+        );
 
         let uniform_buf = |label: &str, size: u64| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -529,6 +643,10 @@ impl Sph {
             "resident-sph-hydro-params",
             std::mem::size_of::<crate::sph_hydro::Params>() as u64,
         );
+        let cfl_params_buf = uniform_buf(
+            "resident-sph-cfl-params",
+            std::mem::size_of::<crate::sph_cfl::Params>() as u64,
+        );
 
         Sph {
             hydro,
@@ -540,14 +658,21 @@ impl Sph {
             hydro_build_pl,
             hydro_force_pl,
             scatter_pl,
+            cfl_build_pl,
+            cfl_main_pl,
+            reduce_pl,
             gather_bgl,
             density_bgl,
             pack_bgl,
             hydro_bgl,
             scatter_bgl,
+            cfl_bgl,
+            reduce_bgl,
             gather_params_buf,
             density_params_buf,
             hydro_params_buf,
+            cfl_params_buf,
+            frozen_radius: 0.0,
             res: None,
         }
     }
@@ -650,6 +775,14 @@ impl Sph {
         let h_cell_start = mk("resident-sph-h-cell-start", ts + 1, u32sz, store);
         let h_sorted_idx = mk("resident-sph-h-sorted-idx", n_gas, u32sz, store);
         let gas_acc = mk("resident-sph-gas-acc", 3 * n_gas, f32sz, store | csrc);
+        // CFL grid (own, cell = SUPPORT·h_max — same as hydro's but separate, per G5c) + the
+        // per-target `dt_out` and the single reduced `min_dt`.
+        let cfl_slot_count = mk("resident-sph-cfl-slot-count", ts, u32sz, store);
+        let cfl_cursor = mk("resident-sph-cfl-cursor", ts, u32sz, store);
+        let cfl_cell_start = mk("resident-sph-cfl-cell-start", ts + 1, u32sz, store);
+        let cfl_sorted_idx = mk("resident-sph-cfl-sorted-idx", n_gas, u32sz, store);
+        let dt_out = mk("resident-sph-dt-out", n_gas, f32sz, store | csrc);
+        let min_dt = mk("resident-sph-min-dt", 1, f32sz, store | csrc);
         let rho_readback = mk("resident-sph-rho-readback", n_gas, f32sz, cdst | mapread);
         let h_readback = mk("resident-sph-h-readback", n_gas, f32sz, cdst | mapread);
         let gas_acc_readback = mk(
@@ -658,6 +791,8 @@ impl Sph {
             f32sz,
             cdst | mapread,
         );
+        let dt_readback = mk("resident-sph-dt-readback", n_gas, f32sz, cdst | mapread);
+        let min_dt_readback = mk("resident-sph-min-dt-readback", 1, f32sz, cdst | mapread);
 
         let gi: Vec<u32> = gas_idx.iter().map(|&i| i as u32).collect();
         queue.write_buffer(&gas_idx_buf, 0, bytemuck::cast_slice(&gi));
@@ -727,6 +862,32 @@ impl Sph {
                 bg_entry(3, accel),
             ],
         });
+        // CFL build + per-target share this bind group (its own grid). pos/vel/h are the
+        // resident gather + density outputs; `dt_out` is the per-target result.
+        let cfl_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident-sph-cfl-bg"),
+            layout: &self.cfl_bgl,
+            entries: &[
+                bg_entry(0, &self.cfl_params_buf),
+                bg_entry(1, &gas_pos),
+                bg_entry(2, &gas_vel),
+                bg_entry(3, &h),
+                bg_entry(4, &cfl_slot_count),
+                bg_entry(5, &cfl_cursor),
+                bg_entry(6, &cfl_cell_start),
+                bg_entry(7, &cfl_sorted_idx),
+                bg_entry(8, &dt_out),
+            ],
+        });
+        let reduce_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident-sph-reduce-bg"),
+            layout: &self.reduce_bgl,
+            entries: &[
+                bg_entry(0, &self.gather_params_buf), // n_gas (== RParams.n)
+                bg_entry(1, &dt_out),
+                bg_entry(2, &min_dt),
+            ],
+        });
 
         self.res = Some(SphResources {
             rho,
@@ -735,11 +896,17 @@ impl Sph {
             rho_readback,
             h_readback,
             gas_acc_readback,
+            dt_out,
+            min_dt,
+            dt_readback,
+            min_dt_readback,
             gather_bg,
             density_bg,
             pack_bg,
             hydro_bg,
             scatter_bg,
+            cfl_bg,
+            reduce_bg,
         });
     }
 
@@ -768,13 +935,16 @@ impl Sph {
     /// upload. No realloc / no bind-group rebuild — the bind groups reference the stable
     /// `hydro_params_buf`. See the frozen-`cell` caveat in [`prepare`](Self::prepare)
     /// (contraction over-covers = safe; expansion under-covers, gated in G5b).
-    fn set_hydro_radius(&self, queue: &wgpu::Queue, n_gas: usize, h_max: f64) {
+    fn set_hydro_radius(&mut self, queue: &wgpu::Queue, n_gas: usize, h_max: f64) {
         let radius = crate::sph_hydro::SUPPORT * h_max;
         queue.write_buffer(
             &self.hydro_params_buf,
             0,
             bytemuck::bytes_of(&self.hydro_params(n_gas, radius)),
         );
+        // Freeze the CFL grid radius too — same global gather radius the hydro force uses, so
+        // the CFL pass sees every force-coupled neighbor (the G5c global-`SUPPORT·h_max` note).
+        self.frozen_radius = radius;
     }
 
     /// A one-invocation-per-item compute pass over the given pipeline + bind group.
@@ -920,6 +1090,122 @@ impl Sph {
         let flat = map_read_f32(device, &res.gas_acc_readback, 3 * n_gas);
         flat.chunks_exact(3)
             .map(|c| DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64))
+            .collect()
+    }
+
+    /// Write the CFL uniform (G4 [`sph_cfl::Params`](crate::sph_cfl::Params) layout): grid
+    /// `cell`/`radius` = the frozen `SUPPORT·h_max`, isothermal `sound_speed`, and the runtime
+    /// `c_cfl`. `n`/`table_mask` mirror the density grid's sizing (same `table_size_for`).
+    fn write_cfl_params(&self, queue: &wgpu::Queue, n_gas: usize, c_cfl: f64) {
+        let table_size = crate::sph_density::table_size_for(n_gas);
+        let cell = self.frozen_radius.max(1e-12);
+        let p = crate::sph_cfl::Params {
+            n: n_gas as u32,
+            table_mask: table_size - 1,
+            cell: cell as f32,
+            radius: self.frozen_radius as f32,
+            sound_speed: self.hydro.sound_speed as f32,
+            c_cfl: c_cfl as f32,
+            _pad0: 0.0,
+            _pad1: 0.0,
+        };
+        queue.write_buffer(&self.cfl_params_buf, 0, bytemuck::bytes_of(&p));
+    }
+
+    /// Append the CFL per-target pass onto `enc`: build the CFL grid (own, cell = SUPPORT·
+    /// h_max) over the resident `gas_pos`, then `cfl_main` computes `dt_i = C_cfl·h_i/v_sig,i`
+    /// into `dt_out`. Reads the (pos, vel, h) the last force evaluation left resident.
+    fn encode_cfl(&self, enc: &mut wgpu::CommandEncoder, n_gas: usize) {
+        let res = self
+            .res
+            .as_ref()
+            .expect("sph resources prepared before encode");
+        let wide = (n_gas as u32).div_ceil(WG);
+        Self::dispatch(
+            enc,
+            "resident-sph-cfl-build",
+            &self.cfl_build_pl,
+            &res.cfl_bg,
+            1,
+        );
+        Self::dispatch(
+            enc,
+            "resident-sph-cfl-main",
+            &self.cfl_main_pl,
+            &res.cfl_bg,
+            wide,
+        );
+    }
+
+    /// Append the on-device min-reduction onto `enc`: fold `dt_out` → `min_dt[0]` in ONE
+    /// workgroup (no readback of the N-vector). Encoded after [`encode_cfl`](Self::encode_cfl).
+    fn encode_reduce_min(&self, enc: &mut wgpu::CommandEncoder) {
+        let res = self
+            .res
+            .as_ref()
+            .expect("sph resources prepared before encode");
+        Self::dispatch(
+            enc,
+            "resident-sph-reduce-min",
+            &self.reduce_pl,
+            &res.reduce_bg,
+            1,
+        );
+    }
+
+    /// Run CFL + the on-device min reduction, then copy back ONLY the single `min_dt`. The
+    /// per-gas `dt_out` never crosses the bus — this is the no-readback stable-dt bound.
+    fn snapshot_min_dt(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        n_gas: usize,
+        c_cfl: f64,
+    ) -> f64 {
+        self.write_cfl_params(queue, n_gas, c_cfl);
+        let res = self
+            .res
+            .as_ref()
+            .expect("sph resources prepared before snapshot");
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("resident-sph-cfl-min-readback"),
+        });
+        self.encode_cfl(&mut enc, n_gas);
+        self.encode_reduce_min(&mut enc);
+        enc.copy_buffer_to_buffer(
+            &res.min_dt,
+            0,
+            &res.min_dt_readback,
+            0,
+            std::mem::size_of::<f32>() as u64,
+        );
+        queue.submit([enc.finish()]);
+        map_read_f32(device, &res.min_dt_readback, 1)[0] as f64
+    }
+
+    /// Run CFL and copy back the per-gas `dt_out` vector (the G5c per-target gate surface).
+    fn snapshot_dt_vec(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        n_gas: usize,
+        c_cfl: f64,
+    ) -> Vec<f64> {
+        self.write_cfl_params(queue, n_gas, c_cfl);
+        let res = self
+            .res
+            .as_ref()
+            .expect("sph resources prepared before snapshot");
+        let bytes = (n_gas * std::mem::size_of::<f32>()) as u64;
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("resident-sph-cfl-dt-readback"),
+        });
+        self.encode_cfl(&mut enc, n_gas);
+        enc.copy_buffer_to_buffer(&res.dt_out, 0, &res.dt_readback, 0, bytes);
+        queue.submit([enc.finish()]);
+        map_read_f32(device, &res.dt_readback, n_gas)
+            .into_iter()
+            .map(|x| x as f64)
             .collect()
     }
 }
@@ -1325,16 +1611,42 @@ impl GpuResidentLeapfrog {
     /// no-readback substrate a future block-adaptive stepper writes straight into a dt
     /// uniform. Runs on the resident gas (pos/vel/h) the last force evaluation left in place
     /// (the [`upload`](Self::upload) prime or any [`step`](Self::step)). Requires gas mode.
-    pub fn min_stable_dt(&mut self, _c_cfl: f64) -> f64 {
-        todo!("G5c: resident CFL pass + on-device no-readback min reduction")
+    pub fn min_stable_dt(&mut self, c_cfl: f64) -> f64 {
+        let n_gas = self.gas_idx.len();
+        let sph = self
+            .sph
+            .as_ref()
+            .expect("min_stable_dt requires gas mode (new_with_sph)");
+        if n_gas == 0 {
+            return f64::INFINITY;
+        }
+        let min = sph.snapshot_min_dt(&self.core.device, &self.core.queue, n_gas, c_cfl);
+        self.submits += 1;
+        min
     }
 
     /// The per-gas CFL vector `dt_i = C_cfl · h_i / v_sig,i` in ascending gas-index order
     /// (the G5c per-target gate surface). Unlike [`min_stable_dt`](Self::min_stable_dt) this
     /// transfers the whole vector, so a per-target radius bug on ANY particle is observable
     /// (the scalar min only moves if the minimizer is hit). Requires gas mode.
-    pub fn snapshot_gas_dt(&mut self, _c_cfl: f64) -> GasCfl {
-        todo!("G5c: resident per-target CFL dt vector")
+    pub fn snapshot_gas_dt(&mut self, c_cfl: f64) -> GasCfl {
+        let n_gas = self.gas_idx.len();
+        let sph = self
+            .sph
+            .as_ref()
+            .expect("snapshot_gas_dt requires gas mode (new_with_sph)");
+        if n_gas == 0 {
+            return GasCfl {
+                gas_idx: Vec::new(),
+                dt: Vec::new(),
+            };
+        }
+        let dt = sph.snapshot_dt_vec(&self.core.device, &self.core.queue, n_gas, c_cfl);
+        self.submits += 1;
+        GasCfl {
+            gas_idx: self.gas_idx.clone(),
+            dt,
+        }
     }
 
     /// Read the full resident acceleration buffer (`accel`, all particles) back to the
@@ -1456,7 +1768,7 @@ impl GpuResidentLeapfrog {
             // submit at upload — rare — reads it once. Per-step then stays a single submit with
             // the frozen radius (the residency artifact gated by the stepped G5b run).
             let n_gas = self.gas_idx.len();
-            let sph = self.sph.as_ref().expect("gas mode");
+            let sph = self.sph.as_mut().expect("gas mode");
             let mut cal =
                 self.core
                     .device

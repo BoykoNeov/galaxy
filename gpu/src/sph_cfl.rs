@@ -49,7 +49,9 @@ const QUERY_WG: u32 = 256;
 /// CFL `Params` + bind-group declarations. The first three fields `{n, table_mask, cell}`
 /// and the vars `pos`/`slot_count`/`cursor`/`cell_start`/`sorted_idx` match what
 /// [`GRID_HELPERS_WGSL`]'s shared `build` expects, so that text compiles unchanged here.
-const CFL_DECLS: &str = r#"
+/// `pub(crate)` so the GPU-resident stepper (GPU-SPH G5c) reuses this text VERBATIM —
+/// one source of truth for the resident CFL pass, as the hydro force reuses `HYDRO_DECLS`.
+pub(crate) const CFL_DECLS: &str = r#"
 struct Params {
     n: u32,
     table_mask: u32,     // table_size = table_mask + 1 (power of two)
@@ -75,7 +77,8 @@ struct Params {
 @group(0) @binding(8)  var<storage, read_write> dt_out: array<f32>;      // n
 "#;
 
-const CFL_KERNELS: &str = r#"
+/// The CFL kernels (`cfl_dt` + `cfl_main`), reused VERBATIM by the resident stepper (G5c).
+pub(crate) const CFL_KERNELS: &str = r#"
 const SUPPORT: f32 = 2.0;
 // TDR backstop (vestigial here — cell = radius so span ≈ 2 regardless of h_max; kept
 // for parity with the density walk, which genuinely needs it under a runaway h).
@@ -145,17 +148,19 @@ fn cfl_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// Uniform for the CFL kernels; mirrors the WGSL `Params` (32-byte, 16-aligned). The
 /// first three fields match G1–G3's `Params` prefix so the shared `build` kernel (from
 /// [`GRID_HELPERS_WGSL`]) compiles unchanged.
+/// `pub(crate)` so the resident stepper (G5c) writes this same uniform layout when it
+/// reuses [`CFL_DECLS`]/[`CFL_KERNELS`].
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Params {
-    n: u32,
-    table_mask: u32,
-    cell: f32,
-    radius: f32,
-    sound_speed: f32,
-    c_cfl: f32,
-    _pad0: f32,
-    _pad1: f32,
+pub(crate) struct Params {
+    pub(crate) n: u32,
+    pub(crate) table_mask: u32,
+    pub(crate) cell: f32,
+    pub(crate) radius: f32,
+    pub(crate) sound_speed: f32,
+    pub(crate) c_cfl: f32,
+    pub(crate) _pad0: f32,
+    pub(crate) _pad1: f32,
 }
 
 /// GPU isothermal CFL reduction. Reusable wgpu compute context built once

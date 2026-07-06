@@ -749,9 +749,10 @@ fn resident_min_stable_dt_matches_cpu_oracle() {
         "resident min_stable_dt must be finite positive: {gpu}"
     );
     let rel = (gpu - cpu).abs() / cpu;
-    // Density-limited: the oracle recomputes h from positions while the device uses its own
-    // root-find h, so the bound tracks the G2 h tolerance (~1e-3), not G4's isolated 1e-5.
-    // Measure-then-tighten with cross-adapter headroom.
+    // Measured on the Vulkan test adapter: rel 8.2e-5 (density-limited — the oracle recomputes
+    // h from positions while the device uses its own root-find h, so this tracks the G2 h
+    // tolerance, NOT G4's isolated 1e-5). Bound 2e-3 (~24× headroom): tight enough that a
+    // broken reduction / CFL kernel (≫1%) fails hard, loose enough for cross-adapter variation.
     assert!(
         rel < 2.0e-3,
         "resident min_stable_dt {gpu} vs oracle {cpu} (rel {rel:.3e})"
@@ -801,9 +802,10 @@ fn resident_gas_dt_matches_cpu_per_target() {
         );
     }
     let worst = worst_rel_dt(&gc.dt, &cpu);
-    // Isolated (GPU h fed in): dt_i is one max + one divide, no accumulation ⇒ tight f32,
-    // matching G4's per-target gate (worst ≈ 1e-6). A real bug (coupling cutoff, per-target
-    // radius, or w/r² instead of w/r) is ≫1%; the 1e-5 bound fails hard on it.
+    // Isolated (GPU h fed in): dt_i is one max + one divide, no accumulation ⇒ tight f32.
+    // Measured worst 2.2e-7 over 19477 asymmetric-approaching pairs — in line with G4's
+    // per-target gate (~1e-6). A real bug (coupling cutoff, per-target radius, or w/r² instead
+    // of w/r) is ≫1%; the 1e-5 bound (~45× headroom) fails hard on it while keeping f32 room.
     assert!(
         worst < 1.0e-5,
         "resident CFL per-target worst rel err {worst:.3e}"

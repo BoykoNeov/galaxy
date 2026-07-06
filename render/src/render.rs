@@ -274,7 +274,9 @@ const WGSL_GAS_COMMON: &str = r#"
 struct GasUniforms {
     // xyz: emission color tint; w: emissivity j.
     ce: vec4<f32>,
-    // x: opacity kappa; y: endpoint mix u; z: nominal step; w: unused.
+    // x: opacity kappa; y: endpoint mix u; z: nominal step; w: scatter
+    // softening^2 (galaxy-render controls) — negative = per-light radius^2
+    // (v1, bit-compat), >= 0 = one fixed floored epsilon^2 for every light.
     kms: vec4<f32>,
     b0min: vec4<f32>,
     b0max: vec4<f32>,
@@ -485,7 +487,11 @@ fn fs_gas(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             for (var k = 0u; k < n_lights; k++) {
                 let dv = p - lights[k].pos;
                 let d2_true = dot(dv, dv);
-                let d2 = d2_true + lights[k].radius * lights[k].radius;
+                // Fixed-epsilon softening: kms.w >= 0 replaces the per-light
+                // radius^2 with one floored epsilon^2 (mirrors march_gas's
+                // scatter_soft2). Negative kms.w keeps the v1 per-light radius^2.
+                let soft2 = select(lights[k].radius * lights[k].radius, g.kms.w, g.kms.w >= 0.0);
+                let d2 = d2_true + soft2;
                 if (d2 <= 0.0) {
                     continue;
                 }
@@ -643,7 +649,9 @@ const QUAD: [[f32; 2]; 6] = [
 struct GasUniforms {
     /// xyz: emission color tint; w: emissivity `j`.
     color_emissivity: [f32; 4],
-    /// x: opacity κ; y: endpoint mix `u`; z: nominal march step; w: unused.
+    /// x: opacity κ; y: endpoint mix `u`; z: nominal march step; w: scatter
+    /// softening² (galaxy-render controls) — negative = per-light `r_k²` (v1,
+    /// bit-compat), `≥ 0` = one fixed floored `ε²` applied to every light.
     kappa_mix_step: [f32; 4],
     /// Grid 0 bounds (xyz; w unused).
     b0_min: [f32; 4],
@@ -1220,6 +1228,18 @@ impl Renderer {
                     gf.look.scatter.map_or((0.0, 0.0, false, [1.0f32; 3]), |s| {
                         (s.strength, s.anisotropy, s.shadows, s.tint)
                     });
+                // Fixed-ε scatter softening² (galaxy-render controls): `Some(ε)`
+                // floored at the voxel scale (`2·step_size`) and squared, shared
+                // by every light; `None` → negative sentinel so the shader keeps
+                // the v1 per-light radius² (bit-compat). Mirrors march_gas.
+                let scatter_soft2 =
+                    gf.look
+                        .scatter
+                        .and_then(|s| s.softening)
+                        .map_or(-1.0f32, |e| {
+                            let e = e.max(2.0 * crate::volume::step_size(gf.grid0, gf.grid1));
+                            e * e
+                        });
                 let gpu_lights: Vec<GpuLight> = if strength > 0.0 {
                     gf.lights
                         .iter()
@@ -1281,7 +1301,7 @@ impl Renderer {
                             gf.look.opacity,
                             gf.mix,
                             crate::volume::step_size(gf.grid0, gf.grid1),
-                            0.0,
+                            scatter_soft2,
                         ],
                         b0_min: ext(gf.grid0.bounds_min),
                         b0_max: ext(gf.grid0.bounds_max),

@@ -734,6 +734,16 @@ pub fn march_gas(
         .scatter
         .filter(|s| s.strength > 0.0 && !gas.lights.is_empty());
 
+    // Fixed-ε scatter softening² (galaxy-render controls pass): `Some(ε)` floors
+    // ε at the voxel scale (`2·step_size` = the smallest cell edge) and shares it
+    // across all lights and samples, so the scattered brightness is invariant to
+    // the light-cluster refinement tolerance. `None` ⇒ per-light `r_k²` computed
+    // in the loop below, bit-identical to the shipped path.
+    let scatter_soft2 = scatter.and_then(|s| s.softening).map(|e| {
+        let e = e.max(2.0 * step_size(gas.grid0, gas.grid1));
+        e * e
+    });
+
     let mut t = 1.0_f32;
     let mut c = [0.0_f32; 3];
     for i in 0..n {
@@ -757,7 +767,7 @@ pub fn march_gas(
             for (k, l) in gas.lights.iter().enumerate() {
                 let dv = p - l.pos;
                 let d2_true = dv.length_squared();
-                let d2 = d2_true + l.radius * l.radius;
+                let d2 = d2_true + scatter_soft2.unwrap_or(l.radius * l.radius);
                 if d2 <= 0.0 {
                     continue; // sample exactly on a zero-radius light
                 }

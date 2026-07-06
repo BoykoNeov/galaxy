@@ -562,6 +562,97 @@ fn gpu_scatter_matches_cpu_reference_ortho() {
     assert!(nonzero, "reference image is all black — degenerate gate");
 }
 
+/// GPU scatter march ≡ CPU reference under FIXED-ε softening (`Some(ε)`): the
+/// same ortho scene but exercising the `kms.w ≥ 0` shader branch (every other
+/// parity gate pins `softening: None`, which only runs the per-light-radius
+/// side of the WGSL `select`). ε = 0.25 is above the ~0.18 voxel floor for
+/// these grids, so it is live and un-floored — a real check that the uploaded
+/// `scatter_soft2` mirrors `march_gas`'s fixed-ε path bit-for-tolerance.
+#[test]
+fn gpu_scatter_fixed_epsilon_matches_cpu_reference() {
+    let r = renderer();
+    let g0 = pattern_grid(
+        Vec3::new(-1.2, -1.0, -0.8),
+        Vec3::new(1.0, 1.1, 0.9),
+        [12, 10, 9],
+        0.0,
+    );
+    let g1 = pattern_grid(
+        Vec3::new(-0.9, -1.1, -1.0),
+        Vec3::new(1.2, 0.9, 1.1),
+        [8, 14, 11],
+        1.7,
+    );
+    let lights = [
+        Light {
+            pos: Vec3::new(0.5, 0.3, 0.2),
+            radius: 0.15,
+            rgb: [8.0, 5.0, 3.0],
+        },
+        Light {
+            pos: Vec3::new(-0.7, -0.4, 0.5),
+            radius: 0.3,
+            rgb: [2.0, 6.0, 4.0],
+        },
+        Light {
+            pos: Vec3::new(0.1, 2.0, -0.6),
+            radius: 0.0,
+            rgb: [5.0, 5.0, 9.0],
+        },
+    ];
+    let gas = GasFrame {
+        grid0: &g0,
+        grid1: &g1,
+        mix: 0.37,
+        lights: &lights,
+        look: GasLook {
+            color: [0.9, 0.5, 0.3],
+            emissivity: 1.7,
+            opacity: 2.1,
+            scatter: Some(ScatterLook {
+                strength: 1.3,
+                anisotropy: 0.4,
+                shadows: false,
+                tint: [1.0; 3],
+                softening: Some(0.25),
+            }),
+        },
+    };
+    let cam = Camera::orthographic(
+        Vec3::new(0.1, -0.05, 0.0),
+        Vec3::new(0.3, -0.2, -1.0),
+        Vec3::Y,
+        Vec2::new(1.4, 1.05),
+    );
+    let cfg = RenderConfig {
+        width: 64,
+        height: 48,
+        falloff: 6.0,
+        ..RenderConfig::default()
+    };
+    let gpu = r
+        .render_frame_with_gas(&FrameData::default(), Some(&gas), &cam, &cfg)
+        .unwrap();
+    let cpu = render_gas_cpu(&gas, &cam, cfg.width, cfg.height);
+    let mut nonzero = false;
+    for y in 0..cfg.height {
+        for x in 0..cfg.width {
+            let (g, c) = (gpu.pixel(x, y), cpu.pixel(x, y));
+            nonzero |= c[0] > 0.0;
+            for k in 0..4 {
+                let tol = 1e-3 * c[k].abs() + 1e-5;
+                assert!(
+                    (g[k] - c[k]).abs() <= tol,
+                    "pixel ({x},{y}) channel {k}: GPU {} vs CPU {}",
+                    g[k],
+                    c[k]
+                );
+            }
+        }
+    }
+    assert!(nonzero, "reference image is all black — degenerate gate");
+}
+
 /// GPU scatter march ≡ CPU reference, perspective: the same scene through eye
 /// rays (per-pixel ω_out varies — the phase angle actually changes across the
 /// image, unlike ortho), same tolerance.

@@ -83,7 +83,23 @@ impl GradeConfig {
     /// `gamma > 0` (finite); the neutral defaults `(0, 1, 1)` pass. Called by
     /// [`grade_file`] before a frame is touched.
     pub fn validate(&self) -> Result<(), GradeError> {
-        todo!("apply_levels/levels validation (galaxy-render controls pass)")
+        let (b, w, g) = (self.black_point, self.white_point, self.gamma);
+        if !b.is_finite() || !w.is_finite() || !g.is_finite() {
+            return Err(GradeError::Config(format!(
+                "levels must be finite: black={b}, white={w}, gamma={g}"
+            )));
+        }
+        if b >= w {
+            return Err(GradeError::Config(format!(
+                "levels black_point ({b}) must be < white_point ({w})"
+            )));
+        }
+        if g <= 0.0 {
+            return Err(GradeError::Config(format!(
+                "levels gamma ({g}) must be > 0"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -150,8 +166,24 @@ pub fn linear_to_srgb(x: f32) -> f32 {
 /// leaks into the shipped neutral grade). Assumes a validated config
 /// (`black < white`, `gamma > 0` — see [`GradeConfig::validate`]).
 pub fn apply_levels(x: f32, black: f32, white: f32, gamma: f32) -> f32 {
-    let _ = (x, black, white, gamma);
-    todo!("levels curve (galaxy-render controls pass)")
+    // Neutral is the EXACT identity — return `x` verbatim so no normalize/`powf`
+    // bit drift leaks into the shipped neutral grade.
+    if black == 0.0 && white == 1.0 && gamma == 1.0 {
+        return x;
+    }
+    let denom = white - black;
+    // A degenerate/inverted window (`white ≤ black`, rejected by `validate` but
+    // reachable when `tonemap` is called directly) collapses to a hard threshold
+    // at `white` — no `0/0` NaN leaking into the frame.
+    if denom <= 0.0 {
+        return if x >= white { 1.0 } else { 0.0 };
+    }
+    let n = ((x - black) / denom).clamp(0.0, 1.0);
+    if gamma == 1.0 {
+        n
+    } else {
+        n.powf(1.0 / gamma)
+    }
 }
 
 /// Grade one linear-HDR pixel to a 16-bit sRGB triple: exposure → tone curve →
@@ -161,7 +193,9 @@ pub fn tonemap(linear: [f32; 3], cfg: &GradeConfig) -> [u16; 3] {
     let toned = tone_curve(exposed, cfg.tonemap);
     let mut out = [0u16; 3];
     for (o, &t) in out.iter_mut().zip(&toned) {
-        let s = linear_to_srgb(t);
+        // Levels run on the display-referred tone-curve output, before the OETF.
+        let leveled = apply_levels(t, cfg.black_point, cfg.white_point, cfg.gamma);
+        let s = linear_to_srgb(leveled);
         // Round-to-nearest into [0, 65535].
         out_quantize(o, s);
     }
@@ -179,6 +213,9 @@ pub fn grade_file<P: AsRef<Path>, Q: AsRef<Path>>(
     png_path: Q,
     cfg: &GradeConfig,
 ) -> Result<(), GradeError> {
+    // Reject a degenerate levels window / gamma before touching the frame.
+    cfg.validate()?;
+
     // Read the linear-HDR EXR into an RGB buffer (alpha dropped — grade is opaque).
     struct Rgb {
         w: usize,

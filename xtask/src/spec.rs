@@ -288,6 +288,14 @@ pub struct GasLookSpec {
     /// Requires a positive `scattering` — present without one it is a dead
     /// knob and is rejected loud (whatever its value).
     pub shadows: Option<bool>,
+    /// Chromatic scattering albedo (tinted-octree-lanterns): a per-channel
+    /// multiplier on the scattered radiance only (dust reflects blue — the
+    /// reflection-nebula look). Omitted = `[1.0; 3]` = neutral = bit-identical
+    /// to the untinted scatter. Requires a positive `scattering` — present
+    /// without one it is a dead knob and is rejected loud; an all-zero tint
+    /// with a positive `scattering` zeroes the term and is rejected loud (set
+    /// `scattering = 0` instead). Every component must be finite and ≥ 0.
+    pub scatter_tint: Option<[f32; 3]>,
 }
 
 /// One progenitor's initial-radius color ramp.
@@ -850,6 +858,9 @@ pub struct GasLookValues {
     pub anisotropy: f32,
     /// Per-light shadow volumes; meaningful only with `scattering > 0`.
     pub shadows: bool,
+    /// Chromatic scattering albedo; `[1.0; 3]` = neutral. Meaningful only with
+    /// `scattering > 0`.
+    pub scatter_tint: [f32; 3],
 }
 
 impl Default for GasLookValues {
@@ -861,6 +872,7 @@ impl Default for GasLookValues {
             scattering: 0.0,
             anisotropy: 0.0,
             shadows: false,
+            scatter_tint: [1.0; 3],
         }
     }
 }
@@ -1067,6 +1079,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                     scattering: g.scattering.unwrap_or(0.0),
                     anisotropy: g.anisotropy.unwrap_or(0.0),
                     shadows: g.shadows.unwrap_or(false),
+                    scatter_tint: g.scatter_tint.unwrap_or([1.0; 3]),
                 })
                 .unwrap_or_default()
         }),

@@ -249,6 +249,7 @@ fn gas_scenario_carries_a_declared_look_gas() {
             scattering: 0.0,
             anisotropy: 0.0,
             shadows: false,
+            scatter_tint: [1.0; 3],
         })
     );
 }
@@ -272,6 +273,7 @@ fn look_gas_scatter_knobs_thread_onto_the_scenario() {
             scattering: 3.0,
             anisotropy: 0.55,
             shadows: false,
+            scatter_tint: [1.0; 3],
         })
     );
 }
@@ -294,6 +296,7 @@ fn look_gas_shadows_knob_threads_onto_the_scenario() {
             scattering: 3.0,
             anisotropy: 0.55,
             shadows: true,
+            scatter_tint: [1.0; 3],
         })
     );
 }
@@ -359,6 +362,89 @@ fn look_gas_rejects_bad_scatter_knobs() {
     }
 }
 
+// --- chromatic scatter tint (tinted-octree-lanterns) ---------------------------
+
+#[test]
+fn look_gas_scatter_tint_knob_threads_onto_the_scenario() {
+    // The per-channel scattering albedo threads through as a plain [f32; 3].
+    let toml = gas_toml().replace(
+        "[rig]",
+        "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\n\
+         scattering = 3.0\nanisotropy = 0.55\nscatter_tint = [0.6, 0.8, 1.3]\n\n[rig]",
+    );
+    let s = build_scenario(&parse_scenario_toml(&toml).unwrap(), true);
+    assert_eq!(
+        s.gas_look,
+        Some(galaxy_xtask::spec::GasLookValues {
+            color: [0.5, 0.6, 0.95],
+            emissivity: 0.25,
+            opacity: 12.0,
+            scattering: 3.0,
+            anisotropy: 0.55,
+            shadows: false,
+            scatter_tint: [0.6, 0.8, 1.3],
+        })
+    );
+}
+
+#[test]
+fn look_gas_scatter_tint_defaults_to_neutral() {
+    // Omitted ⇒ [1.0; 3] (neutral) — bit-identical to the untinted scatter.
+    let toml = gas_toml().replace(
+        "[rig]",
+        "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\n\
+         scattering = 3.0\n\n[rig]",
+    );
+    let s = build_scenario(&parse_scenario_toml(&toml).unwrap(), true);
+    assert_eq!(
+        s.gas_look.expect("gas-rich threads its look").scatter_tint,
+        [1.0; 3]
+    );
+}
+
+#[test]
+fn look_gas_rejects_bad_scatter_tint() {
+    // The dead-knob + physical-validity discipline (the scattering/anisotropy
+    // precedent): every component finite and ≥ 0; the knob PRESENT without a
+    // positive scattering shapes nothing; an all-zero tint zeroes the term
+    // (which is `scattering = 0`, said louder).
+    for (knobs, why) in [
+        (
+            "scattering = 3.0\nscatter_tint = [-0.1, 1.0, 1.0]",
+            "negative tint component",
+        ),
+        (
+            "scattering = 3.0\nscatter_tint = [nan, 1.0, 1.0]",
+            "non-finite tint component",
+        ),
+        (
+            "scattering = 3.0\nscatter_tint = [inf, 1.0, 1.0]",
+            "infinite tint component",
+        ),
+        (
+            "scatter_tint = [0.6, 0.8, 1.3]",
+            "tint without scattering is a dead knob",
+        ),
+        (
+            "scattering = 0.0\nscatter_tint = [0.6, 0.8, 1.3]",
+            "tint with scattering = 0 is a dead knob",
+        ),
+        (
+            "scattering = 3.0\nscatter_tint = [0.0, 0.0, 0.0]",
+            "all-zero tint zeroes the term (use scattering = 0 instead)",
+        ),
+    ] {
+        let toml = gas_toml().replace(
+            "[rig]",
+            &format!(
+                "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\n\
+                 {knobs}\n\n[rig]"
+            ),
+        );
+        assert!(parse_scenario_toml(&toml).is_err(), "should reject: {why}");
+    }
+}
+
 #[test]
 fn gasrich_preset_carries_the_scatter_option_on() {
     // The showpiece preset ships with the option ENABLED so it can be judged;
@@ -381,6 +467,18 @@ fn gasrich_preset_carries_the_scatter_option_on() {
     // Shadow volumes (umbral-lantern-lattice) ship ON, same rationale —
     // disabling is knob removal, gated bit-identical to unshadowed v1.
     assert!(gl.shadows, "gasrich must ship with shadow volumes on");
+    // Scatter tint (tinted-octree-lanterns): the shipped value is the A/B
+    // outcome; whatever it is, it must be a valid albedo — finite, ≥ 0, and not
+    // all-zero (an all-zero tint zeroes the term, which the parser rejects).
+    assert!(
+        gl.scatter_tint.iter().all(|&c| c.is_finite() && c >= 0.0),
+        "gasrich scatter_tint {:?} must be finite and non-negative",
+        gl.scatter_tint
+    );
+    assert!(
+        gl.scatter_tint.iter().any(|&c| c > 0.0),
+        "gasrich scatter_tint must not be all-zero"
+    );
 }
 
 #[test]

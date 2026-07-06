@@ -209,6 +209,7 @@ fn scatter_far_field_slab_analytic() {
                     strength,
                     anisotropy: aniso as f32,
                     shadows: false,
+                    tint: [1.0; 3],
                 }),
             },
         };
@@ -261,6 +262,7 @@ fn scatter_inverse_square() {
                     strength: 1.0,
                     anisotropy: 0.0,
                     shadows: false,
+                    tint: [1.0; 3],
                 }),
             },
         };
@@ -325,6 +327,7 @@ fn scatter_off_is_bit_identical() {
                 strength: 0.0,
                 anisotropy: 0.5,
                 shadows: false,
+                tint: [1.0; 3],
             }),
             std::slice::from_ref(&light),
         ),
@@ -337,6 +340,7 @@ fn scatter_off_is_bit_identical() {
                 strength: 2.0,
                 anisotropy: 0.5,
                 shadows: false,
+                tint: [1.0; 3],
             }),
             &[],
         ),
@@ -378,6 +382,7 @@ fn scatter_strength_linear_exact() {
                         strength,
                         anisotropy: 0.3,
                         shadows: false,
+                        tint: [1.0; 3],
                     }),
                 },
             },
@@ -430,6 +435,7 @@ fn scatter_forward_anisotropy_backlights() {
                     strength: 1.0,
                     anisotropy: aniso,
                     shadows: false,
+                    tint: [1.0; 3],
                 }),
             },
         };
@@ -510,6 +516,7 @@ fn gpu_scatter_matches_cpu_reference_ortho() {
                 strength: 1.3,
                 anisotropy: 0.4,
                 shadows: false,
+                tint: [1.0; 3],
             }),
         },
     };
@@ -591,6 +598,7 @@ fn gpu_scatter_matches_cpu_reference_perspective() {
                 strength: 1.3,
                 anisotropy: -0.5,
                 shadows: false,
+                tint: [1.0; 3],
             }),
         },
     };
@@ -681,6 +689,7 @@ fn gpu_scatter_off_bit_identical() {
                 strength: 0.0,
                 anisotropy: 0.7,
                 shadows: false,
+                tint: [1.0; 3],
             }),
             &lights,
         ),
@@ -693,6 +702,7 @@ fn gpu_scatter_off_bit_identical() {
                 strength: 2.0,
                 anisotropy: 0.7,
                 shadows: false,
+                tint: [1.0; 3],
             }),
             &[],
         ),
@@ -732,6 +742,7 @@ fn gpu_scatter_strength_linear_exact() {
                     strength,
                     anisotropy: 0.3,
                     shadows: false,
+                    tint: [1.0; 3],
                 }),
             },
         };
@@ -763,6 +774,7 @@ fn gpu_scatter_strength_linear_exact() {
                 strength: 1.0,
                 anisotropy: 0.3,
                 shadows: false,
+                tint: [1.0; 3],
             }),
         },
     };
@@ -772,5 +784,419 @@ fn gpu_scatter_strength_linear_exact() {
     assert!(
         img.total_flux()[0] > 0.0,
         "perspective scatter rendered black"
+    );
+}
+
+// ---------- scatter tint gates (tinted-octree-lanterns) ----------
+//
+// `ScatterLook.tint` is a per-channel multiplier on the SCATTERED radiance only
+// (a chromatic single-scatter albedo — the "dust reflects blue" reflection-
+// nebula knob). Emission, absorption, the star splats, and the shadow bake are
+// untouched. `[1.0; 3]` is the exact multiplicative identity in f32 (CPU and
+// WGSL), so neutral tint is bit-compatible with the pre-tint march.
+//
+// The neutral gate below is anchored on the PROVEN far-field analytic oracle
+// (`scatter_far_field_slab_analytic`), NOT on a self-referential
+// `march(tint=[1,1,1])` — the pre-tint code path no longer exists after green,
+// so comparing neutral tint to itself would verify nothing. Anchoring to the
+// closed form makes the gate fail if the tint multiply corrupts the neutral
+// path (e.g. tint applied to emission or transmittance).
+
+/// Gate 1 — neutral tint reproduces the far-field analytic scatter oracle.
+/// The `scatter_far_field_slab_analytic` configuration with `tint = [1;3]`: one
+/// distant transverse light so the incident intensity is constant along the
+/// chord and the scattered term is an emission slab with `j_eff = σ_s·p·I`,
+/// `C = (σ_s·p·I/κ)(1 − e^{−κρL})`. Hand-computed `p` in f64 for g = 0 and
+/// g = 0.6. Neutral tint must leave this untouched — radiance AND transmittance.
+#[test]
+fn scatter_tint_neutral_matches_analytic_oracle() {
+    let g = slab_grid();
+    let light = Light {
+        pos: Vec3::new(200.0, 0.0, -0.5),
+        radius: 0.0,
+        rgb: [4.0e5, 2.0e5, 1.0e5],
+    };
+    let origin = Vec3::new(0.3, -0.2, 5.0);
+    let dir = Vec3::new(0.0, 0.0, -1.0);
+    let strength = 1.7f32;
+
+    for aniso in [0.0f64, 0.6] {
+        let gas = GasFrame {
+            grid0: &g,
+            grid1: &g,
+            mix: 0.0,
+            lights: std::slice::from_ref(&light),
+            look: GasLook {
+                color: [1.0, 1.0, 1.0],
+                emissivity: 0.0, // isolate the scattered term
+                opacity: SLAB_KAPPA,
+                scatter: Some(ScatterLook {
+                    strength,
+                    anisotropy: aniso as f32,
+                    shadows: false,
+                    tint: [1.0; 3], // neutral: must reproduce the oracle exactly
+                }),
+            },
+        };
+        let (c, t) = march_gas(&gas, None, origin, dir, f32::NEG_INFINITY);
+
+        let d2 = (200.0f64 - 0.3).powi(2) + 0.2f64.powi(2);
+        let p = (1.0 - aniso * aniso) / (FOUR_PI * (1.0 + aniso * aniso).powf(1.5)); // μ = 0
+        let tau = (SLAB_KAPPA * SLAB_RHO) as f64; // L = 1
+        for (k, &lk) in light.rgb.iter().enumerate() {
+            let intensity = lk as f64 / (FOUR_PI * d2);
+            let want = strength as f64 * p * intensity / SLAB_KAPPA as f64 * (1.0 - (-tau).exp());
+            assert!(
+                (c[k] as f64 - want).abs() / want < 1e-2,
+                "g = {aniso}, channel {k}: neutral-tint scattered {} vs analytic {want}",
+                c[k]
+            );
+        }
+        let want_t = (-tau).exp() as f32;
+        assert!(
+            (t - want_t).abs() / want_t < 1e-5,
+            "g = {aniso}: neutral tint must not touch T ({t} vs {want_t})"
+        );
+    }
+}
+
+/// Gate 2 — per-channel linearity, bitwise. Emissivity 0 (scattered term only),
+/// two lights, `tint = [2, 1, 1]` vs the neutral run: the red channel scales by
+/// EXACTLY 2 (×2 only shifts the f32 exponent, so it distributes over the
+/// additive accumulation), while green and blue are bit-identical (tint is
+/// per-channel independent) and the transmittance is bit-identical (tint touches
+/// only the scattered radiance).
+#[test]
+fn scatter_tint_per_channel_linear_exact() {
+    let g = pattern_grid(Vec3::splat(-1.0), Vec3::splat(1.0), [6, 6, 6], 1.3);
+    let lights = [
+        Light {
+            pos: Vec3::new(0.5, 0.2, 2.0),
+            radius: 0.2,
+            rgb: [7.0, 5.0, 3.0],
+        },
+        Light {
+            pos: Vec3::new(-1.5, 0.0, -0.5),
+            radius: 0.0,
+            rgb: [2.0, 4.0, 6.0],
+        },
+    ];
+    let run = |tint: [f32; 3]| {
+        march_gas(
+            &GasFrame {
+                grid0: &g,
+                grid1: &g,
+                mix: 0.0,
+                lights: &lights,
+                look: GasLook {
+                    color: [1.0, 1.0, 1.0],
+                    emissivity: 0.0, // scattered term only
+                    opacity: 0.8,
+                    scatter: Some(ScatterLook {
+                        strength: 0.9,
+                        anisotropy: 0.3,
+                        shadows: false,
+                        tint,
+                    }),
+                },
+            },
+            None,
+            Vec3::new(-0.2, 0.15, 3.0),
+            Vec3::new(-0.1, 0.25, -1.0).normalize(),
+            f32::NEG_INFINITY,
+        )
+    };
+    let (c1, t1) = run([1.0, 1.0, 1.0]);
+    let (c2, t2) = run([2.0, 1.0, 1.0]);
+    assert!(c1.iter().all(|&v| v > 0.0), "ray must scatter something");
+    assert_eq!(
+        c2[0],
+        2.0 * c1[0],
+        "red: tint 2× must double the scattered radiance exactly"
+    );
+    assert_eq!(c2[1], c1[1], "green: tint 1 must be bit-identical");
+    assert_eq!(c2[2], c1[2], "blue: tint 1 must be bit-identical");
+    assert_eq!(t1, t2, "tint must not touch the transmittance");
+}
+
+/// Gate 3 — zero tint kills the scattered term and NOTHING else. Emissivity > 0
+/// and lights present: `tint = [0, 0, 0]` must reproduce the `scatter: None`
+/// march bit-for-bit (adding `+0.0` to the non-negative emission accumulators is
+/// exact). Because emission is live, this proves the tint zeroes ONLY the
+/// scattered radiance — the emission (and transmittance) survive untouched.
+#[test]
+fn scatter_tint_zero_equals_scatter_none() {
+    let g = pattern_grid(Vec3::splat(-1.0), Vec3::splat(1.0), [6, 6, 6], 0.0);
+    let light = Light {
+        pos: Vec3::new(0.5, 0.2, 3.0),
+        radius: 0.1,
+        rgb: [7.0, 5.0, 3.0],
+    };
+    let origin = Vec3::new(0.1, 0.05, 3.0);
+    let dir = Vec3::new(0.4, -0.3, -1.0).normalize();
+    let run = |scatter: Option<ScatterLook>| {
+        march_gas(
+            &GasFrame {
+                grid0: &g,
+                grid1: &g,
+                mix: 0.0,
+                lights: std::slice::from_ref(&light),
+                look: GasLook {
+                    color: [1.0, 0.9, 0.8],
+                    emissivity: 1.3, // live emission: must survive a zero tint
+                    opacity: 0.7,
+                    scatter,
+                },
+            },
+            None,
+            origin,
+            dir,
+            f32::NEG_INFINITY,
+        )
+    };
+    let base = run(None);
+    let zero_tint = run(Some(ScatterLook {
+        strength: 2.0,
+        anisotropy: 0.5,
+        shadows: false,
+        tint: [0.0, 0.0, 0.0],
+    }));
+    assert_eq!(
+        zero_tint, base,
+        "tint [0,0,0] must zero the scattered term and leave emission + T intact"
+    );
+}
+
+/// Gate 4 — GPU ≡ CPU with a non-trivial chromatic tint, shadows ON, both
+/// projections. The scatter.rs GPU reference scene with `tint = [0.5, 0.8, 1.6]`,
+/// `g ≠ 0`, `shadows: true`: the WGSL march applies `g.tint.xyz` exactly where
+/// `march_gas` applies `sl.tint`, held at the volume.rs tolerances (1e-3 rel +
+/// 1e-5 abs) per pixel, all four channels.
+#[test]
+fn gpu_scatter_tint_matches_cpu_reference() {
+    let r = renderer();
+    let g0 = pattern_grid(
+        Vec3::new(-1.2, -1.0, -0.8),
+        Vec3::new(1.0, 1.1, 0.9),
+        [12, 10, 9],
+        0.0,
+    );
+    let g1 = pattern_grid(
+        Vec3::new(-0.9, -1.1, -1.0),
+        Vec3::new(1.2, 0.9, 1.1),
+        [8, 14, 11],
+        1.7,
+    );
+    let lights = [
+        Light {
+            pos: Vec3::new(0.5, 0.3, 0.2),
+            radius: 0.15,
+            rgb: [8.0, 5.0, 3.0],
+        },
+        Light {
+            pos: Vec3::new(-0.7, -0.4, 0.5),
+            radius: 0.3,
+            rgb: [2.0, 6.0, 4.0],
+        },
+        Light {
+            pos: Vec3::new(0.1, 2.0, -0.6),
+            radius: 0.0,
+            rgb: [5.0, 5.0, 9.0],
+        },
+    ];
+    let make = |scatter: ScatterLook| GasLook {
+        color: [0.9, 0.5, 0.3],
+        emissivity: 1.7,
+        opacity: 2.1,
+        scatter: Some(scatter),
+    };
+    let tint = [0.5, 0.8, 1.6];
+    for (proj_name, cam) in [
+        (
+            "ortho",
+            Camera::orthographic(
+                Vec3::new(0.1, -0.05, 0.0),
+                Vec3::new(0.3, -0.2, -1.0),
+                Vec3::Y,
+                Vec2::new(1.4, 1.05),
+            ),
+        ),
+        (
+            "perspective",
+            Camera::perspective(
+                Vec3::ZERO,
+                Vec3::new(0.25, 0.15, -1.0),
+                Vec3::Y,
+                Vec2::new(1.2, 0.9),
+                3.5,
+                0.05,
+            ),
+        ),
+    ] {
+        let gas = GasFrame {
+            grid0: &g0,
+            grid1: &g1,
+            mix: 0.37,
+            lights: &lights,
+            look: make(ScatterLook {
+                strength: 1.3,
+                anisotropy: 0.4,
+                shadows: true,
+                tint,
+            }),
+        };
+        let cfg = RenderConfig {
+            width: 64,
+            height: 48,
+            falloff: 6.0,
+            ..RenderConfig::default()
+        };
+        let gpu = r
+            .render_frame_with_gas(&FrameData::default(), Some(&gas), &cam, &cfg)
+            .unwrap();
+        let cpu = render_gas_cpu(&gas, &cam, cfg.width, cfg.height);
+        let mut nonzero = false;
+        for y in 0..cfg.height {
+            for x in 0..cfg.width {
+                let (gp, c) = (gpu.pixel(x, y), cpu.pixel(x, y));
+                nonzero |= c[0] > 0.0;
+                for k in 0..4 {
+                    let tol = 1e-3 * c[k].abs() + 1e-5;
+                    assert!(
+                        (gp[k] - c[k]).abs() <= tol,
+                        "{proj_name} pixel ({x},{y}) channel {k}: GPU {} vs CPU {}",
+                        gp[k],
+                        c[k]
+                    );
+                }
+            }
+        }
+        assert!(
+            nonzero,
+            "{proj_name} reference image is all black — degenerate"
+        );
+    }
+}
+
+/// Gate 5 — the new tint uniform disturbs neither off path. `scatter: None` (the
+/// full composite: stars + prepass + gas) stays bit-identical to the no-scatter
+/// reference (the tint `vec4` in `GasUniforms` must not leak into the off path),
+/// and a neutral-tint scatter-ON frame reproduces the CPU oracle (the GPU
+/// neutral path is correct end-to-end — the ON complement of the off-path pin).
+#[test]
+fn gpu_scatter_tint_off_paths_intact() {
+    let r = renderer();
+    let g = slab_grid();
+    let lights = [Light {
+        pos: Vec3::new(0.2, 0.1, 0.5),
+        radius: 0.1,
+        rgb: [5.0, 4.0, 3.0],
+    }];
+    let cfg = RenderConfig {
+        width: 96,
+        height: 96,
+        falloff: 6.0,
+        ..RenderConfig::default()
+    };
+    let cam = centered_camera();
+    let frame = scene(40);
+    let base = r
+        .render_frame_with_gas(
+            &frame,
+            Some(&GasFrame {
+                grid0: &g,
+                grid1: &g,
+                mix: 0.0,
+                lights: &[],
+                look: GasLook {
+                    color: [0.6, 0.7, 1.0],
+                    emissivity: 0.8,
+                    opacity: SLAB_KAPPA,
+                    scatter: None,
+                },
+            }),
+            &cam,
+            &cfg,
+        )
+        .unwrap();
+    // Off path: lights present, scatter None — the tint uniform (defaulted to
+    // neutral for the off path) must change nothing.
+    let off = r
+        .render_frame_with_gas(
+            &frame,
+            Some(&GasFrame {
+                grid0: &g,
+                grid1: &g,
+                mix: 0.0,
+                lights: &lights,
+                look: GasLook {
+                    color: [0.6, 0.7, 1.0],
+                    emissivity: 0.8,
+                    opacity: SLAB_KAPPA,
+                    scatter: None,
+                },
+            }),
+            &cam,
+            &cfg,
+        )
+        .unwrap();
+    assert_eq!(
+        off.pixels, base.pixels,
+        "scatter: None must stay bit-identical with the tint uniform present"
+    );
+    // ON complement: neutral tint reproduces the CPU oracle (small resolution).
+    let ocfg = RenderConfig {
+        width: 48,
+        height: 48,
+        falloff: 6.0,
+        ..RenderConfig::default()
+    };
+    let ocam = Camera::orthographic(
+        Vec3::new(0.1, -0.05, 0.0),
+        Vec3::new(0.3, -0.2, -1.0),
+        Vec3::Y,
+        Vec2::new(1.4, 1.05),
+    );
+    let og = pattern_grid(Vec3::splat(-1.0), Vec3::splat(1.0), [10, 10, 10], 0.0);
+    let neutral = GasFrame {
+        grid0: &og,
+        grid1: &og,
+        mix: 0.0,
+        lights: &lights,
+        look: GasLook {
+            color: [0.9, 0.5, 0.3],
+            emissivity: 1.1,
+            opacity: 1.4,
+            scatter: Some(ScatterLook {
+                strength: 1.3,
+                anisotropy: 0.4,
+                shadows: false,
+                tint: [1.0; 3],
+            }),
+        },
+    };
+    let gpu = r
+        .render_frame_with_gas(&FrameData::default(), Some(&neutral), &ocam, &ocfg)
+        .unwrap();
+    let cpu = render_gas_cpu(&neutral, &ocam, ocfg.width, ocfg.height);
+    let mut nonzero = false;
+    for y in 0..ocfg.height {
+        for x in 0..ocfg.width {
+            let (gp, c) = (gpu.pixel(x, y), cpu.pixel(x, y));
+            nonzero |= c[0] > 0.0;
+            for k in 0..4 {
+                let tol = 1e-3 * c[k].abs() + 1e-5;
+                assert!(
+                    (gp[k] - c[k]).abs() <= tol,
+                    "neutral-tint pixel ({x},{y}) channel {k}: GPU {} vs CPU {}",
+                    gp[k],
+                    c[k]
+                );
+            }
+        }
+    }
+    assert!(
+        nonzero,
+        "neutral-tint reference image is all black — degenerate"
     );
 }

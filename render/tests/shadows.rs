@@ -164,6 +164,7 @@ fn bake_shadows_matches_hand_chords_on_the_uniform_slab() {
                 strength: 1.0,
                 anisotropy: 0.0,
                 shadows: true,
+                tint: [1.0; 3],
             }),
         },
     };
@@ -230,6 +231,7 @@ fn bake_shadows_exact_ones() {
             strength: 1.0,
             anisotropy: 0.0,
             shadows: true,
+            tint: [1.0; 3],
         }),
     };
     // κ = 0: all ones, both volumes, exactly.
@@ -349,6 +351,7 @@ fn shadowed_march_matches_backlit_slab_closed_form() {
                     strength,
                     anisotropy: aniso as f32,
                     shadows: true,
+                    tint: [1.0; 3],
                 }),
             },
         };
@@ -413,6 +416,7 @@ fn shadowed_march_is_strictly_below_unshadowed() {
                 strength: 1.5,
                 anisotropy: 0.3,
                 shadows: true,
+                tint: [1.0; 3],
             }),
         },
     };
@@ -471,9 +475,11 @@ fn shadowed_march_off_is_bit_identical() {
         strength: 2.0,
         anisotropy: 0.5,
         shadows: true,
+        tint: [1.0; 3],
     };
     let off = ScatterLook {
         shadows: false,
+        tint: [1.0; 3],
         ..on
     };
     // The flag alone (no argument) is the v1 unshadowed march, bitwise.
@@ -555,6 +561,7 @@ fn gpu_shadowed_scatter_matches_cpu_reference_ortho() {
                 strength: 1.3,
                 anisotropy: 0.4,
                 shadows: true,
+                tint: [1.0; 3],
             }),
         },
     };
@@ -635,6 +642,7 @@ fn gpu_shadowed_scatter_matches_cpu_reference_perspective() {
                 strength: 1.3,
                 anisotropy: -0.5,
                 shadows: true,
+                tint: [1.0; 3],
             }),
         },
     };
@@ -720,6 +728,7 @@ fn gpu_shadow_flag_with_inactive_scatter_stays_bit_identical() {
                 strength: 0.0,
                 anisotropy: 0.7,
                 shadows: true,
+                tint: [1.0; 3],
             }),
             &lights,
         ),
@@ -732,6 +741,7 @@ fn gpu_shadow_flag_with_inactive_scatter_stays_bit_identical() {
                 strength: 2.0,
                 anisotropy: 0.7,
                 shadows: true,
+                tint: [1.0; 3],
             }),
             &[],
         ),
@@ -773,6 +783,7 @@ fn gpu_shadowed_strength_linear_and_shadows_bite() {
                     strength,
                     anisotropy: 0.3,
                     shadows,
+                    tint: [1.0; 3],
                 }),
             },
         };

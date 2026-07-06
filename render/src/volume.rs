@@ -538,6 +538,15 @@ pub struct ScatterLook {
     /// [`march_gas`] keys on its `shadows` ARGUMENT, not this flag; the flag
     /// tells the renderer (and [`render_gas_cpu`]) whether to bake.
     pub shadows: bool,
+    /// Chromatic scattering albedo (tinted-octree-lanterns): a per-channel
+    /// multiplier on the SCATTERED radiance only — emission, absorption, the
+    /// star splats, and the shadow bake are all untouched. Semantically a
+    /// single-scatter albedo (dust reflects blue preferentially — the
+    /// reflection-nebula look); it composes multiplicatively with each light's
+    /// own RGB. `[1.0; 3]` is bit-identical to the pre-tint march (×1.0 is the
+    /// exact identity, CPU and WGSL). Applied once per step OUTSIDE the
+    /// per-light sum (it is constant across lights).
+    pub tint: [f32; 3],
 }
 
 /// Gas look uniforms (plan D8: the grid carries ρ only; everything visual lives

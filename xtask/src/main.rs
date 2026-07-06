@@ -1035,6 +1035,7 @@ fn run_movie(
                 strength: gl.scattering,
                 anisotropy: gl.anisotropy,
                 shadows: gl.shadows,
+                tint: gl.scatter_tint,
             }),
         },
         None => galaxy_render::GasLook::default(),

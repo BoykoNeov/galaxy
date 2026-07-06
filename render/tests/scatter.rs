@@ -14,8 +14,7 @@
 use galaxy_render::camera::Camera;
 use galaxy_render::render::{RenderConfig, Renderer};
 use galaxy_render::volume::{
-    cluster_lights, hg_phase, march_gas, render_gas_cpu, GasFrame, GasLook, Light, ScatterLook,
-    LIGHT_BINS,
+    hg_phase, march_gas, render_gas_cpu, GasFrame, GasLook, Light, ScatterLook,
 };
 use galaxy_renderprep::{FrameData, GasGrid};
 use glam::{Vec2, Vec3};
@@ -167,120 +166,14 @@ fn hg_phase_hand_values() {
 }
 
 // ---------- CPU gates: light clustering ----------
-
-/// Hand-built clustering oracle: two near stars merge into one light at their
-/// luminance-weighted centroid with summed RGB power; a far star stays its own
-/// light; total power is conserved exactly; a zero-brightness star neither
-/// lights nor stretches the binning AABB.
-#[test]
-fn cluster_lights_hand_oracle() {
-    // Stars A (origin, red, w=2) and B (+0.1x, green, w=1) share the corner
-    // bin of the [0,10]³ AABB; C at the opposite corner is alone in its bin.
-    let frame = FrameData {
-        pos: vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(0.1, 0.0, 0.0),
-            Vec3::new(10.0, 10.0, 10.0),
-        ],
-        color: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        size: vec![0.1; 3],
-        brightness: vec![2.0, 1.0, 4.0],
-    };
-    let lights = cluster_lights(&frame);
-    assert_eq!(lights.len(), 2, "two occupied bins ⇒ two lights");
-
-    // Power conservation: Σ rgb over lights = Σ color·brightness over stars.
-    let mut total = [0.0f32; 3];
-    for l in &lights {
-        for (acc, v) in total.iter_mut().zip(l.rgb) {
-            *acc += v;
-        }
-    }
-    for (c, want) in [2.0f32, 1.0, 4.0].iter().enumerate() {
-        assert!(
-            (total[c] - want).abs() < 1e-6 * want,
-            "channel {c}: total power {} vs Σ emissive {want}",
-            total[c]
-        );
-    }
-
-    // The merged light: luminance weights w_A = 2, w_B = 1 ⇒ centroid at
-    // x = (2·0 + 1·0.1)/3, rgb = [2, 1, 0]. Bin cell = (10/8)³ ⇒ softening
-    // radius = half its diagonal.
-    let merged = lights
-        .iter()
-        .find(|l| l.rgb[0] > 0.0)
-        .expect("the A+B light exists");
-    assert!(
-        (merged.pos - Vec3::new(0.1 / 3.0, 0.0, 0.0)).length() < 1e-6,
-        "merged centroid {:?} vs hand (0.0333, 0, 0)",
-        merged.pos
-    );
-    assert!((merged.rgb[0] - 2.0).abs() < 1e-6 && (merged.rgb[1] - 1.0).abs() < 1e-6);
-    let cell = 10.0 / LIGHT_BINS as f32;
-    let want_r = 0.5 * (3.0f32).sqrt() * cell;
-    assert!(
-        (merged.radius - want_r).abs() < 1e-5,
-        "softening radius {} vs half bin diagonal {want_r}",
-        merged.radius
-    );
-
-    // The lone light: C's own position, color, brightness.
-    let lone = lights
-        .iter()
-        .find(|l| l.rgb[2] > 0.0)
-        .expect("the C light exists");
-    assert!((lone.pos - Vec3::splat(10.0)).length() < 1e-6);
-    assert!((lone.rgb[2] - 4.0).abs() < 1e-6);
-
-    // A dark star far outside must change nothing (it would otherwise stretch
-    // the AABB and move every bin boundary).
-    let mut with_dark = frame.clone();
-    with_dark.pos.push(Vec3::new(100.0, 0.0, 0.0));
-    with_dark.color.push([1.0, 1.0, 1.0]);
-    with_dark.size.push(0.1);
-    with_dark.brightness.push(0.0);
-    assert_eq!(
-        cluster_lights(&with_dark),
-        lights,
-        "a zero-brightness star must not affect the clustering"
-    );
-
-    // All-dark frame ⇒ no lights; empty frame ⇒ no lights.
-    let dark = FrameData {
-        pos: vec![Vec3::ZERO],
-        color: vec![[1.0, 1.0, 1.0]],
-        size: vec![0.1],
-        brightness: vec![0.0],
-    };
-    assert!(cluster_lights(&dark).is_empty());
-    assert!(cluster_lights(&FrameData::default()).is_empty());
-}
-
-/// The degenerate AABB: every luminous star at one point collapses to a single
-/// light exactly there, with zero softening radius (and no 0/0 NaNs).
-#[test]
-fn cluster_lights_degenerate_aabb() {
-    let p = Vec3::new(1.5, -2.0, 0.25);
-    let frame = FrameData {
-        pos: vec![p, p, p],
-        color: vec![[1.0, 0.5, 0.2]; 3],
-        size: vec![0.1; 3],
-        brightness: vec![1.0, 2.0, 3.0],
-    };
-    let lights = cluster_lights(&frame);
-    assert_eq!(lights.len(), 1);
-    assert_eq!(lights[0].pos, p, "degenerate AABB centroid is the point");
-    assert_eq!(lights[0].radius, 0.0, "degenerate AABB has zero cell size");
-    for (c, base) in [1.0f32, 0.5, 0.2].iter().enumerate() {
-        let want = base * 6.0; // brightness 1+2+3
-        assert!(
-            (lights[0].rgb[c] - want).abs() < 1e-6 * want,
-            "channel {c}: {} vs {want}",
-            lights[0].rgb[c]
-        );
-    }
-}
+//
+// The v1 fixed-8³-binning clustering oracles (`cluster_lights_hand_oracle`,
+// `cluster_lights_degenerate_aabb`) were RETIRED with the octree replacement
+// (tinted-octree-lanterns O1): their same-bin-merge geometry and single global
+// radius are properties of the binning that no longer holds. The
+// algorithm-independent assertions (power conservation, dark-star drop,
+// all-dark → empty, coincident → one light radius 0) carry over into the new
+// `render/tests/cluster.rs` gates.
 
 // ---------- CPU gates: scattered radiance closed forms ----------
 

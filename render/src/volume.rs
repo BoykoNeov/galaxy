@@ -38,6 +38,7 @@
 //! absorption is `κ·ρ` per unit length. Both are LOOK uniforms ([`GasLook`]),
 //! not baked into the grid — the look iterates at re-render cost (plan D8).
 
+
 use glam::Vec3;
 
 use galaxy_renderprep::{sample_mix, FrameData, GasGrid};
@@ -56,16 +57,31 @@ pub const EXIT_TRANSMITTANCE: f32 = 1e-4;
 /// ~443 steps). Shared by shader and CPU mirror so both truncate identically.
 pub const MAX_STEPS: u32 = 1 << 20;
 
-/// Light-proxy bins per axis for [`cluster_lights`]: a quality **constant**
-/// (like the gas grid resolution), not a look knob — at most `LIGHT_BINS³`
-/// point lights approximate the stellar distribution.
-pub const LIGHT_BINS: u32 = 8;
+/// Maximum point-light proxies emitted by [`cluster_lights`]: a quality
+/// **constant** (like the gas grid resolution), not a look knob — the adaptive
+/// octree cut spends at most this many lights approximating the stellar
+/// distribution. `512` retires the old fixed `8³` worst case and keeps the
+/// shadow-volume footprint `MAX_LIGHTS·SHADOW_RES³·4 B = 64 MiB` under wgpu's
+/// default 128 MiB storage-binding limit.
+pub const MAX_LIGHTS: usize = 512;
+
+/// Relative error floor for the [`cluster_lights`] octree cut: refinement stops
+/// when the worst leaf's metric (`P·spread²`) falls below `REFINE_TOL ×` the
+/// root metric. This keeps the *typical* light count adaptive — a compact frame
+/// clusters to few lights instead of greedily burning all [`MAX_LIGHTS`] every
+/// frame. Tuned once from the A/B's measured counts + wall-clock, then frozen.
+pub const REFINE_TOL: f64 = 1e-3;
+
+/// Octree depth backstop for [`cluster_lights`]: two distinct positions
+/// separate into different octants within ~mantissa-many levels, so this bound
+/// only guards against float degeneracy — it is never the design terminator.
+pub const MAX_DEPTH: u32 = 32;
 
 /// Shadow-lattice resolution per axis for [`bake_shadows`]
-/// (umbral-lantern-lattice): a quality **constant** like [`LIGHT_BINS`], not a
+/// (umbral-lantern-lattice): a quality **constant** like [`MAX_LIGHTS`], not a
 /// look knob. Shadows are soft occlusion, so 32³ over the march domain is
 /// honest resolution, and the worst-case GPU footprint
-/// `LIGHT_BINS³·SHADOW_RES³·4 B = 64 MiB` stays under wgpu's default 128 MiB
+/// `MAX_LIGHTS·SHADOW_RES³·4 B = 64 MiB` stays under wgpu's default 128 MiB
 /// storage-binding limit.
 pub const SHADOW_RES: u32 = 32;
 
@@ -227,89 +243,41 @@ pub struct Light {
     pub rgb: [f32; 3],
 }
 
-/// Cluster the frame's stellar splats into at most [`LIGHT_BINS`]³ point
-/// lights: bin over the AABB of the *luminous* stars (total emission > 0 —
-/// dark splats neither light gas nor stretch the AABB), accumulating per bin
-/// the RGB power Σ color·brightness and the luminance-weighted centroid, in
-/// f64 (deterministic index-order fold; clustering has no GPU mirror — the
-/// GPU consumes its output). Lights are emitted in bin-index order. An
-/// all-dark frame clusters to no lights.
+/// Cluster the frame's stellar splats into at most [`MAX_LIGHTS`] point lights
+/// via a deterministic greedy octree cut over the *luminous* stars (total
+/// emission > 0 — dark splats neither light gas nor stretch the bounds).
+/// Refinement pops the leaf with the largest far-field flux-error surrogate
+/// (`P·spread²`) and splits it by octant until every leaf falls below
+/// [`REFINE_TOL`]×root or the budget is spent. Each leaf emits one light at its
+/// luminance-weighted centroid with summed RGB power (exact in the f64 fold)
+/// and a softening radius of half its own cell diagonal. All f64 accumulation,
+/// deterministic index-order folds; the clustering has no GPU mirror (the GPU
+/// consumes its flat output). An all-dark frame clusters to no lights.
+///
+/// This is the shipped entry point — the quality constants [`REFINE_TOL`] and
+/// [`MAX_LIGHTS`] are baked in. It delegates to [`cluster_lights_with`], which
+/// exposes both as parameters so a test can drive the budget-cap path at a
+/// *reachable* budget (the shipped 512 is unreachable at `REFINE_TOL = 1e-3` —
+/// the octree metric drops 32× per level, so natural distributions cap at
+/// ~64 leaves and heavy-tailed ones at a few hundred; the cap is a GPU-buffer
+/// backstop, never the normal terminator).
 pub fn cluster_lights(frame: &FrameData) -> Vec<Light> {
-    // Total emissive power of star i — the clustering weight. Zero-power
-    // splats are invisible to the gas AND to the AABB (a dark far-flung
-    // particle must not move every bin boundary).
-    let power = |i: usize| -> [f64; 3] {
-        let c = frame.color[i];
-        let b = frame.brightness[i] as f64;
-        [c[0] as f64 * b, c[1] as f64 * b, c[2] as f64 * b]
-    };
-    let lum = |i: usize| -> f64 {
-        let p = power(i);
-        p[0] + p[1] + p[2]
-    };
+    cluster_lights_with(frame, REFINE_TOL, MAX_LIGHTS)
+}
 
-    let mut bmin = Vec3::splat(f32::INFINITY);
-    let mut bmax = Vec3::splat(f32::NEG_INFINITY);
-    let mut any = false;
-    for i in 0..frame.len() {
-        if lum(i) > 0.0 {
-            bmin = bmin.min(frame.pos[i]);
-            bmax = bmax.max(frame.pos[i]);
-            any = true;
-        }
-    }
-    if !any {
-        return Vec::new();
-    }
-
-    let bins = LIGHT_BINS as usize;
-    let ext = bmax - bmin;
-    // Per-axis bin index; a zero-extent axis collapses to bin 0 (the
-    // degenerate all-stars-coincident AABB clusters to a single light).
-    let axis_bin = |p: f32, min: f32, e: f32| -> usize {
-        if e <= 0.0 {
-            0
-        } else {
-            ((((p - min) / e) * LIGHT_BINS as f32) as usize).min(bins - 1)
-        }
-    };
-
-    #[derive(Clone, Copy, Default)]
-    struct Bin {
-        w: f64,
-        wpos: glam::DVec3,
-        rgb: [f64; 3],
-    }
-    let mut cells = vec![Bin::default(); bins * bins * bins];
-    for i in 0..frame.len() {
-        let w = lum(i);
-        if w <= 0.0 {
-            continue;
-        }
-        let p = frame.pos[i];
-        let idx = (axis_bin(p.z, bmin.z, ext.z) * bins + axis_bin(p.y, bmin.y, ext.y)) * bins
-            + axis_bin(p.x, bmin.x, ext.x);
-        let cell = &mut cells[idx];
-        cell.w += w;
-        cell.wpos += p.as_dvec3() * w;
-        let pw = power(i);
-        for (acc, p) in cell.rgb.iter_mut().zip(pw) {
-            *acc += p;
-        }
-    }
-
-    // One softening radius for all lights: half the bin-cell diagonal (0 for
-    // the degenerate AABB — a coincident cluster IS a point).
-    let radius = 0.5 * (ext / LIGHT_BINS as f32).length();
-    cells
-        .iter()
-        .filter(|cell| cell.w > 0.0)
-        .map(|cell| Light {
-            pos: (cell.wpos / cell.w).as_vec3(),
-            radius,
-            rgb: [cell.rgb[0] as f32, cell.rgb[1] as f32, cell.rgb[2] as f32],
-        })
-        .collect()
+/// The parameterized core of [`cluster_lights`]: identical greedy octree cut,
+/// but with the error floor `tol` (relative to the root metric) and the light
+/// `budget` (max leaf count) as arguments. Shipped clustering is
+/// `cluster_lights_with(frame, REFINE_TOL, MAX_LIGHTS)`. Exposed so the gates
+/// can exercise the budget-cap arithmetic at a budget the metric can actually
+/// reach — the safety-critical path that protects the `MAX_LIGHTS·32³·4 B`
+/// shadow buffer but is dead code under the shipped constants. Not a look knob;
+/// production must call [`cluster_lights`].
+pub fn cluster_lights_with(frame: &FrameData, tol: f64, budget: usize) -> Vec<Light> {
+    // O1 green implements the greedy octree cut here; the red commit ships
+    // only the signature + gates (tinted-octree-lanterns O1 [red]).
+    let _ = (frame, tol, budget);
+    todo!("octree cut — O1 green")
 }
 
 /// The Henyey–Greenstein phase function `p(cosθ) = (1 − g²) / (4π · (1 + g² −

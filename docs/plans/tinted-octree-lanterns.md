@@ -108,7 +108,12 @@ wall-clock, and `REFINE_TOL` is the lever if K inflates.
   constants; `LIGHT_BINS` deleted — the SHADOW_RES doc comment's memory
   arithmetic re-keys to `MAX_LIGHTS`).
 - `cluster_lights(&FrameData) -> Vec<Light>` — signature, `Light` layout, and
-  call sites (renderer, xtask movie path ×2) all unchanged.
+  call sites (renderer, xtask movie path ×2) all unchanged. It delegates to
+  `cluster_lights_with(&FrameData, tol: f64, budget: usize) -> Vec<Light>`
+  (the parameterized core, same greedy cut with the error floor + light budget
+  as arguments). This helper exists so gate 6 can drive the budget-cap path at
+  a *reachable* budget — see the gate. Not a look knob; production calls
+  `cluster_lights`.
 
 ### Gates (`render/tests/cluster.rs`, new; CPU-only — the GPU never sees the clusterer)
 
@@ -141,10 +146,20 @@ distant-clusters-stay-separate, all-dark-empty) carry over into the new file.
    justified from the metric bound at `REFINE_TOL`); documented in a comment:
    the same probe under 8³ binning misses by a factor recorded from a
    hand calculation.
-6. **Budget saturation:** a scale-free fractal-ish cloud (hierarchical LCG
-   clusters) large enough to exhaust the budget → count ≤ 512 and ≥ 512·½
-   (the greedy stop leaves slack ≤ 7; the loose lower bound just proves the
-   budget is actually reachable).
+6. **Budget-cap path (reframed — the 512 cap is unreachable at REFINE_TOL):**
+   the original "exhaust the 512 budget, slack ≤ 7" premise is IMPOSSIBLE at
+   `REFINE_TOL = 1e-3`. The octree metric drops ~32× per level (⅛ power × ¼
+   spread²), and `32² > 1/REFINE_TOL`, so uniform refinement dies at ~64 leaves
+   and even heavy-tailed brightness plateaus in the low hundreds (measured
+   ceiling ~267). The 512 cap is a GPU-buffer backstop, never the normal
+   terminator — asserting a `≥ 256` floor would be curve-fitting to output. So
+   gate 6 pins the two things that ARE true and load-bearing: (a) the cap
+   arithmetic itself, exercised via `cluster_lights_with(frame, REFINE_TOL, 16)`
+   on a fractal cloud whose unbudgeted count (~33) exceeds 16 — the greedy stop
+   (a split adds 1–7 leaves) then lands the count in `[budget−6, budget] =
+   [10, 16]`, a bound DERIVED from the arithmetic; and (b) the safety contract
+   `cluster_lights(&big).len() ≤ MAX_LIGHTS` on a large power-law cloud (a
+   backstop that always passes with margin is still correct to assert).
 7. **Off-path pins:** the existing scatter/shadow gates (hand-built light
    lists, `scatter: None` bit-identity) must stay green untouched — they
    never call the clusterer, which is itself the proof the replacement is

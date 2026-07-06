@@ -23,7 +23,8 @@
 use galaxy_core::{DVec3, Species, State};
 use galaxy_gpu::GpuResidentLeapfrog;
 use galaxy_solvers::sph::{
-    density_adaptive, hydro_accelerations, DensityConfig, HydroParams, SUPPORT,
+    density_adaptive, hydro_accelerations, max_stable_dt, DensityConfig, HashGrid, HydroParams,
+    SUPPORT,
 };
 
 const G: f64 = 1.0;
@@ -589,4 +590,323 @@ fn resident_hydro_matches_cpu_over_stepped_run() {
 /// Gas-subset velocities in ascending global index (helper for the momentum guard).
 fn vel_of(state: &State, gas_idx: &[usize]) -> Vec<DVec3> {
     gas_idx.iter().map(|&i| state.vel[i]).collect()
+}
+
+// ===========================================================================
+// GPU-SPH **G5c**: resident CFL stable-dt + on-device no-readback min reduction.
+//
+// G5c ports the G4 CFL per-target `dt_i = C_cfl·h_i/v_sig,i` onto the resident stepper —
+// running on the gas (pos/vel/h) the last force evaluation left resident, WITHOUT leaving
+// the device — and adds the one piece G4 deferred: the milestone bound `min_i dt_i` is
+// reduced ON the GPU, so only that single scalar crosses the bus (not the per-gas vector
+// G4 folded host-side). The CFL kernel WGSL is the G4 `sph_cfl` text VERBATIM (one source
+// of truth); the resident-only piece is the min-reduction kernel. This is compute only —
+// NO dt policy (a block-adaptive stepper writing `min_stable_dt` into the step uniform is
+// the deferred D6/G6 follow-up).
+//
+// ## Why min-reduction is SAFE where the drift two-sum was not
+// The M4j drift accumulator needed runtime-uniform XOR barriers because IEEE
+// non-associativity let the f32 compiler collapse the compensated two-sum to zero. The
+// CFL min has NO such trap: `min` merely SELECTS one of its inputs, so `min(min(a,b),c) ==
+// min(a,min(b,c))` bit-for-bit for any tree order — and `v_sig ≥ 2c_s > 0`, `h > 0` mean
+// `dt_i` is finite positive (no NaN to make `min` order-dependent). The tree reduction is
+// therefore bit-deterministic with no barrier, and the on-GPU min equals a host fold of
+// the same vector EXACTLY (gate `resident_min_dt_is_device_reduction_of_vector`).
+//
+// ## The gates (all NO-STEP — resident v = narrow(v₀) matches the oracle)
+//   1. `resident_min_stable_dt_matches_cpu_oracle` — full chain: the device-reduced
+//      `min_stable_dt` vs the trusted `max_stable_dt` oracle. Density-limited (the oracle
+//      recomputes `h`), so ~1e-3 (the G2 `h` tol), not G4's isolated 1e-5.
+//   2. `resident_gas_dt_matches_cpu_per_target` — the SHARP per-target vector, oracle fed
+//      the GPU `h` (isolates CFL from density), with the asymmetric-approaching precondition
+//      that makes the global-`SUPPORT·h_max` gather invariant observable (a per-target-`h_i`
+//      radius bug on ANY particle fails it — the scalar min would only move if the minimizer
+//      is hit).
+//   3. `resident_min_dt_is_device_reduction_of_vector` — the no-readback proof: the
+//      scalar path (which copies back ONLY the 1-element reduced buffer, never the vector)
+//      equals the host fold of the vector path BIT-FOR-BIT. Because `min_stable_dt` never
+//      transfers the N values, it structurally CANNOT have folded them host-side.
+//   4. `resident_cfl_is_deterministic` — same input ⇒ identical vector and scalar.
+//   5. `resident_min_stable_dt_no_gas_is_infinity` — the catastrophic-`0` contract: a
+//      gas-mode stepper over an all-star state ⇒ `+∞` (no hydro CFL constraint), NOT 0.
+// ===========================================================================
+
+/// CFL number ≠ 1 so a "forgot ×C_cfl" bug can't hide (it factors out of the ratio) — the
+/// same choice as the standalone G4 gate.
+const C_CFL: f64 = 0.25;
+
+/// Per-target signal velocity `v_sig,i = max_j (2c_s − 3 w_ij)` over approaching neighbors,
+/// floored at `2c_s` — an independent hand-transcription of the oracle's inner loop
+/// (`galaxy_solvers::sph::cfl::max_stable_dt`), gathering at the GLOBAL `SUPPORT·h_max` and
+/// rejecting each pair outside its own `SUPPORT·max(h_i,h_j)`. Copied from the G4 gate.
+fn per_target_v_sig(pos: &[DVec3], vel: &[DVec3], h: &[f64], cs: f64) -> Vec<f64> {
+    let n = pos.len();
+    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+    let grid = HashGrid::build(pos, SUPPORT * h_max);
+    let two_cs = 2.0 * cs;
+    (0..n)
+        .map(|i| {
+            let ngb = grid.neighbours_within(pos, pos[i], SUPPORT * h_max);
+            let mut v_sig = two_cs;
+            for &j in &ngb {
+                if j == i {
+                    continue;
+                }
+                let r_ij = pos[i] - pos[j];
+                let r = r_ij.length();
+                if r == 0.0 || r >= SUPPORT * h[i].max(h[j]) {
+                    continue;
+                }
+                let w = (vel[i] - vel[j]).dot(r_ij) / r;
+                if w < 0.0 {
+                    v_sig = v_sig.max(two_cs - 3.0 * w);
+                }
+            }
+            v_sig
+        })
+        .collect()
+}
+
+/// Per-target stable step `dt_i = C_cfl · h_i / v_sig,i` — the vector the resident device
+/// must match element-wise (its min is `max_stable_dt`).
+fn cpu_per_target_dt(pos: &[DVec3], vel: &[DVec3], h: &[f64], cs: f64, c_cfl: f64) -> Vec<f64> {
+    let v_sig = per_target_v_sig(pos, vel, h, cs);
+    (0..pos.len()).map(|i| c_cfl * h[i] / v_sig[i]).collect()
+}
+
+/// Worst per-element relative error. `dt_i > 0` bounded away from zero (`v_sig ≥ 2c_s`,
+/// `h > 0`), so a plain per-element relative error is clean (no RMS normalization needed).
+fn worst_rel_dt(gpu: &[f64], cpu: &[f64]) -> f64 {
+    assert_eq!(gpu.len(), cpu.len());
+    gpu.iter()
+        .zip(cpu)
+        .map(|(g, c)| (g - c).abs() / c.abs())
+        .fold(0.0_f64, f64::max)
+}
+
+/// Count ASYMMETRIC-coupling pairs that are ALSO APPROACHING:
+/// `SUPPORT·min(h_i,h_j) ≤ r < SUPPORT·max(h_i,h_j)` and `w_ij < 0`. These make a
+/// per-target-radius bug OBSERVABLE in the vector gate (the diffuse particle's support
+/// reaches the compact one but not vice-versa, AND the approach drives `v_sig`). Copied
+/// from the G4 gate.
+fn asymmetric_approaching_count(pos: &[DVec3], vel: &[DVec3], h: &[f64]) -> usize {
+    let n = pos.len();
+    let mut count = 0usize;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let r_ij = pos[i] - pos[j];
+            let r = r_ij.length();
+            let lo = SUPPORT * h[i].min(h[j]);
+            let hi = SUPPORT * h[i].max(h[j]);
+            if r >= lo && r < hi && (vel[i] - vel[j]).dot(r_ij) < 0.0 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// **G5c full-chain gate.** The device-reduced `min_stable_dt` must match the trusted CPU
+/// `max_stable_dt` oracle on an all-gas cloud with a mixed velocity field. The oracle
+/// recomputes `h` internally, so this is density-limited (the G2 `h` tolerance), not G4's
+/// isolated per-target tolerance — it validates the WHOLE resident chain (gather → density
+/// root-find → CFL per-target → on-device min) end-to-end against the trusted number.
+#[test]
+fn resident_min_stable_dt_matches_cpu_oracle() {
+    let n = 3000;
+    let mass = vec![1.0; n];
+    let vel = random_velocities(0x5EED, n, 1.0);
+    let mut state = gas_cloud(0xC0FFEE, mass, vel, 5.0);
+    narrow_state(&mut state);
+    let params = HydroParams::default();
+    let dcfg = DensityConfig::default();
+
+    // Precondition: the minimizer must be driven above the 2c_s floor, else max_stable_dt is
+    // just C_cfl·h_min/(2c_s) and a broken approach loop would be invisible to the scalar gate.
+    let (_gas_idx, gpos, gmass) = gas_subset(&state);
+    let gvel: Vec<DVec3> = _gas_idx.iter().map(|&i| state.vel[i]).collect();
+    let dens = density_adaptive(&gpos, &gmass, &dcfg, None);
+    let cs = params.sound_speed;
+    let v_sig = per_target_v_sig(&gpos, &gvel, &dens.h, cs);
+    let dt = cpu_per_target_dt(&gpos, &gvel, &dens.h, cs, C_CFL);
+    let argmin = (0..dt.len())
+        .min_by(|&a, &b| dt[a].total_cmp(&dt[b]))
+        .expect("non-empty");
+    assert!(
+        v_sig[argmin] > 2.0 * cs,
+        "minimizer {argmin} sits at the v_sig floor — pick a livelier field"
+    );
+
+    let cpu = max_stable_dt(&state, &params, &dcfg, C_CFL);
+
+    let mut stepper = GpuResidentLeapfrog::new_with_sph(G, EPS, THETA, params, dcfg)
+        .expect("wgpu adapter required for GPU-SPH resident gates");
+    stepper.upload(&state);
+    let gpu = stepper.min_stable_dt(C_CFL);
+
+    assert!(
+        gpu.is_finite() && gpu > 0.0,
+        "resident min_stable_dt must be finite positive: {gpu}"
+    );
+    let rel = (gpu - cpu).abs() / cpu;
+    // Density-limited: the oracle recomputes h from positions while the device uses its own
+    // root-find h, so the bound tracks the G2 h tolerance (~1e-3), not G4's isolated 1e-5.
+    // Measure-then-tighten with cross-adapter headroom.
+    assert!(
+        rel < 2.0e-3,
+        "resident min_stable_dt {gpu} vs oracle {cpu} (rel {rel:.3e})"
+    );
+}
+
+/// **G5c sharp per-target gate.** The resident per-gas `dt_i` vector vs the CPU per-target
+/// oracle fed the SAME GPU-computed `h` (isolates the CFL kernel from the density root-find,
+/// already G2/G5a-gated). Fails on a per-target radius bug on ANY particle — not only the
+/// minimizer. The precondition asserts the cloud actually contains asymmetric-coupling
+/// approaching pairs, where that bug is observable.
+#[test]
+fn resident_gas_dt_matches_cpu_per_target() {
+    let n = 3000;
+    let mass = vec![1.0; n];
+    let vel = random_velocities(0x5EED, n, 1.0);
+    let mut state = gas_cloud(0xC0FFEE, mass, vel, 5.0);
+    narrow_state(&mut state);
+    let params = HydroParams::default();
+    let dcfg = DensityConfig::default();
+    let (_gas_idx, gpos, _gmass) = gas_subset(&state);
+    let gvel: Vec<DVec3> = _gas_idx.iter().map(|&i| state.vel[i]).collect();
+
+    let mut stepper = GpuResidentLeapfrog::new_with_sph(G, EPS, THETA, params, dcfg)
+        .expect("wgpu adapter required for GPU-SPH resident gates");
+    stepper.upload(&state);
+    // GPU h isolates the CFL kernel; GPU dt is the vector under test (SAME resident h).
+    let gd = stepper.snapshot_gas_density();
+    let gc = stepper.snapshot_gas_dt(C_CFL);
+    let h: Vec<f64> = gd.h.iter().map(|&x| x as f64).collect();
+
+    assert_eq!(gc.gas_idx, _gas_idx, "resident gas map != gas subset");
+
+    // Precondition (on the GPU h, the same geometry the device sees): asymmetric-coupling
+    // APPROACHING pairs must exist, else a per-target-h_i gather bug is invisible.
+    let asym = asymmetric_approaching_count(&gpos, &gvel, &h);
+    assert!(
+        asym > 100,
+        "cloud/field must contain asymmetric-coupling APPROACHING pairs (got {asym})"
+    );
+
+    let cpu = cpu_per_target_dt(&gpos, &gvel, &h, params.sound_speed, C_CFL);
+    for (i, &d) in gc.dt.iter().enumerate() {
+        assert!(
+            d.is_finite() && d > 0.0,
+            "dt_i must be finite positive at {i}: {d}"
+        );
+    }
+    let worst = worst_rel_dt(&gc.dt, &cpu);
+    // Isolated (GPU h fed in): dt_i is one max + one divide, no accumulation ⇒ tight f32,
+    // matching G4's per-target gate (worst ≈ 1e-6). A real bug (coupling cutoff, per-target
+    // radius, or w/r² instead of w/r) is ≫1%; the 1e-5 bound fails hard on it.
+    assert!(
+        worst < 1.0e-5,
+        "resident CFL per-target worst rel err {worst:.3e}"
+    );
+}
+
+/// **G5c no-readback proof.** The device-reduced scalar `min_stable_dt` (which copies back
+/// ONLY the 1-element min buffer — it never transfers the per-gas vector) must equal the
+/// host fold of the vector `snapshot_gas_dt` returns, BIT-FOR-BIT. `min` selects one input
+/// and f32→f64 promotion is exact, so `==` is legitimate; because the scalar path never sees
+/// the N values, it structurally cannot have folded them host-side — this is what pins the
+/// reduction ONTO the device. (Ties two submits via determinism, established independently
+/// by `resident_cfl_is_deterministic`.)
+#[test]
+fn resident_min_dt_is_device_reduction_of_vector() {
+    let n = 2000;
+    let mass = vec![1.0; n];
+    let vel = random_velocities(0x1CE, n, 1.0);
+    let mut state = gas_cloud(0xBEEF, mass, vel, 5.0);
+    narrow_state(&mut state);
+
+    let mut stepper = GpuResidentLeapfrog::new_with_sph(
+        G,
+        EPS,
+        THETA,
+        HydroParams::default(),
+        DensityConfig::default(),
+    )
+    .expect("wgpu adapter required for GPU-SPH resident gates");
+    stepper.upload(&state);
+
+    let gc = stepper.snapshot_gas_dt(C_CFL);
+    let device_min = stepper.min_stable_dt(C_CFL);
+    let host_min = gc.dt.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    assert_eq!(
+        device_min, host_min,
+        "device-reduced min must equal the host fold of the per-gas vector bit-for-bit"
+    );
+}
+
+/// **G5c determinism gate.** Same input ⇒ identical per-gas vector AND scalar min on a
+/// given device (each CFL thread owns its own `dt_out` slot; the min tree is
+/// order-independent — no scatter race, no reassociation).
+#[test]
+fn resident_cfl_is_deterministic() {
+    let n = 1500;
+    let mass = vec![1.0; n];
+    let vel = random_velocities(0xFEED, n, 1.0);
+    let mut state = gas_cloud(0xD1CE, mass, vel, 4.0);
+    narrow_state(&mut state);
+    let params = HydroParams::default();
+    let dcfg = DensityConfig::default();
+
+    let mut a = GpuResidentLeapfrog::new_with_sph(G, EPS, THETA, params, dcfg.clone())
+        .expect("wgpu adapter required for GPU-SPH resident gates");
+    a.upload(&state);
+    let av = a.snapshot_gas_dt(C_CFL);
+    let am = a.min_stable_dt(C_CFL);
+
+    let mut b = GpuResidentLeapfrog::new_with_sph(G, EPS, THETA, params, dcfg)
+        .expect("wgpu adapter required for GPU-SPH resident gates");
+    b.upload(&state);
+    let bv = b.snapshot_gas_dt(C_CFL);
+    let bm = b.min_stable_dt(C_CFL);
+
+    assert_eq!(
+        av.dt, bv.dt,
+        "per-target CFL dt must be run-to-run identical"
+    );
+    assert_eq!(am, bm, "reduced min dt must be run-to-run identical");
+}
+
+/// **G5c catastrophic-`0` contract.** A gas-mode stepper over an all-star (no gas) state
+/// has no hydro CFL constraint, so `min_stable_dt` must be `+∞`, NOT `0` (a `0` would
+/// falsely report that every dt is too large). Mirrors the standalone G4 empty gate.
+#[test]
+fn resident_min_stable_dt_no_gas_is_infinity() {
+    // All Collisionless (from_phase_space's default kind) ⇒ empty gas map even in gas mode.
+    let mut next = rng(0x57A5);
+    let n = 200;
+    let pos: Vec<DVec3> = (0..n)
+        .map(|_| DVec3::new(next() - 0.5, next() - 0.5, next() - 0.5) * 4.0)
+        .collect();
+    let vel = random_velocities(0xA11, n, 0.1);
+    let mut state = State::from_phase_space(pos, vel, vec![1.0; n]);
+    narrow_state(&mut state);
+    assert!(
+        state.kind.iter().all(|&k| k != Species::Gas),
+        "this gate needs a gas-free state"
+    );
+
+    let mut stepper = GpuResidentLeapfrog::new_with_sph(
+        G,
+        EPS,
+        THETA,
+        HydroParams::default(),
+        DensityConfig::default(),
+    )
+    .expect("wgpu adapter required for GPU-SPH resident gates");
+    stepper.upload(&state);
+    assert_eq!(
+        stepper.min_stable_dt(C_CFL),
+        f64::INFINITY,
+        "no gas ⇒ +∞ (a 0 would falsely say every dt is too large)"
+    );
 }

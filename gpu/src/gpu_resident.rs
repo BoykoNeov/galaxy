@@ -938,6 +938,18 @@ pub struct GasDensity {
     pub h: Vec<f32>,
 }
 
+/// Per-gas CFL stable steps (the G5c gate surface). The resident stepper computes, over the
+/// gas subset, `dt_i = C_cfl · h_i / v_sig,i` — the Gadget-style stable step whose minimum
+/// [`GpuResidentLeapfrog::min_stable_dt`] reduces ON the device. This vector-returning
+/// snapshot exists for the per-target gate; the scalar `min_stable_dt` is the actual
+/// block-adaptive-dt substrate (it never transfers the vector). `f32`-computed (D1).
+pub struct GasCfl {
+    /// Global particle indices of the gas rows, ascending — the resident gas map.
+    pub gas_idx: Vec<usize>,
+    /// Per-gas stable step `dt_i = C_cfl · h_i / v_sig,i`.
+    pub dt: Vec<f64>,
+}
+
 /// GPU-resident kick-drift-kick leapfrog over the M4h fused LBVH force pipeline. State stays in
 /// GPU buffers across [`step`](Self::step)s; only [`snapshot`](Self::snapshot) reads it back.
 ///
@@ -1304,6 +1316,25 @@ impl GpuResidentLeapfrog {
         let acc = sph.snapshot_gas_accel(&self.core.device, &self.core.queue, n_gas);
         self.submits += 1;
         acc
+    }
+
+    /// The resident SPH stable-dt bound `min_i dt_i` (`dt_i = C_cfl · h_i / v_sig,i`), or
+    /// `f64::INFINITY` when there is no gas (no hydro CFL constraint — a `0` would falsely
+    /// report every dt too large). **The min is reduced ON the device (GPU-SPH G5c): only
+    /// the single reduced scalar crosses the bus, never the per-gas vector** — the
+    /// no-readback substrate a future block-adaptive stepper writes straight into a dt
+    /// uniform. Runs on the resident gas (pos/vel/h) the last force evaluation left in place
+    /// (the [`upload`](Self::upload) prime or any [`step`](Self::step)). Requires gas mode.
+    pub fn min_stable_dt(&mut self, _c_cfl: f64) -> f64 {
+        todo!("G5c: resident CFL pass + on-device no-readback min reduction")
+    }
+
+    /// The per-gas CFL vector `dt_i = C_cfl · h_i / v_sig,i` in ascending gas-index order
+    /// (the G5c per-target gate surface). Unlike [`min_stable_dt`](Self::min_stable_dt) this
+    /// transfers the whole vector, so a per-target radius bug on ANY particle is observable
+    /// (the scalar min only moves if the minimizer is hit). Requires gas mode.
+    pub fn snapshot_gas_dt(&mut self, _c_cfl: f64) -> GasCfl {
+        todo!("G5c: resident per-target CFL dt vector")
     }
 
     /// Read the full resident acceleration buffer (`accel`, all particles) back to the

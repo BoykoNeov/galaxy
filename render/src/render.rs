@@ -284,7 +284,8 @@ struct GasUniforms {
     mmin: vec4<f32>,
     mmax: vec4<f32>,
     // Single-scatter starlight: x = strength sigma_s, y = HG anisotropy g,
-    // z = light count (0 disables — bit-compat off path), w unused.
+    // z = light count (0 disables — bit-compat off path), w = shadow-volume
+    // flag (1 = multiply each light by its baked transmittance, 0 = v1).
     scat: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> g: GasUniforms;
@@ -352,16 +353,10 @@ fn density_at(p: vec3<f32>) -> f32 {
     return (1.0 - g.kms.y) * sample_one(rho0, g.b0min.xyz, g.b0max.xyz, p)
         + g.kms.y * sample_one(rho1, g.b1min.xyz, g.b1max.xyz, p);
 }
-"#;
 
-/// The fullscreen gas pass: per-pixel camera ray (the splat path's NDC
-/// convention), union-AABB clip, front-to-back midpoint march with early exit
-/// (volume.rs march rule verbatim), additively blended `(radiance, 1 − T)`.
-/// `{exit}` / `{max_steps}` are injected from the `volume` constants.
-const WGSL_GAS_PASS: &str = r#"
 // Point-light proxies for the single-scatter term (volume::Light, clustered
-// CPU-side by cluster_lights). Fragment-only: the prepass shares the bind
-// group layout but never reads them.
+// CPU-side by cluster_lights). Read by the gas fragment march and the shadow
+// bake; the star-transmittance prepass shares the layout but never reads them.
 struct PointLight {
     pos: vec3<f32>,
     radius: f32,
@@ -369,6 +364,17 @@ struct PointLight {
     pad: f32,
 };
 @group(1) @binding(3) var<storage, read> lights: array<PointLight>;
+"#;
+
+/// The fullscreen gas pass: per-pixel camera ray (the splat path's NDC
+/// convention), union-AABB clip, front-to-back midpoint march with early exit
+/// (volume.rs march rule verbatim), additively blended `(radiance, 1 − T)`.
+/// `{exit}` / `{max_steps}` are injected from the `volume` constants.
+const WGSL_GAS_PASS: &str = r#"
+// Per-light shadow volumes (umbral-lantern-lattice): the bake prepass's
+// output, {shadow_res}^3 transmittances per light, light-major, x-fastest.
+// A 4-byte dummy when shadows are off (scat.w = 0) — never read.
+@group(2) @binding(0) var<storage, read> shadow: array<f32>;
 
 // Henyey-Greenstein phase, mirroring volume::hg_phase (which evaluates in f64;
 // the GPU == CPU gates allow the f32 difference). 12.566... = 4*pi.
@@ -376,6 +382,40 @@ fn hg_phase(mu: f32, ga: f32) -> f32 {
     let g2 = ga * ga;
     let denom = 1.0 + g2 - 2.0 * ga * mu;
     return (1.0 - g2) / (12.566370614359172 * denom * sqrt(denom));
+}
+
+// Trilinear clamp-to-edge sample of light k's shadow volume: sample_one's
+// arithmetic MINUS the zero-outside test (a transmittance has no natural zero
+// outside the domain), over the union AABB. Mirrors ShadowVolumes::sample.
+fn shadow_sample(k: u32, p: vec3<f32>) -> f32 {
+    let dims = vec3<f32>(f32({shadow_res}));
+    let cell = (g.mmax.xyz - g.mmin.xyz) / dims;
+    let c = (p - g.mmin.xyz) / cell - vec3<f32>(0.5);
+    let maxi = dims - vec3<f32>(1.0);
+    let cc = clamp(c, vec3<f32>(0.0), maxi);
+    let i0 = max(min(floor(cc), maxi - vec3<f32>(1.0)), vec3<f32>(0.0));
+    let i1 = min(i0 + vec3<f32>(1.0), maxi);
+    let fr = cc - i0;
+    let a = vec3<u32>(i0);
+    let b = vec3<u32>(i1);
+    let r = {shadow_res}u;
+    let base = k * r * r * r;
+    let c000 = shadow[base + (a.z * r + a.y) * r + a.x];
+    let c100 = shadow[base + (a.z * r + a.y) * r + b.x];
+    let c010 = shadow[base + (a.z * r + b.y) * r + a.x];
+    let c110 = shadow[base + (a.z * r + b.y) * r + b.x];
+    let c001 = shadow[base + (b.z * r + a.y) * r + a.x];
+    let c101 = shadow[base + (b.z * r + a.y) * r + b.x];
+    let c011 = shadow[base + (b.z * r + b.y) * r + a.x];
+    let c111 = shadow[base + (b.z * r + b.y) * r + b.x];
+    // Two-product lerps, bit-exact at fr = 0 and fr = 1 (sample_one's rule).
+    let c00 = (1.0 - fr.x) * c000 + fr.x * c100;
+    let c10 = (1.0 - fr.x) * c010 + fr.x * c110;
+    let c01 = (1.0 - fr.x) * c001 + fr.x * c101;
+    let c11 = (1.0 - fr.x) * c011 + fr.x * c111;
+    let c0 = (1.0 - fr.y) * c00 + fr.y * c10;
+    let c1 = (1.0 - fr.y) * c01 + fr.y * c11;
+    return (1.0 - fr.z) * c0 + fr.z * c1;
 }
 
 @vertex
@@ -450,7 +490,12 @@ fn fs_gas(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
                 if (d2_true > 0.0) {
                     mu = dot(dv, w_out) / sqrt(d2_true);
                 }
-                let f = hg_phase(mu, g.scat.y) / (12.566370614359172 * d2);
+                var f = hg_phase(mu, g.scat.y) / (12.566370614359172 * d2);
+                // Per-light shadowing (umbral-lantern-lattice): scat.w flags
+                // the baked volumes; off leaves f untouched (v1 arithmetic).
+                if (g.scat.w > 0.5) {
+                    f = f * shadow_sample(k, p);
+                }
                 inc += lights[k].rgb * f;
             }
             c += (t * g.scat.x * rho * ds) * inc;
@@ -520,7 +565,63 @@ fn cs_transmittance(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Threads per prepass workgroup (one star per thread).
+/// The shadow-bake prepass (umbral-lantern-lattice): one thread per
+/// (light, voxel), 2-D dispatch (`x` = voxels / workgroup, `y` = light) so the
+/// K×R³ grid respects the 65535 per-dimension workgroup limit. Each thread
+/// marches the mixed density FROM its light TOWARD its voxel center — the
+/// segment clipped to the union AABB and truncated at the voxel — and writes
+/// `T = exp(−τ)` (τ summed, one exponentiation: volume::light_transmittance's
+/// exact order). `{shadow_res}` / `{max_steps}` / `{workgroup}` are injected
+/// from the `volume` constants.
+const WGSL_SHADOW_BAKE: &str = r#"
+@group(2) @binding(0) var<storage, read_write> shadow_out: array<f32>;
+
+@compute @workgroup_size({workgroup})
+fn cs_shadow_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let r = {shadow_res}u;
+    let r3 = r * r * r;
+    let vox = gid.x;
+    let k = gid.y;
+    if (vox >= r3) {
+        return;
+    }
+    let iz = vox / (r * r);
+    let iy = (vox / r) % r;
+    let ix = vox % r;
+    // Voxel center: mmin + (i + 0.5)·cell, f32 — bake_shadows' exact
+    // arithmetic (a light on a center is dist == 0 on both sides).
+    let cell = (g.mmax.xyz - g.mmin.xyz) / vec3<f32>(f32(r));
+    let vc = g.mmin.xyz
+        + (vec3<f32>(f32(ix), f32(iy), f32(iz)) + vec3<f32>(0.5)) * cell;
+    let idx = k * r3 + vox;
+    let d = vc - lights[k].pos;
+    let dist = length(d);
+    if (dist == 0.0) {
+        shadow_out[idx] = 1.0; // light on the voxel center: unshadowed
+        return;
+    }
+    let dir = d / dist;
+    let tt = clip_aabb(lights[k].pos, dir, g.mmin.xyz, g.mmax.xyz);
+    // Only gas BETWEEN the light and the voxel occludes.
+    let t0 = max(tt.x, 0.0);
+    let t1 = min(tt.y, dist);
+    if (t0 >= t1) {
+        shadow_out[idx] = 1.0;
+        return;
+    }
+    let n = clamp(u32(ceil((t1 - t0) / g.kms.z)), 1u, {max_steps}u);
+    let ds = (t1 - t0) / f32(n);
+    var tau = 0.0;
+    for (var i = 0u; i < n; i++) {
+        let s = t0 + (f32(i) + 0.5) * ds;
+        tau += g.kms.x * density_at(lights[k].pos + dir * s) * ds;
+    }
+    shadow_out[idx] = exp(-tau);
+}
+"#;
+
+/// Threads per prepass workgroup (one star per thread; one voxel per thread
+/// for the shadow bake).
 const PREPASS_WORKGROUP: u32 = 64;
 
 /// Unit quad (two triangles) in local [-1, 1] space, scaled per splat by `half`.
@@ -551,7 +652,7 @@ struct GasUniforms {
     march_min: [f32; 4],
     march_max: [f32; 4],
     /// Single-scatter starlight: x = strength σ_s, y = HG anisotropy g,
-    /// z = light count (0 = off, the bit-compat path), w unused.
+    /// z = light count (0 = off, the bit-compat path), w = shadow-volume flag.
     scat: [f32; 4],
 }
 
@@ -575,15 +676,21 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     gas_pipeline: wgpu::RenderPipeline,
     prepass_pipeline: wgpu::ComputePipeline,
+    shadow_pipeline: wgpu::ComputePipeline,
     quad_buf: wgpu::Buffer,
     uniform_buf: wgpu::Buffer,
     gas_uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     /// Per-frame bind-group layouts: the star pass's transmittance buffer, the
-    /// gas uniform + endpoint textures, and the prepass's splat/T-out pair.
+    /// gas uniform + endpoint textures, the prepass's splat/T-out pair, and
+    /// the shadow buffer's two faces (read_write for the bake, read-only for
+    /// the gas fragment — two layouts so the bake never aliases a read
+    /// binding of the buffer it writes).
     star_t_bgl: wgpu::BindGroupLayout,
     gas_bgl: wgpu::BindGroupLayout,
     prepass_io_bgl: wgpu::BindGroupLayout,
+    shadow_write_bgl: wgpu::BindGroupLayout,
+    shadow_read_bgl: wgpu::BindGroupLayout,
 }
 
 impl Renderer {
@@ -712,11 +819,12 @@ impl Renderer {
                     ty: tex3d,
                     count: None,
                 },
-                // Scatter point lights: read by the gas fragment march only
-                // (the prepass shares this layout but never touches them).
+                // Scatter point lights: read by the gas fragment march and
+                // the shadow bake (the star-transmittance prepass shares this
+                // layout but never touches them).
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -751,6 +859,34 @@ impl Renderer {
                     count: None,
                 },
             ],
+        });
+        // Shadow-volume buffer, both faces (umbral-lantern-lattice): group 2
+        // of the bake (read_write) and of the gas pass (read-only).
+        let shadow_write_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow-write-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let shadow_read_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow-read-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -807,16 +943,18 @@ impl Renderer {
         // Gas pass: fullscreen triangle, no vertex buffers, same additive target.
         let exit = format!("{:e}", crate::volume::EXIT_TRANSMITTANCE);
         let max_steps = crate::volume::MAX_STEPS.to_string();
+        let shadow_res = crate::volume::SHADOW_RES.to_string();
         let gas_src = format!("{WGSL_UNIFORMS}{WGSL_GAS_COMMON}{WGSL_GAS_PASS}")
             .replace("{exit}", &exit)
-            .replace("{max_steps}", &max_steps);
+            .replace("{max_steps}", &max_steps)
+            .replace("{shadow_res}", &shadow_res);
         let gas_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gas-shader"),
             source: wgpu::ShaderSource::Wgsl(gas_src.into()),
         });
         let gas_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gas-pl"),
-            bind_group_layouts: &[Some(&bgl), Some(&gas_bgl)],
+            bind_group_layouts: &[Some(&bgl), Some(&gas_bgl), Some(&shadow_read_bgl)],
             immediate_size: 0,
         });
         let gas_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -870,12 +1008,37 @@ impl Renderer {
             cache: None,
         });
 
+        // Shadow-bake prepass (umbral-lantern-lattice): one thread per
+        // (light, voxel).
+        let shadow_src = format!("{WGSL_UNIFORMS}{WGSL_GAS_COMMON}{WGSL_SHADOW_BAKE}")
+            .replace("{max_steps}", &max_steps)
+            .replace("{shadow_res}", &shadow_res)
+            .replace("{workgroup}", &PREPASS_WORKGROUP.to_string());
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow-bake-shader"),
+            source: wgpu::ShaderSource::Wgsl(shadow_src.into()),
+        });
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow-bake-pl"),
+            bind_group_layouts: &[Some(&bgl), Some(&gas_bgl), Some(&shadow_write_bgl)],
+            immediate_size: 0,
+        });
+        let shadow_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("shadow-bake-pipeline"),
+            layout: Some(&shadow_layout),
+            module: &shadow_shader,
+            entry_point: Some("cs_shadow_bake"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         Ok(Renderer {
             device,
             queue,
             pipeline,
             gas_pipeline,
             prepass_pipeline,
+            shadow_pipeline,
             quad_buf,
             uniform_buf,
             gas_uniform_buf,
@@ -883,6 +1046,8 @@ impl Renderer {
             star_t_bgl,
             gas_bgl,
             prepass_io_bgl,
+            shadow_write_bgl,
+            shadow_read_bgl,
         })
     }
 
@@ -890,10 +1055,13 @@ impl Renderer {
     ///
     /// 1. **Transmittance prepass** (compute): one thread per star marches the
     ///    mixed density grid from star to camera and writes `T = exp(−τ)` to a
-    ///    storage buffer.
+    ///    storage buffer. When the look asks for shadowed scattering, a second
+    ///    compute prepass bakes the per-light shadow volumes
+    ///    (umbral-lantern-lattice): one thread per (light, voxel).
     /// 2. **Star pass**: the splat pipeline, each instance's emission × `T`.
     /// 3. **Gas pass**: a fullscreen triangle raymarches emission+absorption
-    ///    per pixel, additively blended into the same `Rgba32Float` target.
+    ///    (+ optionally shadowed single scatter) per pixel, additively blended
+    ///    into the same `Rgba32Float` target.
     ///
     /// `gas: None` renders stars only, `T ≡ 1.0` — bit-compatible with
     /// [`Renderer::render_frame`] and pinned by the M6g golden gate. The march
@@ -1042,10 +1210,10 @@ impl Renderer {
                 // Scatter lights: uploaded only when the look scatters (a
                 // positive strength). Empty/off binds one zeroed dummy light
                 // with count 0 — the shader's guard never reads it.
-                let (strength, anisotropy) = gf
+                let (strength, anisotropy, want_shadows) = gf
                     .look
                     .scatter
-                    .map_or((0.0, 0.0), |s| (s.strength, s.anisotropy));
+                    .map_or((0.0, 0.0, false), |s| (s.strength, s.anisotropy, s.shadows));
                 let gpu_lights: Vec<GpuLight> = if strength > 0.0 {
                     gf.lights
                         .iter()
@@ -1073,6 +1241,23 @@ impl Renderer {
                             usage: wgpu::BufferUsages::STORAGE,
                         });
 
+                // Shadow volumes (umbral-lantern-lattice): active only when
+                // the look asks AND the scatter term is live — exactly
+                // render_gas_cpu's bake policy, so the oracle stays lockstep.
+                // Off binds a 4-byte dummy the shader never reads (scat.w = 0).
+                let shadows_on = want_shadows && n_lights > 0;
+                let r3 = (crate::volume::SHADOW_RES as u64).pow(3);
+                let shadow_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("shadow-volumes"),
+                    size: if shadows_on {
+                        n_lights as u64 * r3 * std::mem::size_of::<f32>() as u64
+                    } else {
+                        4
+                    },
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+
                 let ext = |v: glam::Vec3| [v.x, v.y, v.z, 0.0];
                 let mmin = gf.grid0.bounds_min.min(gf.grid1.bounds_min);
                 let mmax = gf.grid0.bounds_max.max(gf.grid1.bounds_max);
@@ -1098,12 +1283,17 @@ impl Renderer {
                         b1_max: ext(gf.grid1.bounds_max),
                         march_min: ext(mmin),
                         march_max: ext(mmax),
-                        scat: [strength, anisotropy, n_lights as f32, 0.0],
+                        scat: [
+                            strength,
+                            anisotropy,
+                            n_lights as f32,
+                            if shadows_on { 1.0 } else { 0.0 },
+                        ],
                     }),
                 );
                 let v0 = self.upload_grid(gf.grid0, "gas-rho0");
                 let v1 = self.upload_grid(gf.grid1, "gas-rho1");
-                Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                let gas_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("gas-bind-group"),
                     layout: &self.gas_bgl,
                     entries: &[
@@ -1124,7 +1314,29 @@ impl Renderer {
                             resource: lights_buf.as_entire_binding(),
                         },
                     ],
-                }))
+                });
+                // The buffer's two faces: the gas fragment always binds the
+                // read face (group 2); the bake's write face exists only when
+                // shadows are on.
+                let shadow_read_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow-read-bind-group"),
+                    layout: &self.shadow_read_bgl,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: shadow_buf.as_entire_binding(),
+                    }],
+                });
+                let shadow_write_bg = shadows_on.then(|| {
+                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("shadow-write-bind-group"),
+                        layout: &self.shadow_write_bgl,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: shadow_buf.as_entire_binding(),
+                        }],
+                    })
+                });
+                Some((gas_bg, shadow_read_bg, shadow_write_bg, n_lights))
             }
         };
 
@@ -1193,7 +1405,7 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         // 1. Transmittance prepass: one thread per star, before the star pass.
-        if let (Some(gas_bg), Some(io_bg)) = (&gas_bg, &prepass_bg) {
+        if let (Some((gas_bg, ..)), Some(io_bg)) = (&gas_bg, &prepass_bg) {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("transmittance-prepass"),
                 timestamp_writes: None,
@@ -1203,6 +1415,20 @@ impl Renderer {
             pass.set_bind_group(1, gas_bg, &[]);
             pass.set_bind_group(2, io_bg, &[]);
             pass.dispatch_workgroups((splats.len() as u32).div_ceil(PREPASS_WORKGROUP), 1, 1);
+        }
+        // 1b. Shadow-bake prepass (umbral-lantern-lattice): one thread per
+        //     (light, voxel), before the gas pass reads the volumes.
+        if let Some((gas_bg, _, Some(write_bg), n_lights)) = &gas_bg {
+            let r3 = crate::volume::SHADOW_RES.pow(3);
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("shadow-bake-prepass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(1, gas_bg, &[]);
+            pass.set_bind_group(2, write_bg, &[]);
+            pass.dispatch_workgroups(r3.div_ceil(PREPASS_WORKGROUP), *n_lights, 1);
         }
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1233,10 +1459,11 @@ impl Renderer {
             }
             // 3. Gas pass: fullscreen raymarch, additive into the same target
             //    (both terms carry their own attenuation — order-independent).
-            if let Some(gas_bg) = &gas_bg {
+            if let Some((gas_bg, shadow_read_bg, ..)) = &gas_bg {
                 pass.set_pipeline(&self.gas_pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_bind_group(1, gas_bg, &[]);
+                pass.set_bind_group(2, shadow_read_bg, &[]);
                 pass.draw(0..3, 0..1);
             }
         }

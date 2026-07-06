@@ -95,10 +95,43 @@ impl ShadowVolumes {
     /// domain, and the march only samples inside the clipped chord; returning
     /// 0 (= fully shadowed) on an epsilon-outside float excursion would punch
     /// dark rims. Mirrored operation-for-operation by the WGSL
-    /// `shadow_sample`.
+    /// `shadow_sample` (which runs the coordinate arithmetic in f32; the
+    /// GPU ≡ CPU gates allow the difference).
     pub fn sample(&self, k: usize, p: Vec3) -> f32 {
-        let _ = (k, p);
-        todo!("umbral-lantern-lattice U1-green: trilinear shadow sample")
+        let r = SHADOW_RES;
+        let cell = (self.bounds_max.as_dvec3() - self.bounds_min.as_dvec3()) / r as f64;
+        let q = p.as_dvec3() - self.bounds_min.as_dvec3();
+        // Continuous lattice coordinate: voxel center i sits at coordinate i.
+        let cx = q.x / cell.x - 0.5;
+        let cy = q.y / cell.y - 0.5;
+        let cz = q.z / cell.z - 0.5;
+
+        // Per-axis floor index + fraction, clamp-to-edge everywhere (GasGrid's
+        // `axis` rule — the clamp extends past the bounds instead of zeroing).
+        let axis = |c: f64| -> (u32, u32, f32) {
+            let max = (r - 1) as f64;
+            let c = c.clamp(0.0, max);
+            let i0 = c.floor().min(max - 1.0).max(0.0) as u32;
+            let i1 = (i0 + 1).min(r - 1);
+            let t = (c - i0 as f64) as f32;
+            (i0, i1, t)
+        };
+        let (x0, x1, tx) = axis(cx);
+        let (y0, y1, ty) = axis(cy);
+        let (z0, z1, tz) = axis(cz);
+
+        // Two-product lerp: bit-exact at t = 0 and t = 1 (GasGrid's rule).
+        let lerp = |a: f32, b: f32, t: f32| (1.0 - t) * a + t * b;
+        let base = k * (r as usize).pow(3);
+        let at = |ix: u32, iy: u32, iz: u32| self.data[base + ((iz * r + iy) * r + ix) as usize];
+
+        let c00 = lerp(at(x0, y0, z0), at(x1, y0, z0), tx);
+        let c10 = lerp(at(x0, y1, z0), at(x1, y1, z0), tx);
+        let c01 = lerp(at(x0, y0, z1), at(x1, y0, z1), tx);
+        let c11 = lerp(at(x0, y1, z1), at(x1, y1, z1), tx);
+        let c0 = lerp(c00, c10, ty);
+        let c1 = lerp(c01, c11, ty);
+        lerp(c0, c1, tz)
     }
 }
 
@@ -115,8 +148,67 @@ impl ShadowVolumes {
 /// the cluster softening radius applies only to the 1/d² intensity pole —
 /// occlusion has no pole to kill.
 pub fn bake_shadows(gas: &GasFrame) -> ShadowVolumes {
-    let _ = gas;
-    todo!("umbral-lantern-lattice U1-green: shadow-volume bake")
+    let (bmin, bmax) = union_bounds(gas);
+    let r = SHADOW_RES as usize;
+    // Voxel centers in f32, `bmin + (i + ½)·cell` — the WGSL bake's exact
+    // arithmetic, so a light placed on a center is `dist == 0` on both sides.
+    let cell = (bmax - bmin) / SHADOW_RES as f32;
+    let ds_nominal = step_size(gas.grid0, gas.grid1);
+    let mut data = vec![0.0f32; gas.lights.len() * r * r * r];
+    for (k, l) in gas.lights.iter().enumerate() {
+        for iz in 0..r {
+            for iy in 0..r {
+                for ix in 0..r {
+                    let vc = bmin
+                        + (Vec3::new(ix as f32, iy as f32, iz as f32) + Vec3::splat(0.5)) * cell;
+                    let idx = k * r * r * r + (iz * r + iy) * r + ix;
+                    data[idx] = light_transmittance(gas, l.pos, vc, bmin, bmax, ds_nominal);
+                }
+            }
+        }
+    }
+    ShadowVolumes {
+        bounds_min: bmin,
+        bounds_max: bmax,
+        count: gas.lights.len(),
+        data,
+    }
+}
+
+/// One shadow chord: `T = exp(−τ)` over the light → voxel-center segment,
+/// clipped to the union AABB and truncated at the voxel — the bake's per-voxel
+/// kernel ([`star_transmittance`]'s operation order: τ summed from the light
+/// outward, one exponentiation, no early exit). An empty segment is exactly 1.
+fn light_transmittance(
+    gas: &GasFrame,
+    light: Vec3,
+    voxel: Vec3,
+    bmin: Vec3,
+    bmax: Vec3,
+    ds_nominal: f32,
+) -> f32 {
+    let d = voxel - light;
+    let dist = d.length();
+    if dist == 0.0 {
+        return 1.0; // light on the voxel center: zero path, unshadowed
+    }
+    let dir = d / dist;
+    let Some((t0_raw, t1_raw)) = clip_aabb(light, dir, bmin, bmax) else {
+        return 1.0;
+    };
+    // Only gas BETWEEN the light and the voxel occludes.
+    let t0 = t0_raw.max(0.0);
+    let t1 = t1_raw.min(dist);
+    if t0 >= t1 {
+        return 1.0;
+    }
+    let (n, ds) = steps(t0, t1, ds_nominal);
+    let mut tau = 0.0_f32;
+    for i in 0..n {
+        let s = t0 + (i as f32 + 0.5) * ds;
+        tau += gas.look.opacity * density_at(gas, light + dir * s) * ds;
+    }
+    (-tau).exp()
 }
 
 /// One point-light proxy for the single-scatter term: a cluster of stellar
@@ -267,9 +359,10 @@ pub struct GasLook {
     pub opacity: f32,
     /// Single-scatter starlight (scattered-starlit-veil): `None` — or
     /// `strength = 0`, or an empty [`GasFrame::lights`] — is bit-compatible
-    /// with the pre-scatter march. v1 is UNSHADOWED single scatter (no
-    /// light→sample transmittance; the named deferral is per-light shadow
-    /// volumes) — the scattered radiance still rides the camera-path T.
+    /// with the pre-scatter march. Default is UNSHADOWED single scatter; the
+    /// optional [`ScatterLook::shadows`] adds the baked light→sample
+    /// transmittance (umbral-lantern-lattice). The scattered radiance always
+    /// rides the camera-path T.
     pub scatter: Option<ScatterLook>,
 }
 
@@ -424,9 +517,6 @@ pub fn march_gas(
         .look
         .scatter
         .filter(|s| s.strength > 0.0 && !gas.lights.is_empty());
-    if scatter.is_some() && shadows.is_some() {
-        todo!("umbral-lantern-lattice U1-green: shadowed scatter march");
-    }
 
     let mut t = 1.0_f32;
     let mut c = [0.0_f32; 3];
@@ -448,7 +538,7 @@ pub fn march_gas(
             // march (which computes the phase in f32; the gates allow 1e-3).
             let w_out = -dir;
             let mut inc = [0.0_f32; 3];
-            for l in gas.lights {
+            for (k, l) in gas.lights.iter().enumerate() {
                 let dv = p - l.pos;
                 let d2_true = dv.length_squared();
                 let d2 = d2_true + l.radius * l.radius;
@@ -460,7 +550,13 @@ pub fn march_gas(
                 } else {
                     0.0
                 };
-                let f = hg_phase(mu, sl.anisotropy) / (4.0 * std::f32::consts::PI * d2);
+                let mut f = hg_phase(mu, sl.anisotropy) / (4.0 * std::f32::consts::PI * d2);
+                // Per-light shadowing (umbral-lantern-lattice): the baked
+                // light→sample transmittance, trilinearly sampled. `None`
+                // leaves `f` untouched — the v1 arithmetic, bit-identical.
+                if let Some(sv) = shadows {
+                    f *= sv.sample(k, p);
+                }
                 inc[0] += l.rgb[0] * f;
                 inc[1] += l.rgb[1] * f;
                 inc[2] += l.rgb[2] * f;

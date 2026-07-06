@@ -685,6 +685,13 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                     );
                 }
             }
+            // Shadow volumes (umbral-lantern-lattice): the same discipline —
+            // the knob PRESENT without a live scatter term shapes nothing.
+            if gl.shadows.is_some() && !gl.scattering.is_some_and(|sc| sc > 0.0) {
+                return Err("look.gas shadows without a positive scattering is a dead \
+                     knob (add scattering > 0, or remove shadows)"
+                    .into());
+            }
         }
         (None, _) => {}
     }

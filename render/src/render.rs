@@ -47,6 +47,16 @@ pub struct RenderConfig {
     /// flux saturates instead of diverging as depth → near. Ignored by
     /// orthographic cameras.
     pub max_splat_ndc: f32,
+    /// **Both projections**: maximum on-screen splat half-extent in *pixels* —
+    /// the screen-space PSF of a point source, so stars stay point-like at any
+    /// zoom (docs/plans/pinprick-starfield.md). Clamping down boosts emission
+    /// by (true/clamped)², the exact mirror of the `min_splat_px` dimming:
+    /// integrated flux is invariant, the cap only reshapes the PSF. `INFINITY`
+    /// (the default) = off, bit-identical to the uncapped render. A finite cap
+    /// must be > 0, and under perspective ≥ `min_splat_px` (a crossed clamp
+    /// window is a config error). The `max_splat_ndc` fill-rate guard stays
+    /// outermost and saturating.
+    pub max_splat_px: f32,
 }
 
 impl Default for RenderConfig {
@@ -57,6 +67,7 @@ impl Default for RenderConfig {
             falloff: 6.0,
             min_splat_px: 1.5,
             max_splat_ndc: 1.0,
+            max_splat_px: f32::INFINITY,
         }
     }
 }

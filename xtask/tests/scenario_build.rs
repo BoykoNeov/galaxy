@@ -179,6 +179,57 @@ fn full_build_uses_full_counts_and_frame_size() {
     assert_eq!((s.width, s.height), (FRAME_W, FRAME_H));
 }
 
+// --- the pinprick-starfield splat cap (docs/plans/pinprick-starfield.md) --------
+
+#[test]
+fn max_splat_px_parses_and_maps() {
+    // Absent ⇒ off (None): every preset that doesn't opt in keeps the M6g look.
+    let spec = parse_preset("disk");
+    assert_eq!(spec.look.max_splat_px, None);
+
+    // Declared ⇒ parsed and mapped verbatim into the runtime Scenario.
+    let toml = preset("disk").expect("preset exists").replace(
+        "splat_size = 0.12",
+        "splat_size = 0.12\nmax_splat_px = 3.0",
+    );
+    let mut spec = parse_scenario_toml(&toml).expect("max_splat_px must parse");
+    assert_eq!(spec.look.max_splat_px, Some(3.0));
+    shrink_quick(&mut spec, TINY);
+    let s = build_scenario(&spec, true);
+    assert_eq!(s.max_splat_px, Some(3.0));
+}
+
+#[test]
+fn invalid_max_splat_px_rejected() {
+    // A declared cap must be finite and positive — 0 px would cull every splat
+    // (a dead scene, not a look), negatives and NaN are nonsense.
+    for bad in ["0.0", "-2.0", "nan"] {
+        let toml = preset("disk").expect("preset exists").replace(
+            "splat_size = 0.12",
+            &format!("splat_size = 0.12\nmax_splat_px = {bad}"),
+        );
+        let err = parse_scenario_toml(&toml)
+            .expect_err(&format!("max_splat_px = {bad} must be rejected"));
+        assert!(
+            err.to_string().contains("max_splat_px"),
+            "the error must name the knob, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn gasrich_declares_the_splat_cap() {
+    // gasrich ships the cap ON (the defocused-early-shots fix). Only presence
+    // and positivity are gated — the exact value stays tunable by eyeball
+    // (zoo rule 2: aesthetics are eyeballed, not gated).
+    let spec = parse_preset("gasrich");
+    let cap = spec
+        .look
+        .max_splat_px
+        .expect("gasrich must declare max_splat_px");
+    assert!(cap > 0.0, "gasrich max_splat_px must be positive, got {cap}");
+}
+
 // --- the zoo's one new physics door: orientations through the front-end --------
 
 #[test]

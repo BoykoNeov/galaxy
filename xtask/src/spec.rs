@@ -235,6 +235,14 @@ pub struct SimSpec {
 pub struct LookSpec {
     /// Base splat radius in world units.
     pub splat_size: f32,
+    /// Optional screen-space cap on the splat half-extent in PIXELS
+    /// (pinprick-starfield): world-sized splats balloon when the breathing rig
+    /// zooms into a compact early scene — the cap keeps stars point-like at any
+    /// zoom, flux-conserving (clamping down concentrates emission). Absent =
+    /// off = bit-identical to the uncapped M6g render. Pixel units are
+    /// resolution-literal: FULL 1080p wants ~3× the QUICK 360p value.
+    #[serde(default)]
+    pub max_splat_px: Option<f32>,
     /// Percentile radius the camera frames on (0, 1].
     pub frame_percentile: f32,
     /// Per-progenitor base colors — length must equal the model's progenitor
@@ -781,6 +789,10 @@ pub struct Scenario {
     pub width: u32,
     pub height: u32,
     pub frame_percentile: f32,
+    /// Screen-space splat cap in pixels (pinprick-starfield), `None` = off —
+    /// the runtime form of [`LookSpec::max_splat_px`], mapped verbatim into
+    /// `RenderConfig.max_splat_px` by the movie pipeline.
+    pub max_splat_px: Option<f32>,
     pub rig: Rig,
     /// Per-progenitor `(inner, outer)` ramp for `--color initial-radius` (M6e).
     pub ramp: Vec<([f32; 3], [f32; 3])>,
@@ -990,6 +1002,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         width,
         height,
         frame_percentile: spec.look.frame_percentile,
+        max_splat_px: spec.look.max_splat_px,
         rig: match &spec.rig {
             RigSpec::Static => Rig::Static,
             RigSpec::OrbitTilt {

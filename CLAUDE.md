@@ -14,6 +14,13 @@ DESIGN.md — read it, don't duplicate it here.
 - Test:   `cargo test`   (single crate: `cargo test -p galaxy-core`)
 - Lint:   `cargo clippy --all-targets -- -D warnings`
 - Format: `cargo fmt`  /  check: `cargo fmt --check`
+- Gate:   `./gate.ps1` — the full quality gate (fmt → clippy → test), ordered
+  cheapest-fail-first so a format/lint slip costs seconds, not the whole test
+  run. `-SkipTests` runs just fmt + clippy. Tests link `[profile.dev]
+  opt-level = 2` (Cargo.toml): the compute-bound N-body/SPH proptests run ~9×
+  faster optimized (debug-assertions + overflow-checks stay on; no fast-math,
+  so invariants hold). Trade-off: editing `core` recompiles the tree at opt-2
+  (~2× the debug compile) — worth it for the ~2.6× faster gate run.
 
 ## TDD workflow (REQUIRED)
 1. Write tests BEFORE implementation.

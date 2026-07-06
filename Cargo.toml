@@ -7,6 +7,16 @@ members = ["core", "solvers", "gpu", "ic", "io", "sim", "validate", "render", "r
 version = "0.0.0"
 edition = "2021"
 
+# Optimize compiled code even in dev/test. The physics proptests (leapfrog,
+# Barnes–Hut, SPH) are compute-bound f64 N-body; at opt-level 0 they dominate
+# the test gate (~110s). opt-level 2 cuts that several-fold. `debug-assertions`
+# and `overflow-checks` stay ON (inherited from dev), and Rust never enables
+# fast-math, so conservation/tolerance invariants are unaffected. The `test`
+# profile inherits from `dev`, so this also covers integration tests that link
+# the dev-profile build of the workspace crates.
+[profile.dev]
+opt-level = 2
+
 [workspace.dependencies]
 glam = "0.30"
 proptest = "1"

@@ -119,12 +119,22 @@ xtask (`tests/scenario_gas.rs`):
 - **U1 [red]**: gates above + API stubs (`todo!()` bodies) + mechanical
   call-site updates (`march_gas` second argument `None`, `ScatterLook`
   literals gain `shadows: false`). Workspace builds, gates fail.
+  DONE (71e0be2) — 8 gates red; the two bitwise off-path pins pass by
+  construction, as expected.
 - **U1 [green]**: CPU bake/sample/march + WGSL mirrors + renderer plumbing;
-  all gates green.
-- **U2**: xtask knob + QUICK A/B (gasrich, shadows off vs on at σ = 800;
-  κ = 100 makes midplanes many optical depths thick, so expect lit surfaces
-  + dark cores — retune σ or ship the knob off if self-shielding guts the
-  ambient glow). Retained A/B under `M:\claud_projects\temp\shadow_ab`.
+  all gates green. DONE (0a5ad57) — all 10 shadow gates + full workspace.
+- **U2**: xtask knob + QUICK A/B (gasrich, shadows off vs on at σ = 800).
+  DONE — knob plumbing landed with U1. A/B result: the shadows-OFF run is
+  byte-identical (all 481 PNGs, exr_diff-zero EXRs) to the retained
+  `splat_cap_ab/cap3` render — the cross-version v1 regression the in-test
+  gates cannot pin. Shadows ON: ~11% less mid-frame scattered flux
+  (total_flux [8833, 7665, 8494] → [7843, 6824, 7590], peak 3.82 → 3.33),
+  core haze slightly tightened, ambient glow + lit bridge intact — the
+  expected self-shielding, subtle at QUICK. **gasrich ships `shadows =
+  true`** (the scatter precedent: the showpiece exercises the option; off
+  is one knob removal, gated bit-identical); σ = 800 kept — an 11% dip is
+  well inside the 200/800 bracket step. Retained A/B:
+  `M:\claud_projects\temp\shadow_ab` (off / on, each with movie.mp4).
 - **U3**: docs (DESIGN.md scatter note, roadmap, this plan), memory,
   quality gate, commit + push.
 

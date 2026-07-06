@@ -72,8 +72,11 @@ Ordered by value-per-effort; all compatible with the landed M7 contracts.
    ON (σ=800, g=0.5 from the QUICK A/B bracket).
    `scattering = 0` is gated bit-identical to the pre-scatter render,
    so the "judge the plain M7e look" decision stays open as a one-knob
-   toggle. Named deferrals: per-light shadow volumes, octree clustering,
-   scatter tint.
+   toggle. Per-light shadow volumes — DONE (plan `umbral-lantern-lattice`):
+   baked 32³ light→sample transmittance per light (K×voxels compute
+   prepass), `[look.gas] shadows` bool, gasrich ships it ON; off is gated
+   bit-identical to unshadowed v1. Remaining named deferrals: octree
+   clustering, scatter tint, DDA/hierarchical bake.
 2. **Camera / cinematics** — more rigs, orbit paths, presets. Orthogonal to
    everything; cheap filler between larger sessions.
 3. **HDR video encode** — long-standing deferral; EXR chain is ready for it.

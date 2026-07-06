@@ -378,6 +378,9 @@ fn gasrich_preset_carries_the_scatter_option_on() {
         "gasrich anisotropy {} must be a valid HG g",
         gl.anisotropy
     );
+    // Shadow volumes (umbral-lantern-lattice) ship ON, same rationale —
+    // disabling is knob removal, gated bit-identical to unshadowed v1.
+    assert!(gl.shadows, "gasrich must ship with shadow volumes on");
 }
 
 #[test]

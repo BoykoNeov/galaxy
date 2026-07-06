@@ -54,12 +54,19 @@ cosmological expansion (10^8 particles, comoving integration).
   splat path for gas.
 - Gas single-scatter starlight (optional, plan `scattered-starlit-veil`): the
   march may add `σ_s·ρ·Σ_k p_HG(cosθ_k)·L_k/(4π(d²+r²))` from the stellar
-  splats clustered into ≤ 8³ emission-weighted point lights. UNSHADOWED v1
-  (light→sample shadow volumes are the named deferral); the phase angle is the
-  only view-dependent factor and evaluates at render time (D9-safe); knobs
+  splats clustered into ≤ 8³ emission-weighted point lights. The phase angle is
+  the only view-dependent factor and evaluates at render time (D9-safe); knobs
   (`[look.gas] scattering`/`anisotropy`) live in the look, `scattering = 0` is
   gated bit-identical to the pre-scatter march — the M7e-sufficiency judgement
   stays a one-knob decision.
+- Per-light shadow volumes (optional v2, plan `umbral-lantern-lattice`): with
+  `[look.gas] shadows = true` each light's incident term is multiplied by a
+  baked light→sample transmittance `T_k` — one 32³ lattice per light over the
+  march domain, filled by a (light × voxel) compute prepass with the shared
+  step rule, trilinearly sampled in the march (clamp-to-edge, no zero-outside:
+  a transmittance has no natural zero). Camera-independent per-frame data
+  (D9-safe), nothing baked into the ρ grid (D8); `shadows` off is gated
+  bit-identical to the unshadowed v1 scatter.
 
 ## Architecture: 3-stage offline pipeline
 

@@ -127,6 +127,13 @@ opacity = 100.0
 # ambient glow + a lit gas bridge at approach, background stays black (no fog).
 scattering = 800.0
 anisotropy = 0.5
+# Per-light shadow volumes (umbral-lantern-lattice): gas deep in its own optical
+# thickness (κ = 100 makes midplanes many τ) stops glowing from inside — the QUICK
+# A/B (M:\claud_projects\temp\shadow_ab) shows ~11% less mid-frame scattered flux,
+# core haze slightly tightened, ambient glow and the lit bridge intact. σ = 800
+# kept (the change is well inside the 200/800 bracket's step). DISABLE by removing
+# this knob — that path is gated bit-identical to the unshadowed v1 scatter.
+shadows = true
 
 [[look.ramps]]
 inner = [0.05, 0.035, 0.025]

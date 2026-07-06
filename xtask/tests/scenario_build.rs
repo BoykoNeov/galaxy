@@ -188,10 +188,9 @@ fn max_splat_px_parses_and_maps() {
     assert_eq!(spec.look.max_splat_px, None);
 
     // Declared ⇒ parsed and mapped verbatim into the runtime Scenario.
-    let toml = preset("disk").expect("preset exists").replace(
-        "splat_size = 0.12",
-        "splat_size = 0.12\nmax_splat_px = 3.0",
-    );
+    let toml = preset("disk")
+        .expect("preset exists")
+        .replace("splat_size = 0.12", "splat_size = 0.12\nmax_splat_px = 3.0");
     let mut spec = parse_scenario_toml(&toml).expect("max_splat_px must parse");
     assert_eq!(spec.look.max_splat_px, Some(3.0));
     shrink_quick(&mut spec, TINY);
@@ -227,7 +226,10 @@ fn gasrich_declares_the_splat_cap() {
         .look
         .max_splat_px
         .expect("gasrich must declare max_splat_px");
-    assert!(cap > 0.0, "gasrich max_splat_px must be positive, got {cap}");
+    assert!(
+        cap > 0.0,
+        "gasrich max_splat_px must be positive, got {cap}"
+    );
 }
 
 // --- the zoo's one new physics door: orientations through the front-end --------

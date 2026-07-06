@@ -1290,6 +1290,7 @@ mod tests {
             },
             look: LookSpec {
                 splat_size: 0.12,
+                max_splat_px: None,
                 frame_percentile: 0.98,
                 palette: vec![HALO1, DISK1, HALO2, DISK2],
                 ramps: disk_family_ramps(),
@@ -1344,6 +1345,7 @@ mod tests {
             },
             look: LookSpec {
                 splat_size: 0.6,
+                max_splat_px: None,
                 frame_percentile: 0.97,
                 palette: vec![[1.0, 0.55, 0.3], [0.35, 0.6, 1.0]],
                 ramps: vec![
@@ -1437,6 +1439,7 @@ mod tests {
             },
             look: LookSpec {
                 splat_size: 0.15,
+                max_splat_px: None,
                 frame_percentile: 0.7,
                 palette: vec![HALO1, DISK1, HALO2, DISK2],
                 ramps: disk_family_ramps(),

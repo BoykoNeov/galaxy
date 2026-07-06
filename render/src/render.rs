@@ -922,8 +922,8 @@ impl Renderer {
 
         // Screen-space PSF cap (pinprick-starfield): a finite cap must be
         // positive under BOTH projections; `f32::INFINITY` is the documented
-        // off value (NaN and non-positive values fail this comparison).
-        if !(cfg.max_splat_px > 0.0) {
+        // off value (NaN is rejected explicitly — it fails no `<=` bound).
+        if cfg.max_splat_px <= 0.0 || cfg.max_splat_px.is_nan() {
             return Err(RenderError::Config(format!(
                 "max_splat_px must be positive (f32::INFINITY = off), got {}",
                 cfg.max_splat_px

@@ -33,6 +33,14 @@ cosmological expansion (10^8 particles, comoving integration).
   **`Rgba32Float`** HDR accumulation buffer (32F, not 16F — galaxy cores
   saturate/band in 16-bit). Additive blending is **order-independent
   (commutative)** → no depth sort.
+- Splats are **world-space sized** (M6g: surface brightness is
+  distance-invariant, so flux follows 1/d² for free) — which means an
+  auto-framing zoom changes their on-screen size. The optional
+  `[look] max_splat_px` cap (plan `pinprick-starfield`) restores the
+  point-source camera model: it clamps the on-screen half-extent in pixels,
+  **flux-conserving** (clamping down concentrates emission by
+  (true/clamped)², mirroring the sub-pixel `min_splat_px` dimming), in BOTH
+  projections. Absent = off = bit-identical to the uncapped render.
 - Post: bloom (mip down/blur/up) → write **linear HDR (EXR)**.
 - **Tonemap/grade is a SEPARATE config-driven stage** (ACES/Reinhard) → 16-bit
   PNG → ffmpeg. Lets you regrade 1000 frames in seconds without re-running

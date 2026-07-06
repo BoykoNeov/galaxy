@@ -80,14 +80,24 @@ tunable).
 
 - **P1 [red]**: gates + API surface (`RenderConfig.max_splat_px` defaulting
   to `INFINITY`, spec/runtime Option field) — no shader/validation logic, so
-  the behavior gates fail; workspace still builds.
+  the behavior gates fail; workspace still builds. DONE (c8bb2ca).
 - **P1 [green]**: WGSL clamp window + uniform plumbing + validation + xtask
-  wiring, all gates green.
-- **P2**: gasrich A/B on the reused `scatter_ab` snapshots (no re-sim) —
-  bracket the cap at 360p (early blobs are ~6–7 px half-extent, late points
-  ~2–3 px; candidates {2, 3, 4} px), pick by eyeball on early-shot sharpness
-  vs core blowout, ship in the preset with a scale comment (FULL ≈ 3× the
-  QUICK value).
+  wiring, all gates green. DONE (a766442) — one oracle correction along the
+  way, by construction not tolerance: the peak-concentration gate's splat now
+  sits on a pixel CENTER so the peak samples r = 0 in both renders and the
+  ratio is exactly the boost (centered at NDC 0 the splat lands on a pixel
+  corner, and the 0.5·√2 px diagonal offset skews 16 → 15.52).
+- **P2**: gasrich A/B on the reused `scatter_ab` σ=800 snapshots (no
+  re-sim), bracket {2, 3, 4} px at 360p — picked **3.0**: 2 px is maximally
+  crisp but sits near the raster floor (shimmer risk in motion), 4 px trends
+  back toward chunky; 3 px resolves the early shots into a sharp star
+  cluster while keeping a touch of Gaussian softness, late frames unchanged
+  in character, mid-merger cores brighter but not blown (the boost feeds the
+  tonemap/bloom chain as designed). The render log also quantified the
+  diagnosis: the framing envelope breathes 3.68 → 12.12 world units — a
+  3.3× zoom-out, exactly the observed star-size drift. Retained A/B:
+  `M:\claud_projects\temp\splat_cap_ab` (cap2 / cap3 / cap4, movie.mp4
+  each; the uncapped control is `scatter_ab\s800`). DONE.
 - **P3**: docs (DESIGN.md rendering-recipe note), memory, quality gate,
   commit, push.
 

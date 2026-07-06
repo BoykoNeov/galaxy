@@ -1174,6 +1174,11 @@ fn run_movie(
     };
     let t_render = std::time::Instant::now();
     let mut i = 0;
+    // Per-frame scatter light counts (tinted-octree-lanterns AB): the octree
+    // clusterer's output size K drives the per-sample light loop + shadow bake
+    // (both O(K)); the A/B freezes REFINE_TOL against this distribution + the
+    // wall-clock below. Empty on the no-scatter path.
+    let mut light_counts: Vec<usize> = Vec::new();
     for w in 0..states.len().saturating_sub(1) {
         // The span validates the id/time gates once per snapshot pair (a silent
         // id mismatch would scramble the movie — fail loudly instead).
@@ -1188,6 +1193,9 @@ fn run_movie(
                 (Some(_), Some(_)) => galaxy_render::cluster_lights(&fd),
                 _ => Vec::new(),
             };
+            if gas_look.scatter.is_some() {
+                light_counts.push(lights.len());
+            }
             // Gas rides as the two endpoint grids + the subframe mix u.
             let gas = match (&gas_grids[w], &gas_grids[w + 1]) {
                 (Some(g0), Some(g1)) => Some(galaxy_render::GasFrame {
@@ -1208,6 +1216,9 @@ fn run_movie(
             (Some(_), Some(Some(_))) => galaxy_render::cluster_lights(last),
             _ => Vec::new(),
         };
+        if gas_look.scatter.is_some() {
+            light_counts.push(lights.len());
+        }
         let gas = gas_grids
             .last()
             .and_then(Option::as_ref)
@@ -1226,6 +1237,19 @@ fn run_movie(
         frame_dir.display(),
         t_render.elapsed().as_secs_f64()
     );
+    if !light_counts.is_empty() {
+        let mut sorted = light_counts.clone();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let sum: usize = sorted.iter().sum();
+        println!(
+            "scatter light clusters (octree K): min {} / median {} / mean {:.1} / max {} over {n} frames",
+            sorted[0],
+            sorted[n / 2],
+            sum as f64 / n as f64,
+            sorted[n - 1],
+        );
+    }
 
     // 4. ffmpeg → movie (optional; leaves PNGs if ffmpeg is absent).
     encode_movie(&frame_dir, &out.join("movie.mp4"));

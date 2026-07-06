@@ -637,6 +637,31 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                     gl.opacity
                 ));
             }
+            // Single-scatter knobs (scattered-starlit-veil): σ_s is a rate like
+            // opacity; |g| < 1 keeps the HG denominator positive; anisotropy
+            // without a positive scattering shapes nothing — a dead knob.
+            if let Some(sc) = gl.scattering {
+                if !(sc.is_finite() && sc >= 0.0) {
+                    return Err(format!(
+                        "look.gas scattering must be finite and non-negative, got {sc}"
+                    ));
+                }
+            }
+            if let Some(g) = gl.anisotropy {
+                if !(g.is_finite() && g.abs() < 1.0) {
+                    return Err(format!(
+                        "look.gas anisotropy must be finite with |g| < 1 \
+                         (Henyey–Greenstein), got {g}"
+                    ));
+                }
+                if !gl.scattering.is_some_and(|sc| sc > 0.0) {
+                    return Err(
+                        "look.gas anisotropy without a positive scattering is a dead \
+                         knob (add scattering > 0, or remove anisotropy)"
+                            .into(),
+                    );
+                }
+            }
         }
         (None, _) => {}
     }

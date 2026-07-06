@@ -224,7 +224,10 @@ fn gas_look_values_default_matches_the_renderer_fallback() {
     // (scattering 0) must map to the renderer's default (scatter: None).
     assert_eq!(x.scattering, 0.0, "gas look default scattering must be off");
     assert_eq!(x.anisotropy, 0.0, "gas look default anisotropy must be 0");
-    assert!(r.scatter.is_none(), "renderer default must carry no scatter");
+    assert!(
+        r.scatter.is_none(),
+        "renderer default must carry no scatter"
+    );
 }
 
 #[test]
@@ -277,7 +280,10 @@ fn look_gas_rejects_bad_scatter_knobs() {
         ("scattering = inf", "non-finite scattering"),
         ("scattering = 3.0\nanisotropy = 1.0", "|g| = 1 (HG pole)"),
         ("scattering = 3.0\nanisotropy = -1.5", "|g| > 1"),
-        ("scattering = 3.0\nanisotropy = nan", "non-finite anisotropy"),
+        (
+            "scattering = 3.0\nanisotropy = nan",
+            "non-finite anisotropy",
+        ),
         (
             "anisotropy = 0.5",
             "anisotropy without scattering is a dead knob",
@@ -294,10 +300,7 @@ fn look_gas_rejects_bad_scatter_knobs() {
                  {knobs}\n\n[rig]"
             ),
         );
-        assert!(
-            parse_scenario_toml(&toml).is_err(),
-            "should reject: {why}"
-        );
+        assert!(parse_scenario_toml(&toml).is_err(), "should reject: {why}");
     }
 }
 

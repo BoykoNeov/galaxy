@@ -85,8 +85,81 @@ pub struct Light {
 /// GPU consumes its output). Lights are emitted in bin-index order. An
 /// all-dark frame clusters to no lights.
 pub fn cluster_lights(frame: &FrameData) -> Vec<Light> {
-    let _ = frame;
-    todo!("single-scatter starlight (scattered-starlit-veil S1)")
+    // Total emissive power of star i — the clustering weight. Zero-power
+    // splats are invisible to the gas AND to the AABB (a dark far-flung
+    // particle must not move every bin boundary).
+    let power = |i: usize| -> [f64; 3] {
+        let c = frame.color[i];
+        let b = frame.brightness[i] as f64;
+        [c[0] as f64 * b, c[1] as f64 * b, c[2] as f64 * b]
+    };
+    let lum = |i: usize| -> f64 {
+        let p = power(i);
+        p[0] + p[1] + p[2]
+    };
+
+    let mut bmin = Vec3::splat(f32::INFINITY);
+    let mut bmax = Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    for i in 0..frame.len() {
+        if lum(i) > 0.0 {
+            bmin = bmin.min(frame.pos[i]);
+            bmax = bmax.max(frame.pos[i]);
+            any = true;
+        }
+    }
+    if !any {
+        return Vec::new();
+    }
+
+    let bins = LIGHT_BINS as usize;
+    let ext = bmax - bmin;
+    // Per-axis bin index; a zero-extent axis collapses to bin 0 (the
+    // degenerate all-stars-coincident AABB clusters to a single light).
+    let axis_bin = |p: f32, min: f32, e: f32| -> usize {
+        if e <= 0.0 {
+            0
+        } else {
+            ((((p - min) / e) * LIGHT_BINS as f32) as usize).min(bins - 1)
+        }
+    };
+
+    #[derive(Clone, Copy, Default)]
+    struct Bin {
+        w: f64,
+        wpos: glam::DVec3,
+        rgb: [f64; 3],
+    }
+    let mut cells = vec![Bin::default(); bins * bins * bins];
+    for i in 0..frame.len() {
+        let w = lum(i);
+        if w <= 0.0 {
+            continue;
+        }
+        let p = frame.pos[i];
+        let idx = (axis_bin(p.z, bmin.z, ext.z) * bins + axis_bin(p.y, bmin.y, ext.y)) * bins
+            + axis_bin(p.x, bmin.x, ext.x);
+        let cell = &mut cells[idx];
+        cell.w += w;
+        cell.wpos += p.as_dvec3() * w;
+        let pw = power(i);
+        for (acc, p) in cell.rgb.iter_mut().zip(pw) {
+            *acc += p;
+        }
+    }
+
+    // One softening radius for all lights: half the bin-cell diagonal (0 for
+    // the degenerate AABB — a coincident cluster IS a point).
+    let radius = 0.5 * (ext / LIGHT_BINS as f32).length();
+    cells
+        .iter()
+        .filter(|cell| cell.w > 0.0)
+        .map(|cell| Light {
+            pos: (cell.wpos / cell.w).as_vec3(),
+            radius,
+            rgb: [cell.rgb[0] as f32, cell.rgb[1] as f32, cell.rgb[2] as f32],
+        })
+        .collect()
 }
 
 /// The Henyey–Greenstein phase function `p(cosθ) = (1 − g²) / (4π · (1 + g² −
@@ -94,8 +167,13 @@ pub fn cluster_lights(frame: &FrameData) -> Vec<Light> {
 /// isotropic (exactly 1/4π); `g → 1` forward-peaked. Callers keep |g| < 1
 /// (the scenario layer validates); the denominator is then ≥ (1−|g|)² > 0.
 pub fn hg_phase(cos_theta: f32, g: f32) -> f32 {
-    let _ = (cos_theta, g);
-    todo!("single-scatter starlight (scattered-starlit-veil S1)")
+    // f64 internally: the CPU oracle is the reference the (f32) WGSL march is
+    // gated against at 1e-3, and f64 keeps the g = 0 isotropic limit exactly
+    // the correctly-rounded 1/4π.
+    let g = g as f64;
+    let g2 = g * g;
+    let denom = 1.0 + g2 - 2.0 * g * cos_theta as f64;
+    ((1.0 - g2) / (4.0 * std::f64::consts::PI * denom * denom.sqrt())) as f32
 }
 
 /// The single-scatter look knobs, `Option`-gated on [`GasLook::scatter`]
@@ -262,23 +340,55 @@ pub fn march_gas(gas: &GasFrame, origin: Vec3, dir: Vec3, t_min: f32) -> ([f32; 
 
     // Single-scatter starlight is active only when the look asks for it AND
     // there are lights to scatter — either alone leaves the march bit-identical
-    // to the pre-scatter path.
-    let scatter_on = gas.look.scatter.is_some_and(|s| s.strength > 0.0) && !gas.lights.is_empty();
-    if scatter_on {
-        todo!("single-scatter starlight (scattered-starlit-veil S1)")
-    }
+    // to the pre-scatter path (the scatter term is a separate accumulation; the
+    // emission/absorption arithmetic below is untouched).
+    let scatter = gas
+        .look
+        .scatter
+        .filter(|s| s.strength > 0.0 && !gas.lights.is_empty());
 
     let mut t = 1.0_f32;
     let mut c = [0.0_f32; 3];
     for i in 0..n {
         let s = t0 + (i as f32 + 0.5) * ds;
-        let rho = density_at(gas, origin + dir * s);
+        let p = origin + dir * s;
+        let rho = density_at(gas, p);
         // Emit THEN attenuate (module-doc quadrature rule), the exact operation
         // order of the WGSL march.
         let e = t * gas.look.emissivity * rho * ds;
         c[0] += e * gas.look.color[0];
         c[1] += e * gas.look.color[1];
         c[2] += e * gas.look.color[2];
+        if let Some(sl) = scatter {
+            // Unshadowed single scatter: incident intensity L/(4π(d²+r²)) per
+            // light, HG-phased between the light→sample propagation direction
+            // and the sample→camera direction, then emitted like j — same T,
+            // same Δs weight. Mirrored operation-for-operation by the WGSL
+            // march (which computes the phase in f32; the gates allow 1e-3).
+            let w_out = -dir;
+            let mut inc = [0.0_f32; 3];
+            for l in gas.lights {
+                let dv = p - l.pos;
+                let d2_true = dv.length_squared();
+                let d2 = d2_true + l.radius * l.radius;
+                if d2 <= 0.0 {
+                    continue; // sample exactly on a zero-radius light
+                }
+                let mu = if d2_true > 0.0 {
+                    dv.dot(w_out) / d2_true.sqrt()
+                } else {
+                    0.0
+                };
+                let f = hg_phase(mu, sl.anisotropy) / (4.0 * std::f32::consts::PI * d2);
+                inc[0] += l.rgb[0] * f;
+                inc[1] += l.rgb[1] * f;
+                inc[2] += l.rgb[2] * f;
+            }
+            let es = t * sl.strength * rho * ds;
+            c[0] += es * inc[0];
+            c[1] += es * inc[1];
+            c[2] += es * inc[2];
+        }
         t *= (-(gas.look.opacity * rho * ds)).exp();
         if t < EXIT_TRANSMITTANCE {
             break;

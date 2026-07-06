@@ -192,8 +192,8 @@ fn cluster_lights_hand_oracle() {
     // Power conservation: Σ rgb over lights = Σ color·brightness over stars.
     let mut total = [0.0f32; 3];
     for l in &lights {
-        for c in 0..3 {
-            total[c] += l.rgb[c];
+        for (acc, v) in total.iter_mut().zip(l.rgb) {
+            *acc += v;
         }
     }
     for (c, want) in [2.0f32, 1.0, 4.0].iter().enumerate() {
@@ -860,5 +860,8 @@ fn gpu_scatter_strength_linear_exact() {
     let img = r
         .render_frame_with_gas(&FrameData::default(), Some(&gas), &persp_cam(), &cfg)
         .unwrap();
-    assert!(img.total_flux()[0] > 0.0, "perspective scatter rendered black");
+    assert!(
+        img.total_flux()[0] > 0.0,
+        "perspective scatter rendered black"
+    );
 }

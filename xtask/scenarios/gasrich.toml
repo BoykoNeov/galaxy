@@ -106,6 +106,15 @@ sf_progenitors = [1, 3] # only the disks form "stars" — halos are dark matter
 color = [0.4, 0.58, 1.0]
 emissivity = 20.0
 opacity = 100.0
+# Single-scatter starlight (scattered-starlit-veil), the OPTION under judgement
+# against the plain M7e emission+absorption look: gas near the stellar cores picks
+# up THEIR warm light (scattered radiance carries the light's own RGB — it is not
+# tinted by `color`), and the forward-peaked phase (anisotropy > 0) rim-lights
+# backlit gas. DISABLE by setting `scattering = 0` (and removing `anisotropy`) —
+# that path is gated bit-identical to the pre-scatter renderer. Like κ/j these are
+# density-regime knobs, tuned by eyeball on the QUICK render at re-render cost.
+scattering = 2.0
+anisotropy = 0.5
 
 [[look.ramps]]
 inner = [0.05, 0.035, 0.025]

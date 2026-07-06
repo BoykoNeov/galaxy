@@ -252,6 +252,9 @@ struct GasUniforms {
     // Union AABB of both grids: the march domain.
     mmin: vec4<f32>,
     mmax: vec4<f32>,
+    // Single-scatter starlight: x = strength sigma_s, y = HG anisotropy g,
+    // z = light count (0 disables — bit-compat off path), w unused.
+    scat: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> g: GasUniforms;
 @group(1) @binding(1) var rho0: texture_3d<f32>;
@@ -325,6 +328,25 @@ fn density_at(p: vec3<f32>) -> f32 {
 /// (volume.rs march rule verbatim), additively blended `(radiance, 1 − T)`.
 /// `{exit}` / `{max_steps}` are injected from the `volume` constants.
 const WGSL_GAS_PASS: &str = r#"
+// Point-light proxies for the single-scatter term (volume::Light, clustered
+// CPU-side by cluster_lights). Fragment-only: the prepass shares the bind
+// group layout but never reads them.
+struct PointLight {
+    pos: vec3<f32>,
+    radius: f32,
+    rgb: vec3<f32>,
+    pad: f32,
+};
+@group(1) @binding(3) var<storage, read> lights: array<PointLight>;
+
+// Henyey-Greenstein phase, mirroring volume::hg_phase (which evaluates in f64;
+// the GPU == CPU gates allow the f32 difference). 12.566... = 4*pi.
+fn hg_phase(mu: f32, ga: f32) -> f32 {
+    let g2 = ga * ga;
+    let denom = 1.0 + g2 - 2.0 * ga * mu;
+    return (1.0 - g2) / (12.566370614359172 * denom * sqrt(denom));
+}
+
 @vertex
 fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     // One oversized triangle covering the viewport.
@@ -367,14 +389,41 @@ fn fs_gas(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let n = clamp(u32(ceil((t1 - t0) / g.kms.z)), 1u, {max_steps}u);
     let ds = (t1 - t0) / f32(n);
 
+    // Single-scatter starlight: active only with a positive strength AND
+    // lights present (the uniform carries count 0 otherwise) — the off path
+    // adds nothing and stays bit-identical to the pre-scatter march.
+    let n_lights = u32(g.scat.z);
+    let scatter_on = g.scat.x > 0.0 && n_lights > 0u;
+    let w_out = -dir;
+
     var t = 1.0;
     var c = vec3<f32>(0.0);
     for (var i = 0u; i < n; i++) {
         let s = t0 + (f32(i) + 0.5) * ds;
-        let rho = density_at(origin + dir * s);
+        let p = origin + dir * s;
+        let rho = density_at(p);
         // Emit THEN attenuate — volume::march_gas's exact operation order.
         let e = t * g.ce.w * rho * ds;
         c += e * g.ce.xyz;
+        if (scatter_on) {
+            // volume::march_gas's scatter block, operation-for-operation.
+            var inc = vec3<f32>(0.0);
+            for (var k = 0u; k < n_lights; k++) {
+                let dv = p - lights[k].pos;
+                let d2_true = dot(dv, dv);
+                let d2 = d2_true + lights[k].radius * lights[k].radius;
+                if (d2 <= 0.0) {
+                    continue;
+                }
+                var mu = 0.0;
+                if (d2_true > 0.0) {
+                    mu = dot(dv, w_out) / sqrt(d2_true);
+                }
+                let f = hg_phase(mu, g.scat.y) / (12.566370614359172 * d2);
+                inc += lights[k].rgb * f;
+            }
+            c += (t * g.scat.x * rho * ds) * inc;
+        }
         t = t * exp(-(g.kms.x * rho * ds));
         if (t < {exit}) {
             break;
@@ -470,6 +519,20 @@ struct GasUniforms {
     /// Union AABB of both grids — the march domain.
     march_min: [f32; 4],
     march_max: [f32; 4],
+    /// Single-scatter starlight: x = strength σ_s, y = HG anisotropy g,
+    /// z = light count (0 = off, the bit-compat path), w unused.
+    scat: [f32; 4],
+}
+
+/// One point light as uploaded to the GPU, mirroring the WGSL `PointLight`
+/// (and carrying exactly [`crate::volume::Light`]'s fields).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuLight {
+    pos: [f32; 3],
+    radius: f32,
+    rgb: [f32; 3],
+    _pad: f32,
 }
 
 /// The reusable GPU rendering context: adapter/device/queue + the splat, gas,
@@ -616,6 +679,18 @@ impl Renderer {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                     ty: tex3d,
+                    count: None,
+                },
+                // Scatter point lights: read by the gas fragment march only
+                // (the prepass shares this layout but never touches them).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -904,6 +979,40 @@ impl Renderer {
                         )));
                     }
                 }
+                // Scatter lights: uploaded only when the look scatters (a
+                // positive strength). Empty/off binds one zeroed dummy light
+                // with count 0 — the shader's guard never reads it.
+                let (strength, anisotropy) = gf
+                    .look
+                    .scatter
+                    .map_or((0.0, 0.0), |s| (s.strength, s.anisotropy));
+                let gpu_lights: Vec<GpuLight> = if strength > 0.0 {
+                    gf.lights
+                        .iter()
+                        .map(|l| GpuLight {
+                            pos: l.pos.to_array(),
+                            radius: l.radius,
+                            rgb: l.rgb,
+                            _pad: 0.0,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let n_lights = gpu_lights.len() as u32;
+                let dummy = GpuLight::zeroed();
+                let lights_buf =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("scatter-lights"),
+                            contents: if gpu_lights.is_empty() {
+                                bytemuck::bytes_of(&dummy)
+                            } else {
+                                bytemuck::cast_slice(&gpu_lights)
+                            },
+                            usage: wgpu::BufferUsages::STORAGE,
+                        });
+
                 let ext = |v: glam::Vec3| [v.x, v.y, v.z, 0.0];
                 let mmin = gf.grid0.bounds_min.min(gf.grid1.bounds_min);
                 let mmax = gf.grid0.bounds_max.max(gf.grid1.bounds_max);
@@ -929,6 +1038,7 @@ impl Renderer {
                         b1_max: ext(gf.grid1.bounds_max),
                         march_min: ext(mmin),
                         march_max: ext(mmax),
+                        scat: [strength, anisotropy, n_lights as f32, 0.0],
                     }),
                 );
                 let v0 = self.upload_grid(gf.grid0, "gas-rho0");
@@ -948,6 +1058,10 @@ impl Renderer {
                         wgpu::BindGroupEntry {
                             binding: 2,
                             resource: wgpu::BindingResource::TextureView(&v1),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: lights_buf.as_entire_binding(),
                         },
                     ],
                 }))

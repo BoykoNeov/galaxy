@@ -1029,7 +1029,12 @@ fn run_movie(
             color: gl.color,
             emissivity: gl.emissivity,
             opacity: gl.opacity,
-            scatter: None,
+            // The single-scatter option (scattered-starlit-veil): `scattering
+            // = 0` (or omitted) maps to `None` — the bit-compat off path.
+            scatter: (gl.scattering > 0.0).then_some(galaxy_render::ScatterLook {
+                strength: gl.scattering,
+                anisotropy: gl.anisotropy,
+            }),
         },
         None => galaxy_render::GasLook::default(),
     };
@@ -1170,22 +1175,34 @@ fn run_movie(
         let span = HermiteSpan::new(&states[w], &states[w + 1])?;
         for j in 0..s.subframes {
             let u = f64::from(j) / f64::from(s.subframes);
+            let fd = subframe(&span, &frames[w], &frames[w + 1], u);
+            // Scatter lights are per-frame data clustered from the SAME
+            // interpolated splats the frame draws (camera-independent, so
+            // prep-time camera decoupling — D9 — is untouched).
+            let lights = match (gas_look.scatter, &gas_grids[w]) {
+                (Some(_), Some(_)) => galaxy_render::cluster_lights(&fd),
+                _ => Vec::new(),
+            };
             // Gas rides as the two endpoint grids + the subframe mix u.
             let gas = match (&gas_grids[w], &gas_grids[w + 1]) {
                 (Some(g0), Some(g1)) => Some(galaxy_render::GasFrame {
                     grid0: g0,
                     grid1: g1,
                     mix: u as f32,
-                    lights: &[],
+                    lights: &lights,
                     look: gas_look,
                 }),
                 _ => None,
             };
-            emit(i, &subframe(&span, &frames[w], &frames[w + 1], u), gas)?;
+            emit(i, &fd, gas)?;
             i += 1;
         }
     }
     if let Some(last) = frames.last() {
+        let lights = match (gas_look.scatter, gas_grids.last()) {
+            (Some(_), Some(Some(_))) => galaxy_render::cluster_lights(last),
+            _ => Vec::new(),
+        };
         let gas = gas_grids
             .last()
             .and_then(Option::as_ref)
@@ -1193,7 +1210,7 @@ fn run_movie(
                 grid0: g,
                 grid1: g,
                 mix: 0.0,
-                lights: &[],
+                lights: &lights,
                 look: gas_look,
             });
         emit(i, last, gas)?;

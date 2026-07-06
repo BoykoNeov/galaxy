@@ -23,7 +23,7 @@ pub use camera::{Camera, Projection};
 pub use exr_io::{read_exr, write_exr};
 pub use render::{HdrImage, RenderConfig, Renderer};
 pub use rig::{ease_in_out, smooth_envelope, CameraPath, RigError};
-pub use volume::{GasFrame, GasLook};
+pub use volume::{cluster_lights, GasFrame, GasLook, Light, ScatterLook};
 
 /// Errors from the render stage.
 #[derive(thiserror::Error, Debug)]

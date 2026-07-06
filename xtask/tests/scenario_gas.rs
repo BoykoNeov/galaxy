@@ -220,6 +220,11 @@ fn gas_look_values_default_matches_the_renderer_fallback() {
         "gas look default emissivity must match"
     );
     assert_eq!(x.opacity, r.opacity, "gas look default opacity must match");
+    // The off ↔ off correspondence for the scatter option: the values' default
+    // (scattering 0) must map to the renderer's default (scatter: None).
+    assert_eq!(x.scattering, 0.0, "gas look default scattering must be off");
+    assert_eq!(x.anisotropy, 0.0, "gas look default anisotropy must be 0");
+    assert!(r.scatter.is_none(), "renderer default must carry no scatter");
 }
 
 #[test]
@@ -236,7 +241,84 @@ fn gas_scenario_carries_a_declared_look_gas() {
             color: [0.5, 0.6, 0.95],
             emissivity: 0.25,
             opacity: 12.0,
+            // Scatter knobs omitted ⇒ the option is OFF (bit-compat render).
+            scattering: 0.0,
+            anisotropy: 0.0,
         })
+    );
+}
+
+// --- single-scatter starlight knobs (scattered-starlit-veil) ---------------------
+
+#[test]
+fn look_gas_scatter_knobs_thread_onto_the_scenario() {
+    let toml = gas_toml().replace(
+        "[rig]",
+        "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\n\
+         scattering = 3.0\nanisotropy = 0.55\n\n[rig]",
+    );
+    let s = build_scenario(&parse_scenario_toml(&toml).unwrap(), true);
+    assert_eq!(
+        s.gas_look,
+        Some(galaxy_xtask::spec::GasLookValues {
+            color: [0.5, 0.6, 0.95],
+            emissivity: 0.25,
+            opacity: 12.0,
+            scattering: 3.0,
+            anisotropy: 0.55,
+        })
+    );
+}
+
+#[test]
+fn look_gas_rejects_bad_scatter_knobs() {
+    for (knobs, why) in [
+        ("scattering = -1.0", "negative scattering"),
+        ("scattering = inf", "non-finite scattering"),
+        ("scattering = 3.0\nanisotropy = 1.0", "|g| = 1 (HG pole)"),
+        ("scattering = 3.0\nanisotropy = -1.5", "|g| > 1"),
+        ("scattering = 3.0\nanisotropy = nan", "non-finite anisotropy"),
+        (
+            "anisotropy = 0.5",
+            "anisotropy without scattering is a dead knob",
+        ),
+        (
+            "scattering = 0.0\nanisotropy = 0.5",
+            "anisotropy with scattering = 0 is a dead knob",
+        ),
+    ] {
+        let toml = gas_toml().replace(
+            "[rig]",
+            &format!(
+                "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\n\
+                 {knobs}\n\n[rig]"
+            ),
+        );
+        assert!(
+            parse_scenario_toml(&toml).is_err(),
+            "should reject: {why}"
+        );
+    }
+}
+
+#[test]
+fn gasrich_preset_carries_the_scatter_option_on() {
+    // The showpiece preset ships with the option ENABLED so it can be judged;
+    // disabling it (if the plain M7e look wins) is `scattering = 0` / knob
+    // removal, which the off-is-off render gates hold bit-compatible.
+    let s = build_scenario(
+        &parse_scenario_toml(galaxy_xtask::spec::preset("gasrich").unwrap()).unwrap(),
+        true,
+    );
+    let gl = s.gas_look.expect("gasrich threads its [look.gas]");
+    assert!(
+        gl.scattering > 0.0,
+        "gasrich must ship with the scatter option on"
+    );
+    assert!(
+        gl.anisotropy.is_finite() && gl.anisotropy.abs() < 1.0,
+        "gasrich anisotropy {} must be a valid HG g",
+        gl.anisotropy
     );
 }
 

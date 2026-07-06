@@ -75,6 +75,7 @@ fn absorb_look(kappa: f32) -> GasLook {
         color: [1.0, 1.0, 1.0],
         emissivity: 0.0,
         opacity: kappa,
+        scatter: None,
     }
 }
 
@@ -219,6 +220,7 @@ fn star_transmittance_uniform_slab_analytic() {
         grid0: &g,
         grid1: &g,
         mix: 0.0,
+        lights: &[],
         look: absorb_look(SLAB_KAPPA),
     };
     let tau_full = SLAB_KAPPA * SLAB_RHO; // L = 1
@@ -267,11 +269,13 @@ fn march_uniform_slab_radiance_analytic() {
         color: [1.0, 0.5, 0.25],
         emissivity: 0.9,
         opacity: SLAB_KAPPA,
+        scatter: None,
     };
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
         mix: 0.0,
+        lights: &[],
         look,
     };
     assert!(
@@ -311,11 +315,13 @@ fn march_emission_only_kappa_zero_exact() {
         color: [0.8, 1.0, 0.6],
         emissivity: 0.9,
         opacity: 0.0,
+        scatter: None,
     };
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
         mix: 0.0,
+        lights: &[],
         look,
     };
     let (c, t) = march_gas(
@@ -351,11 +357,13 @@ fn march_high_tau_early_exit_bounded() {
         color: [1.0, 1.0, 1.0],
         emissivity: 2.0,
         opacity: 15.0,
+        scatter: None,
     };
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
         mix: 0.0,
+        lights: &[],
         look,
     };
     let (c, t) = march_gas(
@@ -391,6 +399,7 @@ fn march_mix_endpoints_bit_exact() {
         color: [1.0, 0.9, 0.8],
         emissivity: 1.3,
         opacity: 0.7,
+        scatter: None,
     };
     let origin = Vec3::new(0.1, 0.05, 3.0);
     let dir = Vec3::new(0.4, -0.3, -1.0).normalize();
@@ -401,6 +410,7 @@ fn march_mix_endpoints_bit_exact() {
                 grid0: g0,
                 grid1: g1,
                 mix: u,
+                lights: &[],
                 look,
             },
             origin,
@@ -433,10 +443,12 @@ fn march_emissivity_linear_exact() {
         grid0: &g,
         grid1: &g,
         mix: 0.0,
+        lights: &[],
         look: GasLook {
             color: [0.9, 0.5, 0.3],
             emissivity: e,
             opacity: 0.8,
+            scatter: None,
         },
     };
     let (c1, t1) = march_gas(&mk(0.7), origin, dir, f32::NEG_INFINITY);
@@ -464,11 +476,13 @@ fn march_single_cell_grid() {
         color: [1.0, 1.0, 1.0],
         emissivity: 1.0,
         opacity: 0.4,
+        scatter: None,
     };
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
         mix: 0.0,
+        lights: &[],
         look,
     };
     let (c, t) = march_gas(
@@ -523,10 +537,12 @@ fn gas_off_matches_m6g_golden() {
         grid0: &inert_grid,
         grid1: &inert_grid,
         mix: 0.0,
+        lights: &[],
         look: GasLook {
             color: [1.0, 1.0, 1.0],
             emissivity: 0.0,
             opacity: 0.0,
+            scatter: None,
         },
     };
 
@@ -579,6 +595,7 @@ fn gpu_star_attenuation_matches_slab_transmittance() {
         grid0: &g,
         grid1: &g,
         mix: 0.0,
+        lights: &[],
         look: absorb_look(SLAB_KAPPA),
     };
     let cam = centered_camera();
@@ -621,6 +638,7 @@ fn gpu_two_star_depth_ordering_swaps_with_camera() {
         grid0: &g,
         grid1: &g,
         mix: 0.0,
+        lights: &[],
         look: absorb_look(SLAB_KAPPA),
     };
     let t_slab = (-(SLAB_KAPPA * SLAB_RHO) as f64).exp();
@@ -679,10 +697,12 @@ fn gpu_march_matches_cpu_reference_ortho() {
         grid0: &g0,
         grid1: &g1,
         mix: 0.37,
+        lights: &[],
         look: GasLook {
             color: [0.9, 0.5, 0.3],
             emissivity: 1.7,
             opacity: 2.1,
+            scatter: None,
         },
     };
     let cam = Camera::orthographic(
@@ -742,10 +762,12 @@ fn gpu_march_matches_cpu_reference_perspective() {
         grid0: &g0,
         grid1: &g1,
         mix: 0.37,
+        lights: &[],
         look: GasLook {
             color: [0.9, 0.5, 0.3],
             emissivity: 1.7,
             opacity: 2.1,
+            scatter: None,
         },
     };
     let cam = Camera::perspective(
@@ -795,6 +817,7 @@ fn gpu_emission_linearity_exact() {
         color: [1.0, 0.7, 0.4],
         emissivity: e,
         opacity: 0.9,
+        scatter: None,
     };
     let cfg = RenderConfig {
         width: 64,
@@ -808,6 +831,7 @@ fn gpu_emission_linearity_exact() {
             grid0: &g,
             grid1: &g,
             mix: 0.0,
+            lights: &[],
             look: mk(e),
         };
         r.render_frame_with_gas(&FrameData::default(), Some(&gas), &cam, &cfg)
@@ -840,6 +864,7 @@ fn gpu_mix_endpoint_grids_bit_exact() {
         color: [1.0, 0.8, 0.6],
         emissivity: 1.2,
         opacity: 0.9,
+        scatter: None,
     };
     let cfg = RenderConfig {
         width: 64,
@@ -855,6 +880,7 @@ fn gpu_mix_endpoint_grids_bit_exact() {
                 grid0: g0,
                 grid1: g1,
                 mix: u,
+                lights: &[],
                 look,
             }),
             &cam,
@@ -896,10 +922,12 @@ fn gpu_same_scene_bit_identical() {
         grid0: &g0,
         grid1: &g1,
         mix: 0.37,
+        lights: &[],
         look: GasLook {
             color: [0.9, 0.5, 0.3],
             emissivity: 1.1,
             opacity: 1.4,
+            scatter: None,
         },
     };
     let cfg = RenderConfig {
@@ -930,6 +958,7 @@ fn gpu_gas_outside_view_adds_nothing() {
         color: [1.0, 1.0, 1.0],
         emissivity: 5.0,
         opacity: 1.0,
+        scatter: None,
     };
     let cfg = RenderConfig {
         width: 64,
@@ -945,6 +974,7 @@ fn gpu_gas_outside_view_adds_nothing() {
         grid0: &far,
         grid1: &far,
         mix: 0.0,
+        lights: &[],
         look,
     };
     let img = r
@@ -967,6 +997,7 @@ fn gpu_gas_outside_view_adds_nothing() {
         grid0: &behind,
         grid1: &behind,
         mix: 0.0,
+        lights: &[],
         look,
     };
     let img = r

@@ -265,6 +265,15 @@ pub struct GasLookSpec {
     pub emissivity: f32,
     /// Opacity `κ`: extinction per unit (ρ · path length). `0` = emission-only.
     pub opacity: f32,
+    /// Single-scatter starlight strength σ_s (per ρ · path length, the same
+    /// units family as `opacity`). Omitted or `0` = the feature is OFF and the
+    /// render is bit-identical to the pre-scatter pipeline — the M7e-look
+    /// sufficiency judgement is this one knob.
+    pub scattering: Option<f32>,
+    /// Henyey–Greenstein anisotropy g ∈ (−1, 1): 0 isotropic, > 0 forward
+    /// (backlit silver-lining). Requires a positive `scattering` — on its own
+    /// it is a dead knob and is rejected loud.
+    pub anisotropy: Option<f32>,
 }
 
 /// One progenitor's initial-radius color ramp.
@@ -776,6 +785,10 @@ pub struct GasLookValues {
     pub color: [f32; 3],
     pub emissivity: f32,
     pub opacity: f32,
+    /// Single-scatter strength σ_s; `0` = off (`GasLook::scatter = None`).
+    pub scattering: f32,
+    /// Henyey–Greenstein g; meaningful only with `scattering > 0`.
+    pub anisotropy: f32,
 }
 
 impl Default for GasLookValues {
@@ -784,6 +797,8 @@ impl Default for GasLookValues {
             color: [1.0, 1.0, 1.0],
             emissivity: 1.0,
             opacity: 1.0,
+            scattering: 0.0,
+            anisotropy: 0.0,
         }
     }
 }
@@ -986,6 +1001,8 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                     color: g.color,
                     emissivity: g.emissivity,
                     opacity: g.opacity,
+                    scattering: g.scattering.unwrap_or(0.0),
+                    anisotropy: g.anisotropy.unwrap_or(0.0),
                 })
                 .unwrap_or_default()
         }),

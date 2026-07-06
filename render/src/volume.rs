@@ -40,7 +40,7 @@
 
 use glam::Vec3;
 
-use galaxy_renderprep::{sample_mix, GasGrid};
+use galaxy_renderprep::{sample_mix, FrameData, GasGrid};
 
 use crate::camera::{Camera, Projection};
 use crate::render::HdrImage;
@@ -56,6 +56,60 @@ pub const EXIT_TRANSMITTANCE: f32 = 1e-4;
 /// ~443 steps). Shared by shader and CPU mirror so both truncate identically.
 pub const MAX_STEPS: u32 = 1 << 20;
 
+/// Light-proxy bins per axis for [`cluster_lights`]: a quality **constant**
+/// (like the gas grid resolution), not a look knob — at most `LIGHT_BINS³`
+/// point lights approximate the stellar distribution.
+pub const LIGHT_BINS: u32 = 8;
+
+/// One point-light proxy for the single-scatter term: a cluster of stellar
+/// splats collapsed to their emission-weighted centroid. `radius` softens the
+/// inverse-square law (`d² + radius²`) — inside a cluster's own extent the
+/// point approximation is invalid anyway, so the softening is honest and it
+/// kills the 1/d² pole when a march sample lands on a light.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Light {
+    /// Emission-weighted centroid of the cluster (world space).
+    pub pos: Vec3,
+    /// Softening radius: half the cluster bin-cell diagonal.
+    pub radius: f32,
+    /// Total RGB power of the cluster: Σ color·brightness over its stars
+    /// (power is conserved exactly across the clustering).
+    pub rgb: [f32; 3],
+}
+
+/// Cluster the frame's stellar splats into at most [`LIGHT_BINS`]³ point
+/// lights: bin over the AABB of the *luminous* stars (total emission > 0 —
+/// dark splats neither light gas nor stretch the AABB), accumulating per bin
+/// the RGB power Σ color·brightness and the luminance-weighted centroid, in
+/// f64 (deterministic index-order fold; clustering has no GPU mirror — the
+/// GPU consumes its output). Lights are emitted in bin-index order. An
+/// all-dark frame clusters to no lights.
+pub fn cluster_lights(frame: &FrameData) -> Vec<Light> {
+    let _ = frame;
+    todo!("single-scatter starlight (scattered-starlit-veil S1)")
+}
+
+/// The Henyey–Greenstein phase function `p(cosθ) = (1 − g²) / (4π · (1 + g² −
+/// 2g·cosθ)^{3/2})`, normalized over the sphere (∫p dΩ = 1). `g = 0` is
+/// isotropic (exactly 1/4π); `g → 1` forward-peaked. Callers keep |g| < 1
+/// (the scenario layer validates); the denominator is then ≥ (1−|g|)² > 0.
+pub fn hg_phase(cos_theta: f32, g: f32) -> f32 {
+    let _ = (cos_theta, g);
+    todo!("single-scatter starlight (scattered-starlit-veil S1)")
+}
+
+/// The single-scatter look knobs, `Option`-gated on [`GasLook::scatter`]
+/// (`None` = off = bit-compatible with the pre-scatter renderer).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScatterLook {
+    /// Scattering coefficient σ_s per unit (ρ · path length) — the same units
+    /// family as `opacity`, tuned by eyeball like κ/j. `0` disables the term.
+    pub strength: f32,
+    /// Henyey–Greenstein `g` ∈ (−1, 1): 0 isotropic, > 0 forward (backlit
+    /// silver-lining), < 0 backward.
+    pub anisotropy: f32,
+}
+
 /// Gas look uniforms (plan D8: the grid carries ρ only; everything visual lives
 /// here and iterates at re-render cost).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,6 +122,12 @@ pub struct GasLook {
     /// absorption entirely (transmittance ≡ 1 — the emission-only mode, and the
     /// bit-compat limit the gas-off golden gate pins).
     pub opacity: f32,
+    /// Single-scatter starlight (scattered-starlit-veil): `None` — or
+    /// `strength = 0`, or an empty [`GasFrame::lights`] — is bit-compatible
+    /// with the pre-scatter march. v1 is UNSHADOWED single scatter (no
+    /// light→sample transmittance; the named deferral is per-light shadow
+    /// volumes) — the scattered radiance still rides the camera-path T.
+    pub scatter: Option<ScatterLook>,
 }
 
 impl Default for GasLook {
@@ -76,6 +136,7 @@ impl Default for GasLook {
             color: [1.0, 1.0, 1.0],
             emissivity: 1.0,
             opacity: 1.0,
+            scatter: None,
         }
     }
 }
@@ -95,6 +156,10 @@ pub struct GasFrame<'a> {
     pub mix: f32,
     /// Emission/absorption look knobs.
     pub look: GasLook,
+    /// Point-light proxies for the single-scatter term ([`cluster_lights`]
+    /// output), camera-independent per-frame data. Empty when scattering is
+    /// off — an empty list is bit-compatible with `scatter: None`.
+    pub lights: &'a [Light],
 }
 
 /// The shared nominal step: half the smallest cell edge over BOTH endpoint
@@ -194,6 +259,14 @@ pub fn march_gas(gas: &GasFrame, origin: Vec3, dir: Vec3, t_min: f32) -> ([f32; 
         return ([0.0; 3], 1.0);
     }
     let (n, ds) = steps(t0, t1, step_size(gas.grid0, gas.grid1));
+
+    // Single-scatter starlight is active only when the look asks for it AND
+    // there are lights to scatter — either alone leaves the march bit-identical
+    // to the pre-scatter path.
+    let scatter_on = gas.look.scatter.is_some_and(|s| s.strength > 0.0) && !gas.lights.is_empty();
+    if scatter_on {
+        todo!("single-scatter starlight (scattered-starlit-veil S1)")
+    }
 
     let mut t = 1.0_f32;
     let mut c = [0.0_f32; 3];

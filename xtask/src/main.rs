@@ -739,10 +739,12 @@ fn volume_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             grid0: &grid,
             grid1: &grid,
             mix: 0.0,
+            lights: &[],
             look: GasLook {
                 color: gas_color,
                 emissivity,
                 opacity: kappa,
+                scatter: None,
             },
         }),
     )?;
@@ -752,10 +754,12 @@ fn volume_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             grid0: &grid,
             grid1: &grid,
             mix: 0.0,
+            lights: &[],
             look: GasLook {
                 color: gas_color,
                 emissivity,
                 opacity: 0.0,
+                scatter: None,
             },
         }),
     )?;
@@ -1025,6 +1029,7 @@ fn run_movie(
             color: gl.color,
             emissivity: gl.emissivity,
             opacity: gl.opacity,
+            scatter: None,
         },
         None => galaxy_render::GasLook::default(),
     };
@@ -1171,6 +1176,7 @@ fn run_movie(
                     grid0: g0,
                     grid1: g1,
                     mix: u as f32,
+                    lights: &[],
                     look: gas_look,
                 }),
                 _ => None,
@@ -1187,6 +1193,7 @@ fn run_movie(
                 grid0: g,
                 grid1: g,
                 mix: 0.0,
+                lights: &[],
                 look: gas_look,
             });
         emit(i, last, gas)?;

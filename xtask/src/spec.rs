@@ -595,6 +595,15 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
             s.look.frame_percentile
         ));
     }
+    // Screen-space splat cap (pinprick-starfield): declared ⇒ finite and
+    // positive (0 px would cull every splat — a dead scene, not a look).
+    if let Some(cap) = s.look.max_splat_px {
+        if !(cap.is_finite() && cap > 0.0) {
+            return Err(format!(
+                "look max_splat_px must be positive and finite, got {cap}"
+            ));
+        }
+    }
     if s.look.palette.len() != n_prog as usize {
         return Err(format!(
             "look palette has {} colors but the model has {n_prog} progenitors",

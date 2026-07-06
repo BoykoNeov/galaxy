@@ -216,9 +216,11 @@ fn ortho_cap_shrinks_footprint_at_constant_flux() {
 
 /// Same pair: conserving flux while shrinking the footprint means the peak
 /// brightens by (true/clamped)² = (38.4/9.6)² = 16 — the point-source regime
-/// (zooming into a star concentrates its flux). 3% tolerance: the peak pixel
-/// center sits 0.5 px off the splat center, which shifts the sampled Gaussian
-/// by ~1.5% between the two footprint scales.
+/// (zooming into a star concentrates its flux). The splat is centered on a
+/// pixel CENTER (NDC (0.5/128, 0.5/128) at 256²), so the peak pixel samples
+/// the Gaussian at r = 0 in both renders and the ratio is the boost factor
+/// exactly (at NDC 0 the center falls on a pixel corner and the 0.5√2 px
+/// diagonal offset skews the ratio to 15.52). 1% tolerance.
 #[test]
 fn ortho_cap_concentrates_peak_by_flux_ratio() {
     let r = renderer();
@@ -232,14 +234,15 @@ fn ortho_cap_concentrates_peak_by_flux_ratio() {
         max_splat_px: 9.6,
         ..base
     };
-    let frame = frame_of(&[one(Vec3::ZERO, 0.3)]);
+    let c = 0.5 / 128.0;
+    let frame = frame_of(&[one(Vec3::new(c, c, 0.0), 0.3)]);
 
     let full = r.render_frame(&frame, &ortho_cam(), &base).unwrap();
     let tight = r.render_frame(&frame, &ortho_cam(), &capped).unwrap();
 
     let ratio = peak(&tight) / peak(&full);
     assert!(
-        (ratio - 16.0).abs() / 16.0 < 0.03,
+        (ratio - 16.0).abs() / 16.0 < 0.01,
         "cap must boost peak by (38.4/9.6)² = 16, got ×{ratio}"
     );
 }

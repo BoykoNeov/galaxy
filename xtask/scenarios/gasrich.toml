@@ -84,6 +84,15 @@ eps = 0.05
 
 [look]
 splat_size = 0.12
+# Screen-space PSF cap (pinprick-starfield): the breathing orbit-tilt zoom makes
+# the fixed WORLD-space splats balloon to ~12 px blobs in the compact early shots
+# (reads as defocus) and shrink to sharp ~3 px points once the tails widen the
+# framing. The cap is the point-source camera model — stars stay point-like at
+# any zoom, flux-conserving (clamping down concentrates emission; bright cores
+# saturate like a real astrophoto). HALF-extent in pixels, resolution-LITERAL:
+# tuned on QUICK 360p; a FULL 1080p render wants ~3x this value for the same
+# relative look. Remove the knob to restore the uncapped M6g behavior bit-for-bit.
+max_splat_px = 3.0
 frame_percentile = 0.92 # tighter than `disk` — keep the frame on the gassy cores
 # progenitor palette: halo1 (dim warm), disk1 (warm), halo2 (dim cool), disk2 (cool).
 # Gas is NOT a splat (it renders volumetrically) — its color lives in [look.gas].

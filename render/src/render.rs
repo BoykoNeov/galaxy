@@ -141,7 +141,8 @@ struct Uniforms {
     /// x: projection mode (0 = ortho, 1 = perspective); y: Gaussian falloff;
     /// z: min splat half-extent in pixels; w: max splat half-extent in NDC.
     params: [f32; 4],
-    /// x, y: viewport half-width / half-height in pixels (NDC→px scale).
+    /// x, y: viewport half-width / half-height in pixels (NDC→px scale);
+    /// z: screen-space PSF cap in pixels (pinprick-starfield; 0 = off).
     viewport: [f32; 4],
 }
 
@@ -197,9 +198,20 @@ fn vs(@builtin(instance_index) instance: u32,
     var dim = 1.0;
     if (u.params.x < 0.5) {
         // Orthographic: the exact arithmetic of the retired CPU projection
-        // (golden-gated), position-independent splat size, no clamps.
+        // (golden-gated), position-independent splat size. The only clamp is
+        // the optional screen-space PSF cap (pinprick-starfield; viewport.z,
+        // 0 = off): a taken-branch only when it bites, so the off path keeps
+        // the golden bit-identical. Capping reshapes at constant flux —
+        // emission boosted by (true/clamped)^2, the point-source regime.
         ndc = lateral / he;
         half = vec2<f32>(radius, radius) / he;
+        let cap = u.viewport.z;
+        let py = half.y * u.viewport.y;
+        if (cap > 0.0 && py > cap) {
+            let scale = cap / py;
+            half = half * scale;
+            dim = 1.0 / (scale * scale);
+        }
     } else {
         // Perspective: similar triangles about the pinhole at depth `distance`
         // behind the target. At/behind the near plane the whole quad is culled
@@ -222,9 +234,17 @@ fn vs(@builtin(instance_index) instance: u32,
             return culled();
         }
         let py_clamped = clamp(py, u.params.z, u.params.w * u.viewport.y);
-        let scale = py_clamped / py;
-        half = half * scale;
+        var scale = py_clamped / py;
         dim = min(1.0, 1.0 / (scale * scale));
+        // Screen-space PSF cap (pinprick-starfield; viewport.z, 0 = off),
+        // flux-conserving like the sub-pixel clamp — but only when it binds
+        // tighter than the saturating fill-rate guard, which stays outermost.
+        let cap = u.viewport.z;
+        if (cap > 0.0 && py_clamped > cap) {
+            scale = cap / py;
+            dim = 1.0 / (scale * scale);
+        }
+        half = half * scale;
     }
 
     var out: VsOut;
@@ -900,6 +920,15 @@ impl Renderer {
             })
             .collect();
 
+        // Screen-space PSF cap (pinprick-starfield): a finite cap must be
+        // positive under BOTH projections; `f32::INFINITY` is the documented
+        // off value (NaN and non-positive values fail this comparison).
+        if !(cfg.max_splat_px > 0.0) {
+            return Err(RenderError::Config(format!(
+                "max_splat_px must be positive (f32::INFINITY = off), got {}",
+                cfg.max_splat_px
+            )));
+        }
         let (mode, distance, near) = match camera.projection {
             Projection::Orthographic => (0.0, 0.0, 0.0),
             Projection::Perspective { distance, near } => {
@@ -918,6 +947,15 @@ impl Renderer {
                         cfg.min_splat_px
                     )));
                 }
+                // The PSF cap joins the same window: a cap below min_splat_px
+                // is crossed (INFINITY trivially satisfies this).
+                if cfg.max_splat_px < cfg.min_splat_px {
+                    return Err(RenderError::Config(format!(
+                        "perspective splat clamps invalid: max_splat_px {} must be \
+                         ≥ min_splat_px {}",
+                        cfg.max_splat_px, cfg.min_splat_px
+                    )));
+                }
                 (1.0, distance, near)
             }
         };
@@ -931,7 +969,18 @@ impl Renderer {
                 target: camera.target.extend(0.0).to_array(),
                 view: [camera.half_extent.x, camera.half_extent.y, distance, near],
                 params: [mode, cfg.falloff, cfg.min_splat_px, cfg.max_splat_ndc],
-                viewport: [cfg.width as f32 / 2.0, cfg.height as f32 / 2.0, 0.0, 0.0],
+                viewport: [
+                    cfg.width as f32 / 2.0,
+                    cfg.height as f32 / 2.0,
+                    // The PSF cap rides the free viewport slot (the gas and
+                    // prepass shaders read only .xy); 0 encodes the off default.
+                    if cfg.max_splat_px.is_finite() {
+                        cfg.max_splat_px
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                ],
             }),
         );
 

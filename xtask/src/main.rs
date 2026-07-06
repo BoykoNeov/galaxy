@@ -1034,6 +1034,7 @@ fn run_movie(
             scatter: (gl.scattering > 0.0).then_some(galaxy_render::ScatterLook {
                 strength: gl.scattering,
                 anisotropy: gl.anisotropy,
+                shadows: gl.shadows,
             }),
         },
         None => galaxy_render::GasLook::default(),

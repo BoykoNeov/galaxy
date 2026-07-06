@@ -285,6 +285,7 @@ fn march_uniform_slab_radiance_analytic() {
 
     let (c, t) = march_gas(
         &gas,
+        None,
         Vec3::new(0.3, -0.2, 5.0),
         Vec3::new(0.0, 0.0, -1.0),
         f32::NEG_INFINITY,
@@ -326,6 +327,7 @@ fn march_emission_only_kappa_zero_exact() {
     };
     let (c, t) = march_gas(
         &gas,
+        None,
         Vec3::new(0.0, 0.0, 5.0),
         Vec3::new(0.0, 0.0, -1.0),
         f32::NEG_INFINITY,
@@ -368,6 +370,7 @@ fn march_high_tau_early_exit_bounded() {
     };
     let (c, t) = march_gas(
         &gas,
+        None,
         Vec3::new(0.1, 0.2, -3.0),
         Vec3::new(0.0, 0.0, 1.0),
         f32::NEG_INFINITY,
@@ -413,6 +416,7 @@ fn march_mix_endpoints_bit_exact() {
                 lights: &[],
                 look,
             },
+            None,
             origin,
             dir,
             f32::NEG_INFINITY,
@@ -451,8 +455,8 @@ fn march_emissivity_linear_exact() {
             scatter: None,
         },
     };
-    let (c1, t1) = march_gas(&mk(0.7), origin, dir, f32::NEG_INFINITY);
-    let (c2, t2) = march_gas(&mk(1.4), origin, dir, f32::NEG_INFINITY);
+    let (c1, t1) = march_gas(&mk(0.7), None, origin, dir, f32::NEG_INFINITY);
+    let (c2, t2) = march_gas(&mk(1.4), None, origin, dir, f32::NEG_INFINITY);
     assert!(c1.iter().all(|&v| v > 0.0), "ray must cross the grid");
     for k in 0..3 {
         assert_eq!(
@@ -487,6 +491,7 @@ fn march_single_cell_grid() {
     };
     let (c, t) = march_gas(
         &gas,
+        None,
         Vec3::new(0.0, 0.0, 2.0),
         Vec3::new(0.0, 0.0, -1.0),
         f32::NEG_INFINITY,

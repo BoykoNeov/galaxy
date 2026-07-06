@@ -224,6 +224,7 @@ fn gas_look_values_default_matches_the_renderer_fallback() {
     // (scattering 0) must map to the renderer's default (scatter: None).
     assert_eq!(x.scattering, 0.0, "gas look default scattering must be off");
     assert_eq!(x.anisotropy, 0.0, "gas look default anisotropy must be 0");
+    assert!(!x.shadows, "gas look default shadows must be off");
     assert!(
         r.scatter.is_none(),
         "renderer default must carry no scatter"
@@ -247,6 +248,7 @@ fn gas_scenario_carries_a_declared_look_gas() {
             // Scatter knobs omitted ⇒ the option is OFF (bit-compat render).
             scattering: 0.0,
             anisotropy: 0.0,
+            shadows: false,
         })
     );
 }
@@ -269,8 +271,61 @@ fn look_gas_scatter_knobs_thread_onto_the_scenario() {
             opacity: 12.0,
             scattering: 3.0,
             anisotropy: 0.55,
+            shadows: false,
         })
     );
+}
+
+#[test]
+fn look_gas_shadows_knob_threads_onto_the_scenario() {
+    // umbral-lantern-lattice: the per-light shadow-volume option is one bool.
+    let toml = gas_toml().replace(
+        "[rig]",
+        "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\n\
+         scattering = 3.0\nanisotropy = 0.55\nshadows = true\n\n[rig]",
+    );
+    let s = build_scenario(&parse_scenario_toml(&toml).unwrap(), true);
+    assert_eq!(
+        s.gas_look,
+        Some(galaxy_xtask::spec::GasLookValues {
+            color: [0.5, 0.6, 0.95],
+            emissivity: 0.25,
+            opacity: 12.0,
+            scattering: 3.0,
+            anisotropy: 0.55,
+            shadows: true,
+        })
+    );
+}
+
+#[test]
+fn look_gas_rejects_dead_shadows_knob() {
+    // The anisotropy discipline (umbral-lantern-lattice): the `shadows` knob
+    // PRESENT without a positive `scattering` shapes nothing — reject loud,
+    // whatever its value.
+    for (knobs, why) in [
+        (
+            "shadows = true",
+            "shadows without scattering is a dead knob",
+        ),
+        (
+            "scattering = 0.0\nshadows = true",
+            "shadows with scattering = 0 is a dead knob",
+        ),
+        (
+            "shadows = false",
+            "a present-but-false shadows without scattering is still dead",
+        ),
+    ] {
+        let toml = gas_toml().replace(
+            "[rig]",
+            &format!(
+                "[look.gas]\ncolor = [0.5, 0.6, 0.95]\nemissivity = 0.25\nopacity = 12.0\n\
+                 {knobs}\n\n[rig]"
+            ),
+        );
+        assert!(parse_scenario_toml(&toml).is_err(), "should reject: {why}");
+    }
 }
 
 #[test]

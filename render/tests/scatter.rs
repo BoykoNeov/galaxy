@@ -315,10 +315,11 @@ fn scatter_far_field_slab_analytic() {
                 scatter: Some(ScatterLook {
                     strength,
                     anisotropy: aniso as f32,
+                    shadows: false,
                 }),
             },
         };
-        let (c, t) = march_gas(&gas, origin, dir, f32::NEG_INFINITY);
+        let (c, t) = march_gas(&gas, None, origin, dir, f32::NEG_INFINITY);
 
         // Independent f64 expectation at the chord center (z = −0.5).
         let d2 = (200.0f64 - 0.3).powi(2) + 0.2f64.powi(2);
@@ -366,11 +367,13 @@ fn scatter_inverse_square() {
                 scatter: Some(ScatterLook {
                     strength: 1.0,
                     anisotropy: 0.0,
+                    shadows: false,
                 }),
             },
         };
         march_gas(
             &gas,
+            None,
             Vec3::new(0.0, 0.0, 5.0),
             Vec3::new(0.0, 0.0, -1.0),
             f32::NEG_INFINITY,
@@ -416,6 +419,7 @@ fn scatter_off_is_bit_identical() {
                     scatter,
                 },
             },
+            None,
             origin,
             dir,
             f32::NEG_INFINITY,
@@ -427,6 +431,7 @@ fn scatter_off_is_bit_identical() {
             Some(ScatterLook {
                 strength: 0.0,
                 anisotropy: 0.5,
+                shadows: false,
             }),
             std::slice::from_ref(&light),
         ),
@@ -438,6 +443,7 @@ fn scatter_off_is_bit_identical() {
             Some(ScatterLook {
                 strength: 2.0,
                 anisotropy: 0.5,
+                shadows: false,
             }),
             &[],
         ),
@@ -478,9 +484,11 @@ fn scatter_strength_linear_exact() {
                     scatter: Some(ScatterLook {
                         strength,
                         anisotropy: 0.3,
+                        shadows: false,
                     }),
                 },
             },
+            None,
             Vec3::new(-0.2, 0.15, 3.0),
             Vec3::new(-0.1, 0.25, -1.0).normalize(),
             f32::NEG_INFINITY,
@@ -528,11 +536,13 @@ fn scatter_forward_anisotropy_backlights() {
                 scatter: Some(ScatterLook {
                     strength: 1.0,
                     anisotropy: aniso,
+                    shadows: false,
                 }),
             },
         };
         march_gas(
             &gas,
+            None,
             Vec3::new(0.0, 0.0, 5.0),
             Vec3::new(0.0, 0.0, -1.0),
             f32::NEG_INFINITY,
@@ -606,6 +616,7 @@ fn gpu_scatter_matches_cpu_reference_ortho() {
             scatter: Some(ScatterLook {
                 strength: 1.3,
                 anisotropy: 0.4,
+                shadows: false,
             }),
         },
     };
@@ -686,6 +697,7 @@ fn gpu_scatter_matches_cpu_reference_perspective() {
             scatter: Some(ScatterLook {
                 strength: 1.3,
                 anisotropy: -0.5,
+                shadows: false,
             }),
         },
     };
@@ -775,6 +787,7 @@ fn gpu_scatter_off_bit_identical() {
             Some(ScatterLook {
                 strength: 0.0,
                 anisotropy: 0.7,
+                shadows: false,
             }),
             &lights,
         ),
@@ -786,6 +799,7 @@ fn gpu_scatter_off_bit_identical() {
             Some(ScatterLook {
                 strength: 2.0,
                 anisotropy: 0.7,
+                shadows: false,
             }),
             &[],
         ),
@@ -824,6 +838,7 @@ fn gpu_scatter_strength_linear_exact() {
                 scatter: Some(ScatterLook {
                     strength,
                     anisotropy: 0.3,
+                    shadows: false,
                 }),
             },
         };
@@ -854,6 +869,7 @@ fn gpu_scatter_strength_linear_exact() {
             scatter: Some(ScatterLook {
                 strength: 1.0,
                 anisotropy: 0.3,
+                shadows: false,
             }),
         },
     };

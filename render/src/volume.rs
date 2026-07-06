@@ -61,6 +61,64 @@ pub const MAX_STEPS: u32 = 1 << 20;
 /// point lights approximate the stellar distribution.
 pub const LIGHT_BINS: u32 = 8;
 
+/// Shadow-lattice resolution per axis for [`bake_shadows`]
+/// (umbral-lantern-lattice): a quality **constant** like [`LIGHT_BINS`], not a
+/// look knob. Shadows are soft occlusion, so 32³ over the march domain is
+/// honest resolution, and the worst-case GPU footprint
+/// `LIGHT_BINS³·SHADOW_RES³·4 B = 64 MiB` stays under wgpu's default 128 MiB
+/// storage-binding limit.
+pub const SHADOW_RES: u32 = 32;
+
+/// Per-light 3-D transmittance volumes (umbral-lantern-lattice): for each
+/// clustered light `k`, `T_k = exp(−∫ κ·ρ_mix ds)` over the light → voxel
+/// segment, tabulated at the centers of a [`SHADOW_RES`]³ lattice spanning the
+/// union grid AABB (the march domain). Voxel centers sit at
+/// `bounds_min + (i + 0.5)·cell` with `cell = (bounds_max − bounds_min) /
+/// SHADOW_RES`; `data` is light-major, x-fastest within a volume (the grid
+/// deposit order): `data[k·R³ + (iz·R + iy)·R + ix]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowVolumes {
+    /// Lattice domain minimum — the union AABB of both endpoint grids.
+    pub bounds_min: Vec3,
+    /// Lattice domain maximum.
+    pub bounds_max: Vec3,
+    /// Number of light volumes (= the frame's light count).
+    pub count: usize,
+    /// `count · SHADOW_RES³` transmittances, light-major, x-fastest.
+    pub data: Vec<f32>,
+}
+
+impl ShadowVolumes {
+    /// Trilinear sample of light `k`'s volume at world point `p`, pure
+    /// clamp-to-edge — [`GasGrid::sample`]'s cell-center arithmetic MINUS the
+    /// zero-outside test. A transmittance has no natural zero outside the
+    /// domain, and the march only samples inside the clipped chord; returning
+    /// 0 (= fully shadowed) on an epsilon-outside float excursion would punch
+    /// dark rims. Mirrored operation-for-operation by the WGSL
+    /// `shadow_sample`.
+    pub fn sample(&self, k: usize, p: Vec3) -> f32 {
+        let _ = (k, p);
+        todo!("umbral-lantern-lattice U1-green: trilinear shadow sample")
+    }
+}
+
+/// CPU reference for the shadow-bake compute prepass (umbral-lantern-lattice):
+/// one [`SHADOW_RES`]³ transmittance volume per `gas.lights` entry, over the
+/// union AABB of both endpoint grids. Per voxel: march FROM the light TOWARD
+/// the voxel center (`t = 0` at the light), the segment clipped against the
+/// union AABB and truncated at the voxel, the shared nominal step
+/// ([`step_size`] — the density band-limit governs accuracy, not the shadow
+/// lattice), τ summed then exponentiated once — [`star_transmittance`]'s exact
+/// operation order, in f32 (the WGSL mirror discipline). An empty segment (no
+/// gas between light and voxel, or a voxel coincident with the light) is
+/// exactly `T = 1`. The shadow segment is geometric from the light's centroid:
+/// the cluster softening radius applies only to the 1/d² intensity pole —
+/// occlusion has no pole to kill.
+pub fn bake_shadows(gas: &GasFrame) -> ShadowVolumes {
+    let _ = gas;
+    todo!("umbral-lantern-lattice U1-green: shadow-volume bake")
+}
+
 /// One point-light proxy for the single-scatter term: a cluster of stellar
 /// splats collapsed to their emission-weighted centroid. `radius` softens the
 /// inverse-square law (`d² + radius²`) — inside a cluster's own extent the
@@ -186,6 +244,13 @@ pub struct ScatterLook {
     /// Henyey–Greenstein `g` ∈ (−1, 1): 0 isotropic, > 0 forward (backlit
     /// silver-lining), < 0 backward.
     pub anisotropy: f32,
+    /// Per-light shadow volumes (umbral-lantern-lattice): when `true` the
+    /// RENDERER bakes light→sample transmittances ([`bake_shadows`] is the CPU
+    /// reference) and multiplies each light's incident term by `T_k`. `false`
+    /// is the v1 unshadowed scatter — bit-compatible. NOTE: the CPU oracle
+    /// [`march_gas`] keys on its `shadows` ARGUMENT, not this flag; the flag
+    /// tells the renderer (and [`render_gas_cpu`]) whether to bake.
+    pub shadows: bool,
 }
 
 /// Gas look uniforms (plan D8: the grid carries ρ only; everything visual lives
@@ -327,7 +392,20 @@ pub fn ray_for_pixel(camera: &Camera, width: u32, height: u32, px: u32, py: u32)
 /// `t_min` clamps the chord start: perspective passes `0.0` (nothing behind
 /// the eye), orthographic passes `f32::NEG_INFINITY` (the full chord). A ray
 /// that misses both grids returns `([0,0,0], 1.0)`.
-pub fn march_gas(gas: &GasFrame, origin: Vec3, dir: Vec3, t_min: f32) -> ([f32; 3], f32) {
+///
+/// `shadows`: per-light shadow volumes (umbral-lantern-lattice) — `Some`
+/// multiplies each light's incident term by the baked `T_k(p)`. The oracle
+/// keys on THIS argument, not on [`ScatterLook::shadows`]: callers wanting the
+/// shadowed march must pass `Some(&bake_shadows(gas))` themselves (as
+/// [`render_gas_cpu`] does when the look asks) — passing the flag but `None`
+/// marches unshadowed. It is an oracle API, not a safety rail.
+pub fn march_gas(
+    gas: &GasFrame,
+    shadows: Option<&ShadowVolumes>,
+    origin: Vec3,
+    dir: Vec3,
+    t_min: f32,
+) -> ([f32; 3], f32) {
     let (bmin, bmax) = union_bounds(gas);
     let Some((t0_raw, t1)) = clip_aabb(origin, dir, bmin, bmax) else {
         return ([0.0; 3], 1.0);
@@ -346,6 +424,9 @@ pub fn march_gas(gas: &GasFrame, origin: Vec3, dir: Vec3, t_min: f32) -> ([f32; 
         .look
         .scatter
         .filter(|s| s.strength > 0.0 && !gas.lights.is_empty());
+    if scatter.is_some() && shadows.is_some() {
+        todo!("umbral-lantern-lattice U1-green: shadowed scatter march");
+    }
 
     let mut t = 1.0_f32;
     let mut c = [0.0_f32; 3];
@@ -448,11 +529,19 @@ pub fn render_gas_cpu(gas: &GasFrame, camera: &Camera, width: u32, height: u32) 
         Projection::Orthographic => f32::NEG_INFINITY, // the full chord
         Projection::Perspective { .. } => 0.0,         // nothing behind the eye
     };
+    // Shadow volumes are baked once per image iff the look asks for them AND
+    // the scatter term is active — exactly the renderer's on-device policy
+    // (`GasUniforms.scat.w`), so the oracle and the GPU stay in lockstep.
+    let shadows = gas
+        .look
+        .scatter
+        .filter(|s| s.shadows && s.strength > 0.0 && !gas.lights.is_empty())
+        .map(|_| bake_shadows(gas));
     let mut pixels = Vec::with_capacity((width * height) as usize);
     for py in 0..height {
         for px in 0..width {
             let (origin, dir) = ray_for_pixel(camera, width, height, px, py);
-            let (c, t) = march_gas(gas, origin, dir, t_min);
+            let (c, t) = march_gas(gas, shadows.as_ref(), origin, dir, t_min);
             pixels.push([c[0], c[1], c[2], 1.0 - t]);
         }
     }

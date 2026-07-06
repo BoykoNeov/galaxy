@@ -282,6 +282,12 @@ pub struct GasLookSpec {
     /// (backlit silver-lining). Requires a positive `scattering` — on its own
     /// it is a dead knob and is rejected loud.
     pub anisotropy: Option<f32>,
+    /// Per-light shadow volumes (umbral-lantern-lattice): `true` bakes
+    /// light→sample transmittances so gas in its own shadow stops glowing.
+    /// Omitted = `false` = the v1 unshadowed scatter (bit-compatible).
+    /// Requires a positive `scattering` — present without one it is a dead
+    /// knob and is rejected loud (whatever its value).
+    pub shadows: Option<bool>,
 }
 
 /// One progenitor's initial-radius color ramp.
@@ -835,6 +841,8 @@ pub struct GasLookValues {
     pub scattering: f32,
     /// Henyey–Greenstein g; meaningful only with `scattering > 0`.
     pub anisotropy: f32,
+    /// Per-light shadow volumes; meaningful only with `scattering > 0`.
+    pub shadows: bool,
 }
 
 impl Default for GasLookValues {
@@ -845,6 +853,7 @@ impl Default for GasLookValues {
             opacity: 1.0,
             scattering: 0.0,
             anisotropy: 0.0,
+            shadows: false,
         }
     }
 }
@@ -1050,6 +1059,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                     opacity: g.opacity,
                     scattering: g.scattering.unwrap_or(0.0),
                     anisotropy: g.anisotropy.unwrap_or(0.0),
+                    shadows: g.shadows.unwrap_or(false),
                 })
                 .unwrap_or_default()
         }),

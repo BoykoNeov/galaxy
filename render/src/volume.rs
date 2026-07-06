@@ -38,6 +38,7 @@
 //! absorption is `κ·ρ` per unit length. Both are LOOK uniforms ([`GasLook`]),
 //! not baked into the grid — the look iterates at re-render cost (plan D8).
 
+use std::collections::BinaryHeap;
 
 use glam::Vec3;
 
@@ -274,10 +275,236 @@ pub fn cluster_lights(frame: &FrameData) -> Vec<Light> {
 /// shadow buffer but is dead code under the shipped constants. Not a look knob;
 /// production must call [`cluster_lights`].
 pub fn cluster_lights_with(frame: &FrameData, tol: f64, budget: usize) -> Vec<Light> {
-    // O1 green implements the greedy octree cut here; the red commit ships
-    // only the signature + gates (tinted-octree-lanterns O1 [red]).
-    let _ = (frame, tol, budget);
-    todo!("octree cut — O1 green")
+    // Total emissive power / scalar luminance of star `i` — the clustering
+    // weight. Zero-power splats are invisible to the gas AND to the bounds (a
+    // dark far-flung particle must not move the root cube).
+    fn power(frame: &FrameData, i: usize) -> [f64; 3] {
+        let c = frame.color[i];
+        let b = frame.brightness[i] as f64;
+        [c[0] as f64 * b, c[1] as f64 * b, c[2] as f64 * b]
+    }
+    fn lum(frame: &FrameData, i: usize) -> f64 {
+        let p = power(frame, i);
+        p[0] + p[1] + p[2]
+    }
+
+    // 1. Luminous set + bounds, in ascending star-index order (the fold
+    //    discipline: every aggregate below folds members in this order).
+    let mut bmin = Vec3::splat(f32::INFINITY);
+    let mut bmax = Vec3::splat(f32::NEG_INFINITY);
+    let mut root_members: Vec<usize> = Vec::new();
+    for i in 0..frame.len() {
+        if lum(frame, i) > 0.0 {
+            bmin = bmin.min(frame.pos[i]);
+            bmax = bmax.max(frame.pos[i]);
+            root_members.push(i);
+        }
+    }
+    if root_members.is_empty() {
+        return Vec::new();
+    }
+
+    // Root cell = the luminous AABB expanded to a cube (center = AABB center,
+    // side = max extent — the Barnes-Hut/LBVH root convention; octants stay
+    // shape-regular). A coincident/single luminous set has side 0 ⇒ one light,
+    // radius 0 (v1's degenerate contract).
+    let ext = bmax - bmin;
+    let root_center = 0.5 * (bmin + bmax);
+    let root_half = 0.5 * ext.max_element().max(0.0);
+
+    // 2. Node state: cubic cell + member indices + f64 aggregates (scalar
+    //    luminance P, per-channel power, luminance-weighted centroid numerator,
+    //    the member-position AABB whose half-diagonal is `spread`).
+    struct Node {
+        center: Vec3,
+        half: f32,
+        depth: u32,
+        members: Vec<usize>,
+        p: f64,
+        rgb: [f64; 3],
+        wpos: glam::DVec3,
+        metric: f64,
+        children: Vec<usize>,
+    }
+    fn make_node(
+        arena: &mut Vec<Node>,
+        frame: &FrameData,
+        center: Vec3,
+        half: f32,
+        depth: u32,
+        members: Vec<usize>,
+    ) -> usize {
+        let mut p = 0.0f64;
+        let mut rgb = [0.0f64; 3];
+        let mut wpos = glam::DVec3::ZERO;
+        let mut amin = Vec3::splat(f32::INFINITY);
+        let mut amax = Vec3::splat(f32::NEG_INFINITY);
+        for &i in &members {
+            let w = lum(frame, i);
+            let pos = frame.pos[i];
+            p += w;
+            wpos += pos.as_dvec3() * w;
+            for (acc, v) in rgb.iter_mut().zip(power(frame, i)) {
+                *acc += v;
+            }
+            amin = amin.min(pos);
+            amax = amax.max(pos);
+        }
+        // 3. Metric = P·spread² — the far-field flux-error surrogate. Using the
+        //    member spread (not the cell diagonal) makes single-star and
+        //    coincident nodes exactly metric 0: they terminate structurally.
+        let spread = 0.5 * (amax - amin).length() as f64;
+        let metric = p * spread * spread;
+        let id = arena.len();
+        arena.push(Node {
+            center,
+            half,
+            depth,
+            members,
+            p,
+            rgb,
+            wpos,
+            metric,
+            children: Vec::new(),
+        });
+        id
+    }
+
+    let mut arena: Vec<Node> = Vec::new();
+    let root = make_node(&mut arena, frame, root_center, root_half, 0, root_members);
+    let root_metric = arena[root].metric;
+    let threshold = tol * root_metric;
+
+    // A node can be usefully split only if it has ≥ 2 members and is above the
+    // depth backstop (nodes at MAX_DEPTH never enter the heap).
+    let splittable = |n: &Node| n.depth < MAX_DEPTH && n.members.len() >= 2;
+
+    // 4. Greedy refinement: a max-heap of splittable leaves ordered by
+    //    (metric, id). Both keys fully deterministic ⇒ reproducible cut.
+    struct HeapItem {
+        metric: f64,
+        id: usize,
+    }
+    impl PartialEq for HeapItem {
+        fn eq(&self, o: &Self) -> bool {
+            self.metric.total_cmp(&o.metric).is_eq() && self.id == o.id
+        }
+    }
+    impl Eq for HeapItem {}
+    impl Ord for HeapItem {
+        fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+            self.metric.total_cmp(&o.metric).then(self.id.cmp(&o.id))
+        }
+    }
+    impl PartialOrd for HeapItem {
+        fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+
+    // The tree always has ≥ 1 leaf (the root). A single/coincident luminous
+    // set leaves the root unsplittable ⇒ it is the sole light.
+    let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
+    let mut leaf_count = 1usize;
+    if splittable(&arena[root]) {
+        heap.push(HeapItem {
+            metric: root_metric,
+            id: root,
+        });
+    }
+
+    while let Some(item) = heap.pop() {
+        // Stop once the worst leaf falls below the error floor: the heap is
+        // ordered by metric, so every remaining leaf is below it too.
+        if item.metric <= threshold {
+            break;
+        }
+        let (center, half, depth) = {
+            let n = &arena[item.id];
+            (n.center, n.half, n.depth)
+        };
+        // Partition members by octant, preserving ascending index order.
+        let mut groups: [Vec<usize>; 8] = std::array::from_fn(|_| Vec::new());
+        for &i in &arena[item.id].members {
+            let p = frame.pos[i];
+            let oct = usize::from(p.x >= center.x)
+                | (usize::from(p.y >= center.y) << 1)
+                | (usize::from(p.z >= center.z) << 2);
+            groups[oct].push(i);
+        }
+        let nonempty = groups.iter().filter(|g| !g.is_empty()).count();
+        // Budget: replacing this leaf (in hand, not counted) with `nonempty`
+        // children. If that would exceed `budget`, keep it a leaf and stop
+        // refinement (a split adds 1–7 leaves, so the greedy stop lands the
+        // final count in `[budget − 6, budget]`).
+        if leaf_count - 1 + nonempty > budget {
+            break;
+        }
+        leaf_count = leaf_count - 1 + nonempty;
+        let child_half = 0.5 * half;
+        let mut child_ids: Vec<usize> = Vec::new();
+        for (oct, g) in groups.into_iter().enumerate() {
+            if g.is_empty() {
+                continue;
+            }
+            let cx = center.x
+                + if oct & 1 != 0 {
+                    child_half
+                } else {
+                    -child_half
+                };
+            let cy = center.y
+                + if oct & 2 != 0 {
+                    child_half
+                } else {
+                    -child_half
+                };
+            let cz = center.z
+                + if oct & 4 != 0 {
+                    child_half
+                } else {
+                    -child_half
+                };
+            let cid = make_node(
+                &mut arena,
+                frame,
+                Vec3::new(cx, cy, cz),
+                child_half,
+                depth + 1,
+                g,
+            );
+            child_ids.push(cid);
+            if splittable(&arena[cid]) {
+                heap.push(HeapItem {
+                    metric: arena[cid].metric,
+                    id: cid,
+                });
+            }
+        }
+        arena[item.id].children = child_ids;
+    }
+
+    // 5. Emission: final leaves (childless nodes) in DFS pre-order by octant
+    //    index — a canonical, reproducible order. Per leaf: pos = luminance-
+    //    weighted centroid, rgb = Σ power (one f32 cast per channel), radius =
+    //    ½ the leaf's OWN cell diagonal (v1's honesty rule, now per-light).
+    let mut lights: Vec<Light> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(nid) = stack.pop() {
+        let n = &arena[nid];
+        if n.children.is_empty() {
+            lights.push(Light {
+                pos: (n.wpos / n.p).as_vec3(),
+                radius: n.half * 3.0f32.sqrt(),
+                rgb: [n.rgb[0] as f32, n.rgb[1] as f32, n.rgb[2] as f32],
+            });
+        } else {
+            for &c in n.children.iter().rev() {
+                stack.push(c);
+            }
+        }
+    }
+    lights
 }
 
 /// The Henyey–Greenstein phase function `p(cosθ) = (1 − g²) / (4π · (1 + g² −

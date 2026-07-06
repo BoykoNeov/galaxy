@@ -67,8 +67,8 @@ fn frame_power(f: &FrameData) -> [f64; 3] {
     let mut p = [0.0f64; 3];
     for i in 0..f.len() {
         let b = f.brightness[i] as f64;
-        for ch in 0..3 {
-            p[ch] += f.color[i][ch] as f64 * b;
+        for (acc, &c) in p.iter_mut().zip(f.color[i].iter()) {
+            *acc += c as f64 * b;
         }
     }
     p
@@ -78,8 +78,8 @@ fn frame_power(f: &FrameData) -> [f64; 3] {
 fn lights_power(lights: &[Light]) -> [f64; 3] {
     let mut p = [0.0f64; 3];
     for l in lights {
-        for ch in 0..3 {
-            p[ch] += l.rgb[ch] as f64;
+        for (acc, &c) in p.iter_mut().zip(l.rgb.iter()) {
+            *acc += c as f64;
         }
     }
     p
@@ -237,9 +237,16 @@ fn degenerates() {
         vec![3.0, 0.0],
     );
     let lm = cluster_lights(&mixed);
-    assert_eq!(lm.len(), 1, "dark star must not create a light or stretch bounds");
+    assert_eq!(
+        lm.len(),
+        1,
+        "dark star must not create a light or stretch bounds"
+    );
     assert_eq!(lm[0].pos, bright, "dark star must not shift the centroid");
-    assert_eq!(lm[0].radius, 0.0, "single luminous star ⇒ zero-side root cube");
+    assert_eq!(
+        lm[0].radius, 0.0,
+        "single luminous star ⇒ zero-side root cube"
+    );
 }
 
 // ---------- gate 4: adaptivity (the point of the change) ----------
@@ -296,7 +303,10 @@ fn adaptivity_beats_uniform_binning() {
                 && (0.0..12.5).contains(&l.pos.z)
         })
         .count();
-    assert!(in_bin >= 2, "octree must resolve the joint bin (got {in_bin}, v1 = 1)");
+    assert!(
+        in_bin >= 2,
+        "octree must resolve the joint bin (got {in_bin}, v1 = 1)"
+    );
 
     // v1 global softening radius = ½·√3·(bin side) = ½·√3·(100/8).
     let v1_global = 0.5 * 3.0f32.sqrt() * (100.0 / 8.0);
@@ -389,9 +399,11 @@ fn budget_cap_path_and_safety() {
         for _ in 0..8 {
             let c0 = Vec3::new(rng.next(), rng.next(), rng.next()) * 100.0 - Vec3::splat(50.0);
             for _ in 0..8 {
-                let c1 = c0 + (Vec3::new(rng.next(), rng.next(), rng.next()) * 10.0 - Vec3::splat(5.0));
+                let c1 =
+                    c0 + (Vec3::new(rng.next(), rng.next(), rng.next()) * 10.0 - Vec3::splat(5.0));
                 for _ in 0..64 {
-                    let c2 = c1 + (Vec3::new(rng.next(), rng.next(), rng.next()) * 1.0 - Vec3::splat(0.5));
+                    let c2 = c1
+                        + (Vec3::new(rng.next(), rng.next(), rng.next()) * 1.0 - Vec3::splat(0.5));
                     pos.push(c2);
                     color.push([1.0, 1.0, 1.0]);
                     b.push(10.0);
@@ -403,7 +415,10 @@ fn budget_cap_path_and_safety() {
 
     // Unbudgeted the cloud refines past 16, so budget = 16 genuinely binds.
     let natural = cluster_lights_with(&f6, REFINE_TOL, MAX_LIGHTS).len();
-    assert!(natural > 16, "fixture must exceed the test budget (got {natural})");
+    assert!(
+        natural > 16,
+        "fixture must exceed the test budget (got {natural})"
+    );
 
     let budget = 16usize;
     let capped = cluster_lights_with(&f6, REFINE_TOL, budget).len();

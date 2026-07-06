@@ -10,7 +10,8 @@
 //!   * A bare first arg that is no preset name (and not a `.toml` path) is taken as
 //!     `out_dir` with the `disk` scenario (back-compat with the original CLI).
 //!   * `regrade <exr_dir> <png_dir> [--exposure E] [--tonemap aces|reinhard|asinh]
-//!     [--beta B] [--bloom S] [--bloom-levels N] [--bloom-radius R]` re-grades
+//!     [--beta B] [--bloom S] [--bloom-levels N] [--bloom-radius R]
+//!     [--black-point B] [--white-point W] [--gamma G]` re-grades
 //!     retained linear EXRs into fresh PNGs (+ movie if ffmpeg is present) in seconds
 //!     — no re-simulation, no re-render (the M6a look loop; bloom added in M6b).
 //!   * `sph-demo <snapshot.snap> [--k N] [--n-ngb X]` runs the M7a SPH density
@@ -192,7 +193,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn regrade(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     const USAGE: &str = "usage: regrade <exr_dir> <png_dir> \
          [--exposure E] [--tonemap aces|reinhard|asinh] [--beta B] \
-         [--bloom S] [--bloom-levels N] [--bloom-radius R]";
+         [--bloom S] [--bloom-levels N] [--bloom-radius R] \
+         [--black-point B] [--white-point W] [--gamma G]";
     let cfg = parse_regrade_args(args).map_err(|e| format!("regrade: {e}\n{USAGE}"))?;
 
     let mut exrs: Vec<PathBuf> = std::fs::read_dir(&cfg.exr_dir)?
@@ -1038,7 +1040,7 @@ fn run_movie(
                 anisotropy: gl.anisotropy,
                 shadows: gl.shadows,
                 tint: gl.scatter_tint,
-                softening: None, // [look.gas] scatter_softening wired in the green pass
+                softening: gl.scatter_softening,
             }),
         },
         None => galaxy_render::GasLook::default(),

@@ -732,6 +732,23 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                         .into());
                 }
             }
+            // Fixed scatter softening ε (galaxy-render controls): a softening
+            // LENGTH — finite and strictly positive. Present without a live
+            // scatter term it shapes nothing (the same dead-knob discipline).
+            if let Some(eps) = gl.scatter_softening {
+                if !(eps.is_finite() && eps > 0.0) {
+                    return Err(format!(
+                        "look.gas scatter_softening must be finite and positive, got {eps}"
+                    ));
+                }
+                if !gl.scattering.is_some_and(|sc| sc > 0.0) {
+                    return Err(
+                        "look.gas scatter_softening without a positive scattering is a \
+                         dead knob (add scattering > 0, or remove scatter_softening)"
+                            .into(),
+                    );
+                }
+            }
         }
         (None, _) => {}
     }
@@ -1116,7 +1133,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                     anisotropy: g.anisotropy.unwrap_or(0.0),
                     shadows: g.shadows.unwrap_or(false),
                     scatter_tint: g.scatter_tint.unwrap_or([1.0; 3]),
-                    scatter_softening: None, // STUB (red): threaded in the green pass
+                    scatter_softening: g.scatter_softening,
                 })
                 .unwrap_or_default()
         }),

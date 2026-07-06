@@ -218,12 +218,21 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
     let mut bloom_strength: Option<f32> = None;
     let mut bloom_levels: Option<u32> = None;
     let mut bloom_radius: Option<f32> = None;
+    // Levels (galaxy-render controls): neutral until a flag moves them.
+    let mut black_point = 0.0f32;
+    let mut white_point = 1.0f32;
+    let mut gamma = 1.0f32;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--exposure" => exposure = positive_flag_value("--exposure", it.next())?,
             "--beta" => beta = Some(positive_flag_value("--beta", it.next())?),
+            // Levels window is any-sign finite (the window/gamma validity is
+            // enforced together by GradeConfig::validate below); gamma is > 0.
+            "--black-point" => black_point = finite_flag_value("--black-point", it.next())?,
+            "--white-point" => white_point = finite_flag_value("--white-point", it.next())?,
+            "--gamma" => gamma = positive_flag_value("--gamma", it.next())?,
             "--tonemap" => {
                 tonemap_name = Some(
                     it.next()
@@ -240,7 +249,8 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
             flag if flag.starts_with("--") => {
                 return Err(format!(
                     "unknown flag `{flag}` (expected --exposure, --tonemap, --beta, \
-                     --bloom, --bloom-levels, --bloom-radius)"
+                     --bloom, --bloom-levels, --bloom-radius, --black-point, \
+                     --white-point, --gamma)"
                 ));
             }
             positional => positionals.push(positional),
@@ -284,15 +294,22 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
         }
     };
 
+    let grade = GradeConfig {
+        exposure,
+        tonemap,
+        bloom,
+        black_point,
+        white_point,
+        gamma,
+    };
+    // Fail fast on a degenerate levels window / gamma (black ≥ white, gamma ≤ 0,
+    // non-finite) at parse time rather than deep in grade_file.
+    grade.validate().map_err(|e| e.to_string())?;
+
     Ok(RegradeArgs {
         exr_dir: PathBuf::from(exr_dir),
         png_dir: PathBuf::from(png_dir),
-        grade: GradeConfig {
-            exposure,
-            tonemap,
-            bloom,
-            ..GradeConfig::default()
-        },
+        grade,
     })
 }
 
@@ -318,6 +335,20 @@ fn positive_flag_value(flag: &str, value: Option<&String>) -> Result<f32, String
         .map_err(|_| format!("{flag} expects a number, got `{raw}`"))?;
     if !(parsed.is_finite() && parsed > 0.0) {
         return Err(format!("{flag} must be positive, got `{raw}`"));
+    }
+    Ok(parsed)
+}
+
+/// Parse a flag's value as a finite `f32` of any sign — the caller's own
+/// validation constrains the range (used for the levels black/white points,
+/// whose validity is the paired window `black < white`, not a per-value bound).
+fn finite_flag_value(flag: &str, value: Option<&String>) -> Result<f32, String> {
+    let raw = value.ok_or_else(|| format!("{flag} needs a value"))?;
+    let parsed: f32 = raw
+        .parse()
+        .map_err(|_| format!("{flag} expects a number, got `{raw}`"))?;
+    if !parsed.is_finite() {
+        return Err(format!("{flag} must be finite, got `{raw}`"));
     }
     Ok(parsed)
 }

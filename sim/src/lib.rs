@@ -162,3 +162,100 @@ fn emit_snapshot(
     );
     sink.emit(&header, state)
 }
+
+// ---------------------------------------------------------------------------
+// Global block-adaptive timestepping (plan: courant-quickening-cadence.md).
+//
+// Adaptive dt on the SPH path: the loop holds `dt` fixed across a BLOCK of ≤
+// `block_steps` steps, recomputing it at each block boundary from the solver's CFL
+// limit (`ForceSolver::max_stable_dt`). Snapshots land on a TIME cadence
+// (`output_dt`), not a step count — variable dt breaks even step spacing (D3).
+//
+// The adaptive path deliberately forfeits leapfrog reversibility + energy
+// oscillation (variable dt is not symplectic — D2); its gates are full-duration
+// convergence to a fine-dt reference and contraction staleness (D2b), NOT the
+// fixed-dt invariant gates, and there is NO energy gate (isothermal = heat bath).
+// See the plan doc.
+// ---------------------------------------------------------------------------
+
+/// Policy + schedule for [`run_adaptive`]. `courant` and the safety controls are
+/// timestep POLICY and live here (in the loop's config), never in the solver — the
+/// solver reports only the physics CFL limit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveConfig {
+    /// Courant number applied to the solver's CFL limit: the block's target dt is
+    /// `courant · max_stable_dt`. Must be in (0, 1); < 1 gives the stability margin
+    /// that also absorbs mid-block bound tightening (D2b).
+    pub courant: f64,
+    /// Per-block dt growth cap: `dt_target ≤ max_growth · dt_prev` (must be ≥ 1).
+    /// Bounds how fast dt ramps back up after a contraction — dt SHRINKS instantly
+    /// (no cap), GROWS gradually (D2b). `dt_prev` tracks the CFL/growth target, not
+    /// the landing-clamped dt, so a short final block does not throttle the next.
+    pub max_growth: f64,
+    /// Max steps held at one dt before re-querying the bound (the block size `B`;
+    /// must be ≥ 1, and ≤ the GPU `MAX_BATCH` on the resident path). Bounded by D2b.
+    pub block_steps: u64,
+    /// Sim-time between emitted snapshots (must be > 0). Snapshots land exactly on
+    /// integer multiples of this via a per-interval final-block clamp (D3).
+    pub output_dt: f64,
+    /// Number of output intervals; the run ends at `n_outputs · output_dt` (≥ 1).
+    pub n_outputs: u64,
+    /// Softening length recorded in headers (must match the solver's).
+    pub softening: f64,
+    /// RNG seed that produced the IC, recorded in headers.
+    pub rng_seed: u64,
+    /// Scenario config hash, recorded in headers.
+    pub config_hash: u64,
+    /// Units tag, recorded in headers.
+    pub units: String,
+}
+
+/// One block's decision from [`plan_block`]: run `n_steps` at uniform `dt`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockPlan {
+    /// Number of steps to run at `dt` this block (≥ 1).
+    pub n_steps: u64,
+    /// Uniform dt for these steps. `≤ dt_target` always; on the interval's final
+    /// block it is `remaining / n_steps` so the block lands exactly on the output
+    /// time (D3).
+    pub dt: f64,
+    /// The CFL/growth-limited target dt — the growth memory the caller carries into
+    /// the next block as `dt_prev` (NOT `dt`, which may be clamped down to land).
+    pub dt_target: f64,
+    /// True iff this block reaches `remaining` exactly (the interval's final block).
+    pub lands: bool,
+}
+
+/// Decide the next block: apply the Courant number + growth cap to the current CFL
+/// `limit` (the `c_cfl = 1` value from [`ForceSolver::max_stable_dt`]), then size
+/// the block to advance `remaining` sim-time — a full `block_steps` block at
+/// `dt_target` if the interval does not fit, else a landing block of
+/// `dt = remaining / n` (≤ `dt_target`) that reaches the output time exactly.
+///
+/// Pure (no stepping) so the D2b contraction-staleness property is unit-testable.
+/// Requires `limit`, `prev_target`, `remaining` finite positive and a valid `cfg`.
+pub fn plan_block(limit: f64, prev_target: f64, remaining: f64, cfg: &AdaptiveConfig) -> BlockPlan {
+    let _ = (limit, prev_target, remaining, cfg);
+    todo!("A2 green: courant + growth-cap dt_target, then full-block vs landing-block sizing")
+}
+
+/// Run the global block-adaptive stepping loop (plan: courant-quickening-cadence).
+/// Emits the IC (time 0) then a snapshot at each output time `k · output_dt`
+/// (`k = 1..=n_outputs`), holding dt fixed across blocks of ≤ `block_steps` and
+/// recomputing it at block boundaries from `solver.max_stable_dt`. Header `step` is
+/// the output index `k`; header/state time is the exact `k · output_dt`.
+///
+/// Errors on an invalid config, or if the initial CFL bound is not finite positive
+/// (adaptive dt requires gas present — a gas-free state returns `+∞`, which has no
+/// finite target; use the fixed-dt [`run`] for collisionless runs).
+pub fn run_adaptive(
+    state: &mut State,
+    solver: &mut dyn ForceSolver,
+    integ: &mut dyn Integrator,
+    bg: &dyn Background,
+    config: &AdaptiveConfig,
+    sink: &mut dyn SnapshotSink,
+) -> Result<RunSummary, SimError> {
+    let _ = (state, solver, integ, bg, config, sink);
+    todo!("A2 green: IC emit, per-interval block loop with plan_block, land-exact emit")
+}

@@ -170,6 +170,25 @@ shadow_bake = "dda"
 # frozen at the COARSER 1e-2 (see render/src/volume.rs), the softer, dimmer, less
 # blob-prone scattered core, not a tol-neutral choice.
 
+# Local (spatially-adaptive) tone compression (render-more-controls): the actual
+# CURE for the approach WHITE-BLOB the splat cap only softened. Where the tight
+# approach framing piles disk-star splats into one saturated sheet, a global tone
+# curve maps the whole core to a flat near-white — no exposure or levels move can
+# recover it (every pixel there is genuinely bright). This pulls exposure DOWN only
+# where the surround is bright (g = 1/(1 + strength·V), V = a large-σ Gaussian
+# low-pass of luminance), so sub-cores inside the blob drop back into the curve's
+# responsive range and read as individual colored stars again. Hue-exact (a single
+# scalar gain per pixel) and never-brightens (g ≤ 1), so dim regions pass through
+# bit-identical. Baked into the movie grade here (was regrade-only): the frame-by-
+# frame A/B viewer (M:\claud_projects\temp\render_tune_ab) settled on strength 2.0
+# ("s2") over the ship/cap-relaxed/TOL-relaxed alternatives — the cap-relaxed ones
+# DEFOCUSED the stars (wider splats, lower contrast) for no gain. `radius`/`floor`
+# left at the CLI defaults (32 px / 0.2) that s2 used. `radius` is resolution-
+# LITERAL (pixels, tuned on QUICK 360p; a FULL 1080p render wants ~3× it, like
+# `max_splat_px`). Remove this section to restore the pre-tonemap grade bit-for-bit.
+[look.local_tone]
+strength = 2.0
+
 [[look.ramps]]
 inner = [0.05, 0.035, 0.025]
 outer = [0.05, 0.035, 0.025]

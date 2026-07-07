@@ -22,6 +22,7 @@ use galaxy_ic::{
     DiskCollision, ExponentialDisk, Nfw, NfwCollision, Orientation, Plummer, SphericalHalo,
     TruncatedNfw,
 };
+use galaxy_grade::LocalToneConfig;
 use galaxy_render::ShadowBake;
 use galaxy_renderprep::{ColorMode, DensityColoring, PrepConfig, SizeByDensity};
 
@@ -259,6 +260,38 @@ pub struct LookSpec {
     /// with [`GasLookValues::default`].
     #[serde(default)]
     pub gas: Option<GasLookSpec>,
+    /// Local (spatially-adaptive) tone compression (`[look.local_tone]`,
+    /// render-more-controls): the fix for the additive-splat "white-blob" on the
+    /// approach. A **grade** knob (whole-frame, linear-HDR) — NOT gas-specific and
+    /// NOT gated on scattering — so it lives at the `[look]` level beside
+    /// `[look.gas]`, and the movie pipeline bakes it into the grade's
+    /// [`galaxy_grade::GradeConfig::local`]. Omitted = off = bit-identical to the
+    /// pre-tonemap grade.
+    #[serde(default)]
+    pub local_tone: Option<LocalToneSpec>,
+}
+
+/// The local tone-compression look (`[look.local_tone]`): the TOML spelling of
+/// [`galaxy_grade::LocalToneConfig`]. Only `strength` is required; `radius`
+/// (Gaussian surround σ, pixels) and `floor` (gain floor) default to the same
+/// values the `regrade --local` CLI uses ([`crate::DEFAULT_LOCAL_RADIUS`] /
+/// [`crate::DEFAULT_LOCAL_FLOOR`]), so `strength = k` alone reproduces
+/// `regrade --local k`. A declared `strength = 0` is a bit-exact no-op and is
+/// rejected loud (absence already means "off").
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalToneSpec {
+    /// Compression strength `k` in `g = 1/(1 + k·V)`. Must be finite and `> 0`.
+    pub strength: f32,
+    /// Gaussian σ of the surround low-pass, in PIXELS. Resolution-literal (tuned
+    /// on QUICK 360p; a FULL 1080p render wants ~3× this, like `max_splat_px`).
+    /// Omitted ⇒ [`crate::DEFAULT_LOCAL_RADIUS`].
+    #[serde(default)]
+    pub radius: Option<f32>,
+    /// Gain floor `g_min ∈ [0, 1]` — the hardest the operator may darken a pixel,
+    /// bounding the dark-halo ring. Omitted ⇒ [`crate::DEFAULT_LOCAL_FLOOR`].
+    #[serde(default)]
+    pub floor: Option<f32>,
 }
 
 /// The volumetric gas look (`[look.gas]`, M7f): the emission/absorption knobs the
@@ -933,6 +966,14 @@ pub struct Scenario {
     /// `Brute` (default) or the bit-identical `Dda` acceleration. Inert unless
     /// the gas look bakes shadows.
     pub shadow_bake: ShadowBake,
+    /// Local (spatially-adaptive) tone compression baked into the movie grade
+    /// (`[look.local_tone]`, render-more-controls), `None` = off. The runtime form
+    /// of [`LookSpec::local_tone`]: the movie pipeline drops it verbatim into
+    /// `galaxy_grade::GradeConfig::local`, so the shipped movie carries the same
+    /// local tonemap the `regrade --local` A/B settled on — no separate regrade
+    /// pass. A grade type (not a render one), so it lives directly on the
+    /// scenario, unlike the render-free `GasLookValues` mirror.
+    pub local_tone: Option<LocalToneConfig>,
     pub info: String,
 }
 
@@ -1190,6 +1231,8 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
             .and_then(|g| g.shadow_bake)
             .map(Into::into)
             .unwrap_or_default(),
+        // Local tonemap ([look.local_tone]): resolved in the green pass.
+        local_tone: None,
         info,
     }
 }
@@ -1433,6 +1476,7 @@ mod tests {
                 ramps: disk_family_ramps(),
                 sf_progenitors: vec![1, 3],
                 gas: None,
+                local_tone: None,
             },
             rig: RigSpec::Static,
         };
@@ -1497,6 +1541,7 @@ mod tests {
                 ],
                 sf_progenitors: vec![0, 1],
                 gas: None,
+                local_tone: None,
             },
             rig: RigSpec::OrbitTilt {
                 azimuth_deg: [-90.0, 90.0],
@@ -1582,6 +1627,7 @@ mod tests {
                 ramps: disk_family_ramps(),
                 sf_progenitors: vec![1, 3],
                 gas: None,
+                local_tone: None,
             },
             rig: RigSpec::OrbitTilt {
                 azimuth_deg: [-90.0, 40.0],
@@ -2038,5 +2084,84 @@ mod tests {
             parse_scenario_toml(&bad).is_err(),
             "shadow_bake without shadows = true must be rejected"
         );
+    }
+
+    // --- [look.local_tone] (render-more-controls: baked local tonemap) ----------
+
+    /// A declared `[look.local_tone]` threads parse → build into
+    /// `Scenario.local_tone` as `Some(LocalToneConfig)`, with `radius`/`floor`
+    /// defaulting to the same values the `regrade --local` CLI uses — so the
+    /// shipped gasrich bakes exactly the "s2" tonemap the A/B viewer settled on.
+    #[test]
+    fn look_local_tone_threads_to_scenario() {
+        let gasrich = preset("gasrich").unwrap();
+        let s = build_scenario(&parse_scenario_toml(gasrich).unwrap(), true);
+        assert_eq!(
+            s.local_tone,
+            Some(LocalToneConfig {
+                strength: 2.0,
+                radius: crate::DEFAULT_LOCAL_RADIUS,
+                floor: crate::DEFAULT_LOCAL_FLOOR,
+            }),
+            "shipped gasrich must bake the s2 local tonemap (strength 2.0 at CLI defaults)"
+        );
+    }
+
+    /// A scenario without `[look.local_tone]` resolves to `None` — the movie grade
+    /// stays bit-identical to the pre-tonemap pipeline (the neutral-off convention).
+    #[test]
+    fn absent_local_tone_resolves_to_none() {
+        let disk = preset("disk").unwrap();
+        let s = build_scenario(&parse_scenario_toml(disk).unwrap(), true);
+        assert_eq!(
+            s.local_tone, None,
+            "a scenario without [look.local_tone] must bake no local tonemap"
+        );
+    }
+
+    /// A declared `strength = 0` is a bit-exact no-op — reject it loud (absence
+    /// already means "off"), matching the dead-knob discipline of the scatter knobs.
+    #[test]
+    fn local_tone_strength_zero_is_rejected() {
+        let gasrich = preset("gasrich").unwrap();
+        let bad = gasrich.replace("strength = 2.0", "strength = 0.0");
+        assert!(
+            parse_scenario_toml(&bad).is_err(),
+            "look.local_tone strength = 0 (a no-op) must be rejected"
+        );
+    }
+
+    /// `strength` must be finite and positive; `radius` finite and positive;
+    /// `floor` finite and in [0, 1] — the window `GradeConfig::validate` enforces,
+    /// caught at parse time with a scenario-attributable message.
+    #[test]
+    fn local_tone_knobs_are_validated() {
+        let gasrich = preset("gasrich").unwrap();
+        // strength: non-finite / negative.
+        for bad_val in ["-1.0", "nan"] {
+            let bad = gasrich.replace("strength = 2.0", &format!("strength = {bad_val}"));
+            assert!(
+                parse_scenario_toml(&bad).is_err(),
+                "look.local_tone strength = {bad_val} must be rejected"
+            );
+        }
+        // radius: finite and > 0.
+        for bad_val in ["0.0", "-4.0", "nan"] {
+            let bad =
+                gasrich.replace("strength = 2.0", &format!("strength = 2.0\nradius = {bad_val}"));
+            assert!(
+                parse_scenario_toml(&bad).is_err(),
+                "look.local_tone radius = {bad_val} must be rejected"
+            );
+        }
+        // floor: finite and in [0, 1].
+        for bad_val in ["-0.1", "1.5", "nan"] {
+            let bad =
+                gasrich.replace("strength = 2.0", &format!("strength = 2.0\nfloor = {bad_val}"));
+            assert!(
+                parse_scenario_toml(&bad).is_err(),
+                "look.local_tone floor = {bad_val} must be rejected"
+            );
+        }
     }
 }

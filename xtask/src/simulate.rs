@@ -18,7 +18,9 @@ use std::path::Path;
 use galaxy_core::{LeapfrogKdk, State, StaticBackground};
 use galaxy_gpu::GpuResidentLeapfrog;
 use galaxy_io::Header;
-use galaxy_sim::{run, DirectorySink, RunSummary, SimConfig, SnapshotSink};
+use galaxy_sim::{
+    plan_block, run, AdaptiveConfig, DirectorySink, RunSummary, SimConfig, SnapshotSink,
+};
 use galaxy_solvers::sph::{DensityConfig, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
@@ -219,6 +221,33 @@ fn simulate_gas_gpu(
         final_time: cfg.n_steps as f64 * cfg.dt,
         snapshots_emitted: emitted,
     })
+}
+
+/// The GPU-resident **block-adaptive** SPH simulate branch (A3, plan
+/// courant-quickening-cadence): like [`simulate_gas_gpu`] but the timestep is chosen
+/// per block from the on-device CFL bound instead of a fixed `dt`. Mirrors the CPU
+/// [`galaxy_sim::run_adaptive`] loop, sharing its [`plan_block`] block-sizing decision
+/// (so both paths obey the same D2b safety analysis — NOT for a cross-path trajectory
+/// gate, which D4 forbids). Snapshots land on the time grid `k · output_dt`.
+///
+/// The Courant number lives in `adaptive` (via `plan_block`), so `min_stable_dt` is
+/// queried at the raw CFL limit (`c_cfl = 1.0`) — the same split the CPU path uses
+/// (`max_stable_dt` reports the `c_cfl = 1` limit, the loop applies the Courant × cap).
+///
+/// The two resident hazards [`simulate_gas_gpu`] documents still apply and are handled
+/// identically: **re-upload per output interval** (frozen-`h_max` recalibration — the
+/// expansion landmine; the block re-query handles the *contraction* landmine D2b), and
+/// **column re-attach** after each `snapshot` (`from_phase_space` drops kind/progenitor).
+/// Absolute time is host-tracked (`k · output_dt`) since `upload` resets the stepper clock.
+pub fn simulate_gas_gpu_adaptive(
+    state: &State,
+    adaptive: &AdaptiveConfig,
+    hydro: HydroParams,
+    density_cfg: DensityConfig,
+    snap_dir: &Path,
+) -> Result<RunSummary, Box<dyn std::error::Error>> {
+    let _ = (state, adaptive, hydro, density_cfg, snap_dir, plan_block);
+    todo!("A3 green: resident block-adaptive loop — min_stable_dt(1.0) + plan_block + step_many, re-upload/reattach per interval, land on the output grid")
 }
 
 /// Re-stamp the identity columns (`id`, `progenitor`, `kind`) a GPU `snapshot` dropped,

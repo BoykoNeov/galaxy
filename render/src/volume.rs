@@ -226,12 +226,214 @@ pub fn bake_shadows_with(gas: &GasFrame, bake: ShadowBake) -> ShadowVolumes {
     }
 }
 
+/// Occupancy-lattice resolution per axis for [`bake_shadows_dda`]: a conservative
+/// boolean grid over the union AABB whose active cells enclose everywhere the
+/// density could be nonzero. A quality/perf **constant** (not a look knob): finer
+/// tightens the skip but adds DDA steps; the hierarchical mip (a later, purely
+/// perf refinement) restores big jumps over a fine base. Bit-exactness is
+/// independent of this value — it only trades build cost against skip precision.
+const SHADOW_OCC_RES: u32 = 64;
+
+/// A conservative empty-space acceleration structure for the shadow bake: a
+/// [`SHADOW_OCC_RES`]³ boolean lattice over the union AABB where `active[c]` is
+/// `true` for every cell in which [`density_at`] could be nonzero. It is
+/// deliberately **over-inclusive** — a cell may be active where the density is
+/// actually zero (harmless: the march evaluates it and adds `κ·0·ds = 0`) — but
+/// never **under-inclusive**: a sample with nonzero density always falls in an
+/// active cell, which is what makes the DDA skip bit-exact.
+struct Occupancy {
+    /// Lattice minimum (the union AABB min — shared with the shadow lattice).
+    bmin: Vec3,
+    /// World-space occupancy cell edge lengths (`extent / SHADOW_OCC_RES`).
+    cell: Vec3,
+    /// `1 / cell`, cached for the point → index map.
+    inv_cell: Vec3,
+    /// `SHADOW_OCC_RES³` flags, x-fastest (`active[(cz·R + cy)·R + cx]`).
+    active: Vec<bool>,
+}
+
+impl Occupancy {
+    /// Build the occupancy over `[bmin, bmax]` by splatting each nonzero density
+    /// cell's *influence region* — the cell center ± one cell edge, the exact
+    /// reach of the trilinear stencil (a point in geometric cell `i` reads
+    /// centers `{i−1, i, i+1}`, so a nonzero center can raise the density
+    /// anywhere within ±one cell) — into every occupancy cell it overlaps. The
+    /// two endpoint grids are unioned, and a grid weighted exactly zero by the
+    /// mix (`u = 0` drops grid1, `u = 1` drops grid0) is skipped since it cannot
+    /// affect the density. This ±1-cell dilation is the whole correctness
+    /// argument: it guarantees no nonzero sample is ever skipped.
+    fn build(gas: &GasFrame, bmin: Vec3, bmax: Vec3) -> Occupancy {
+        let r = SHADOW_OCC_RES as usize;
+        let cell = (bmax - bmin) / Vec3::splat(SHADOW_OCC_RES as f32);
+        let inv_cell = Vec3::ONE / cell;
+        let mut active = vec![false; r * r * r];
+
+        let mut mark_grid = |g: &GasGrid| {
+            let gcell = g.cell_size().as_vec3();
+            let gbmin = g.bounds_min;
+            for iz in 0..g.dims[2] {
+                for iy in 0..g.dims[1] {
+                    for ix in 0..g.dims[0] {
+                        if g.data[g.index(ix, iy, iz)] == 0.0 {
+                            continue;
+                        }
+                        let center = gbmin
+                            + (Vec3::new(ix as f32, iy as f32, iz as f32) + Vec3::splat(0.5))
+                                * gcell;
+                        // Influence AABB = center ± one grid cell (the stencil reach).
+                        let amin = ((center - gcell - bmin) * inv_cell).floor();
+                        let amax = ((center + gcell - bmin) * inv_cell).floor();
+                        let clamp = |v: f32| (v.max(0.0) as usize).min(r - 1);
+                        let (x0, x1) = (clamp(amin.x), clamp(amax.x));
+                        let (y0, y1) = (clamp(amin.y), clamp(amax.y));
+                        let (z0, z1) = (clamp(amin.z), clamp(amax.z));
+                        for cz in z0..=z1 {
+                            for cy in y0..=y1 {
+                                for cx in x0..=x1 {
+                                    active[(cz * r + cy) * r + cx] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        // Mix-aware: a grid weighted exactly 0 contributes exactly 0 density.
+        if gas.mix != 1.0 {
+            mark_grid(gas.grid0);
+        }
+        if gas.mix != 0.0 {
+            mark_grid(gas.grid1);
+        }
+        Occupancy {
+            bmin,
+            cell,
+            inv_cell,
+            active,
+        }
+    }
+
+    /// Integer occupancy-cell index of world point `p`, clamped to the lattice
+    /// (the march only samples inside the clipped chord, i.e. inside the AABB up
+    /// to float slop at the faces).
+    fn cell_of(&self, p: Vec3) -> [usize; 3] {
+        let c = ((p - self.bmin) * self.inv_cell).floor();
+        let r = SHADOW_OCC_RES as usize;
+        let ax = |v: f32| (v.max(0.0) as usize).min(r - 1);
+        [ax(c.x), ax(c.y), ax(c.z)]
+    }
+
+    fn is_active(&self, cell: [usize; 3]) -> bool {
+        let r = SHADOW_OCC_RES as usize;
+        self.active[(cell[2] * r + cell[1]) * r + cell[0]]
+    }
+
+    /// Arc-length parameter (from `origin`, `dir` unit) at which the ray leaves
+    /// occupancy `cell` — the nearest exit face. Axes with `|dir| < 1e-12` never
+    /// cross (∞). Always `≥` the entry parameter; the caller's progress guard
+    /// covers the degenerate float case.
+    fn cell_exit(&self, cell: [usize; 3], origin: Vec3, dir: Vec3) -> f32 {
+        let cmin =
+            self.bmin + Vec3::new(cell[0] as f32, cell[1] as f32, cell[2] as f32) * self.cell;
+        let cmax = cmin + self.cell;
+        let mut s = f32::INFINITY;
+        for a in 0..3 {
+            if dir[a].abs() < 1e-12 {
+                continue;
+            }
+            let boundary = if dir[a] > 0.0 { cmax[a] } else { cmin[a] };
+            s = s.min((boundary - origin[a]) / dir[a]);
+        }
+        s
+    }
+}
+
 /// The DDA/hierarchical accelerated bake: identical `ShadowVolumes` to
 /// [`bake_shadows`], computed by skipping samples in provably-empty occupancy
 /// cells. Bit-exact — the equivalence gate is `assert_eq!(bake_shadows(gas),
 /// bake_shadows_dda(gas))`.
-fn bake_shadows_dda(_gas: &GasFrame) -> ShadowVolumes {
-    todo!("D2: DDA/hierarchical shadow bake")
+fn bake_shadows_dda(gas: &GasFrame) -> ShadowVolumes {
+    let (bmin, bmax) = union_bounds(gas);
+    let r = SHADOW_RES as usize;
+    let cell = (bmax - bmin) / SHADOW_RES as f32;
+    let ds_nominal = step_size(gas.grid0, gas.grid1);
+    let occ = Occupancy::build(gas, bmin, bmax);
+    let mut data = vec![0.0f32; gas.lights.len() * r * r * r];
+    for (k, l) in gas.lights.iter().enumerate() {
+        for iz in 0..r {
+            for iy in 0..r {
+                for ix in 0..r {
+                    let vc = bmin
+                        + (Vec3::new(ix as f32, iy as f32, iz as f32) + Vec3::splat(0.5)) * cell;
+                    let idx = k * r * r * r + (iz * r + iy) * r + ix;
+                    data[idx] =
+                        light_transmittance_dda(gas, l.pos, vc, bmin, bmax, ds_nominal, &occ);
+                }
+            }
+        }
+    }
+    ShadowVolumes {
+        bounds_min: bmin,
+        bounds_max: bmax,
+        count: gas.lights.len(),
+        data,
+    }
+}
+
+/// [`light_transmittance`] with empty-space skipping over `occ`. It walks the
+/// **identical** sample lattice (`s_i = t0 + (i+½)·ds` over the identical clipped
+/// chord, τ summed in increasing `i`), but where a sample falls in an inactive
+/// occupancy cell it DDA-jumps past the whole empty span instead of evaluating.
+/// Every skipped sample is provably in an inactive (⇒ zero-density) cell, so the
+/// skipped addends are exact zeros — the nonzero addends are the same values in
+/// the same order, hence τ, and `exp(−τ)`, are bit-identical to the brute march.
+fn light_transmittance_dda(
+    gas: &GasFrame,
+    light: Vec3,
+    voxel: Vec3,
+    bmin: Vec3,
+    bmax: Vec3,
+    ds_nominal: f32,
+    occ: &Occupancy,
+) -> f32 {
+    let d = voxel - light;
+    let dist = d.length();
+    if dist == 0.0 {
+        return 1.0;
+    }
+    let dir = d / dist;
+    let Some((t0_raw, t1_raw)) = clip_aabb(light, dir, bmin, bmax) else {
+        return 1.0;
+    };
+    let t0 = t0_raw.max(0.0);
+    let t1 = t1_raw.min(dist);
+    if t0 >= t1 {
+        return 1.0;
+    }
+    let (n, ds) = steps(t0, t1, ds_nominal);
+    let mut tau = 0.0_f32;
+    let mut i: u32 = 0;
+    while i < n {
+        // Sample position — the exact brute expression, so an evaluated sample
+        // is bit-identical to the reference's.
+        let s = t0 + (i as f32 + 0.5) * ds;
+        let p = light + dir * s;
+        let cell = occ.cell_of(p);
+        if occ.is_active(cell) {
+            tau += gas.look.opacity * density_at(gas, p) * ds;
+            i += 1;
+        } else {
+            // Inactive cell: every sample within it is a zero addend. Jump to the
+            // first sample at/after the cell exit. The `−1` sample of margin
+            // (re-classified next iteration) keeps a boundary sample — which a
+            // float-ε over-estimate of the exit could otherwise mis-skip — on the
+            // safe side; `max(i+1, …)` guarantees forward progress.
+            let s_exit = occ.cell_exit(cell, light, dir);
+            let jump = ((s_exit - t0) / ds - 0.5).ceil() as i64 - 1;
+            i = ((i as i64 + 1).max(jump).min(n as i64)) as u32;
+        }
+    }
+    (-tau).exp()
 }
 
 /// One shadow chord: `T = exp(−τ)` over the light → voxel-center segment,

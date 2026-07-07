@@ -16,6 +16,7 @@ use galaxy_render::volume::{
 };
 use galaxy_renderprep::GasGrid;
 use glam::Vec3;
+use proptest::prelude::*;
 
 // ---------- fixtures ----------
 
@@ -305,4 +306,62 @@ fn dda_matches_brute_on_a_two_grid_mix() {
         );
     }
     let _ = SHADOW_RES;
+}
+
+// ---------- randomized invariant ----------
+
+/// A small grid with a heavily-zero-biased density field and randomized dims /
+/// bounds — the sparse geometry the DDA skip must survive across the board.
+fn grid_strategy() -> impl Strategy<Value = GasGrid> {
+    (3usize..=7, 3usize..=7, 3usize..=7).prop_flat_map(|(nx, ny, nz)| {
+        let n = nx * ny * nz;
+        (
+            Just([nx as u32, ny as u32, nz as u32]),
+            (-2.0f32..0.0, -2.0f32..0.0, -2.0f32..0.0),
+            (1.0f32..3.0, 1.0f32..3.0, 1.0f32..3.0),
+            // ~3:1 empty:occupied, so most cells are skippable but some are not.
+            prop::collection::vec(prop_oneof![3 => Just(0.0f32), 1 => 0.1f32..1.0], n),
+        )
+            .prop_map(|(dims, bmin, ext, data)| {
+                let bounds_min = Vec3::new(bmin.0, bmin.1, bmin.2);
+                GasGrid {
+                    dims,
+                    bounds_min,
+                    bounds_max: bounds_min + Vec3::new(ext.0, ext.1, ext.2),
+                    data,
+                }
+            })
+    })
+}
+
+proptest! {
+    // The bake is O(SHADOW_RES³·lights) per case, so keep the case count modest;
+    // small grids give short chords, keeping each case sub-second.
+    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+
+    /// The invariant that IS the feature: for arbitrary sparse two-grid frames,
+    /// mixes, opacities, and light placements (inside and outside the domain),
+    /// the DDA bake equals the brute reference to the last bit. This is the
+    /// oracle the GPU mirror will inherit — fuzz it before trusting it.
+    #[test]
+    fn dda_equals_brute_randomized(
+        g0 in grid_strategy(),
+        g1 in grid_strategy(),
+        mix in 0.0f32..=1.0,
+        opacity in 0.1f32..3.0,
+        lps in prop::collection::vec((-3.0f32..3.0, -3.0f32..3.0, -3.0f32..3.0), 1..=3),
+    ) {
+        let lights: Vec<Light> = lps.iter().map(|&(x, y, z)| light(Vec3::new(x, y, z))).collect();
+        let gas = GasFrame {
+            grid0: &g0,
+            grid1: &g1,
+            mix,
+            lights: &lights,
+            look: look(opacity),
+        };
+        prop_assert_eq!(
+            bake_shadows_with(&gas, ShadowBake::Dda),
+            bake_shadows(&gas)
+        );
+    }
 }

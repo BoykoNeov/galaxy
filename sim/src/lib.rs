@@ -235,8 +235,33 @@ pub struct BlockPlan {
 /// Pure (no stepping) so the D2b contraction-staleness property is unit-testable.
 /// Requires `limit`, `prev_target`, `remaining` finite positive and a valid `cfg`.
 pub fn plan_block(limit: f64, prev_target: f64, remaining: f64, cfg: &AdaptiveConfig) -> BlockPlan {
-    let _ = (limit, prev_target, remaining, cfg);
-    todo!("A2 green: courant + growth-cap dt_target, then full-block vs landing-block sizing")
+    // Courant number on the CFL limit, then the growth cap: dt SHRINKS instantly
+    // (the `.min` with `courant·limit` wins on a tightening bound) but GROWS at most
+    // `max_growth×` per block (D2b). The growth memory `prev_target` is the previous
+    // block's `dt_target`, never its landing-clamped `dt`.
+    let dt_target = (cfg.courant * limit).min(cfg.max_growth * prev_target);
+
+    if remaining > dt_target * cfg.block_steps as f64 {
+        // The interval does not fit in one block — advance a full block at dt_target
+        // and re-query the bound next block (does not land on the output time).
+        BlockPlan {
+            n_steps: cfg.block_steps,
+            dt: dt_target,
+            dt_target,
+            lands: false,
+        }
+    } else {
+        // Final block of the interval: split `remaining` into whole steps of uniform
+        // dt = remaining/n ≤ dt_target, landing exactly on the output time (D3). The
+        // `max(1)` guards a huge bound (remaining/dt_target < 1 ⇒ a single step).
+        let n = (remaining / dt_target).ceil().max(1.0) as u64;
+        BlockPlan {
+            n_steps: n,
+            dt: remaining / n as f64,
+            dt_target,
+            lands: true,
+        }
+    }
 }
 
 /// Run the global block-adaptive stepping loop (plan: courant-quickening-cadence).
@@ -256,6 +281,104 @@ pub fn run_adaptive(
     config: &AdaptiveConfig,
     sink: &mut dyn SnapshotSink,
 ) -> Result<RunSummary, SimError> {
-    let _ = (state, solver, integ, bg, config, sink);
-    todo!("A2 green: IC emit, per-interval block loop with plan_block, land-exact emit")
+    // Validate the policy + schedule.
+    if !(config.courant.is_finite() && config.courant > 0.0) {
+        return Err(SimError::Config(format!(
+            "courant must be a positive finite number, got {}",
+            config.courant
+        )));
+    }
+    if !(config.max_growth.is_finite() && config.max_growth >= 1.0) {
+        return Err(SimError::Config(format!(
+            "max_growth must be a finite number >= 1, got {}",
+            config.max_growth
+        )));
+    }
+    if config.block_steps == 0 {
+        return Err(SimError::Config("block_steps must be >= 1".to_string()));
+    }
+    if !(config.output_dt.is_finite() && config.output_dt > 0.0) {
+        return Err(SimError::Config(format!(
+            "output_dt must be a positive finite number, got {}",
+            config.output_dt
+        )));
+    }
+    if config.n_outputs == 0 {
+        return Err(SimError::Config("n_outputs must be >= 1".to_string()));
+    }
+
+    // Adaptive dt needs a finite CFL bound to size the step. A gas-free state returns
+    // `+∞` (no hydro constraint) — use the fixed-dt `run` for collisionless runs.
+    let limit0 = solver.max_stable_dt(state);
+    if !(limit0.is_finite() && limit0 > 0.0) {
+        return Err(SimError::Config(format!(
+            "adaptive dt requires a finite positive CFL bound (gas present); \
+             max_stable_dt = {limit0}"
+        )));
+    }
+
+    // Step 0: the IC, stamped at time 0 (output index 0 ↔ time 0 is the cadence
+    // contract). Emit before any integration, mirroring `run`.
+    state.time = 0.0;
+    emit_adaptive(state, 0, config, sink)?;
+    let mut emitted = 1u64;
+
+    // Seed the growth memory with the initial CFL target so the first block is
+    // uncapped (`min(courant·limit0, max_growth·prev)` = `courant·limit0`).
+    let mut prev_target = config.courant * limit0;
+    let mut total_steps = 0u64;
+    let mut t = 0.0_f64;
+
+    for k in 1..=config.n_outputs {
+        let t_target = k as f64 * config.output_dt;
+        // Relative epsilon so FP wander cannot spawn a zero-length trailing block.
+        let eps = 1e-12 * t_target.max(config.output_dt);
+        while t < t_target - eps {
+            let limit = solver.max_stable_dt(state);
+            if !(limit.is_finite() && limit > 0.0) {
+                return Err(SimError::Config(format!(
+                    "CFL bound became non-finite mid-run (t = {t}); max_stable_dt = {limit}"
+                )));
+            }
+            let plan = plan_block(limit, prev_target, t_target - t, config);
+            // Hold `plan.dt` fixed across the block; the cached position-only accel
+            // carries across the dt change (velocity-Verlet) — do NOT reprime.
+            for _ in 0..plan.n_steps {
+                integ.step(state, solver, bg, plan.dt);
+            }
+            t += plan.dt * plan.n_steps as f64;
+            prev_target = plan.dt_target;
+            total_steps += plan.n_steps;
+        }
+        // Land exactly on the output time (kill accumulated FP wander before emit).
+        t = t_target;
+        state.time = t_target;
+        emit_adaptive(state, k, config, sink)?;
+        emitted += 1;
+    }
+
+    Ok(RunSummary {
+        steps: total_steps,
+        final_time: config.n_outputs as f64 * config.output_dt,
+        snapshots_emitted: emitted,
+    })
+}
+
+/// Stamp a header for an adaptive-run snapshot (output index `k`, time already set
+/// on `state`) and hand it to the sink.
+fn emit_adaptive(
+    state: &State,
+    k: u64,
+    config: &AdaptiveConfig,
+    sink: &mut dyn SnapshotSink,
+) -> Result<(), SimError> {
+    let header = Header::for_state(
+        state,
+        k,
+        config.softening,
+        config.rng_seed,
+        config.config_hash,
+        config.units.as_str(),
+    );
+    sink.emit(&header, state)
 }

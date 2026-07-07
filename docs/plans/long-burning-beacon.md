@@ -75,8 +75,12 @@ Ordered by value-per-effort; all compatible with the landed M7 contracts.
    toggle. Per-light shadow volumes — DONE (plan `umbral-lantern-lattice`):
    baked 32³ light→sample transmittance per light (K×voxels compute
    prepass), `[look.gas] shadows` bool, gasrich ships it ON; off is gated
-   bit-identical to unshadowed v1. Remaining named deferrals: octree
-   clustering, scatter tint, DDA/hierarchical bake.
+   bit-identical to unshadowed v1. Octree clustering + scatter tint — DONE
+   (plan `tinted-octree-lanterns`): adaptive octree cut replaces the 8³
+   binning (`REFINE_TOL` frozen at `1e-2`, K ≈ 18–24 lights/frame), and
+   `[look.gas] scatter_tint` tints the scattered radiance (gasrich ships
+   `[0.6, 0.8, 1.3]`); neutral tint is bit-identical. Remaining named
+   deferral: DDA/hierarchical bake.
 2. **Camera / cinematics** — more rigs, orbit paths, presets. Orthogonal to
    everything; cheap filler between larger sessions.
 3. **HDR video encode** — long-standing deferral; EXR chain is ready for it.

@@ -251,8 +251,21 @@ xtask (`xtask/tests/scenario_gas.rs`):
   Ship decision recorded here (the scatter/shadows precedent: the showpiece
   exercises new features when they earn it; neutral tint is the safe default
   if none convinces).
-- **D:** DESIGN.md scatter note, `long-burning-beacon.md` deferral tick,
-  memory, quality gate (`fmt --check`, `clippy -D warnings`, workspace
+  **RESOLVED (2026-07-07):** `REFINE_TOL = 1e-2` (the coarser bracket) + tint
+  `[0.6, 0.8, 1.3]` (tintA). Because `scatter_softening` stayed `None` (the
+  ε-adoption A/B kept the per-cluster radius), freezing the tol ALSO pinned
+  scattered-core brightness: `1e-2` is the softer, dimmer, less blob-prone
+  core, not a tol-neutral quality pick. Measured K at `1e-2`: min 18 / median
+  19 / mean 20 / max 24 over the 481-frame QUICK render (vs 26/33/60 at
+  `1e-3`). The `off` byte-pin was a plan bug — `shadow_ab/off` is shadows-off
+  / scatter-ON, not a scatter-off control, and `scatter_ab` retained no EXRs;
+  the real off guarantee is the unit bit-identity gates (`scatter_off_*`,
+  `scatter_tint_zero_equals_scatter_none`). The ship combo (1e-2 + tintA at
+  splat cap 2.0) was never rendered together until the confirm-render
+  (`octree_tint_ab/ship`), which also discharged the one untested runtime
+  line (`tint: gl.scatter_tint`, xtask/main.rs) via a non-neutral tint.
+- **D — DONE:** DESIGN.md scatter note, `long-burning-beacon.md` deferral
+  tick, memory, quality gate (`fmt --check`, `clippy -D warnings`, workspace
   tests), commit + push.
 
 ## Commit sequence

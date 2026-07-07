@@ -135,6 +135,14 @@ opacity = 100.0
 # ambient glow + a lit gas bridge at approach, background stays black (no fog).
 scattering = 800.0
 anisotropy = 0.5
+# Chromatic single-scatter albedo (tinted-octree-lanterns): a per-channel multiplier
+# on the SCATTERED radiance only (emission/absorption/splats untouched). This cools
+# the scattered haze — the warm core light picks up a blue cast as it scatters off the
+# gas, so the veil reads bluer than the stars lighting it. The QUICK A/B (neutral vs
+# [0.6,0.8,1.3] vs a stronger [0.4,0.7,1.6]) picked this mild lean: enough to separate
+# the scattered layer from the warm cores by hue, not so much it goes synthetically
+# blue. Neutral [1,1,1] is bit-identical to no tint — remove the knob to restore it.
+scatter_tint = [0.6, 0.8, 1.3]
 # Per-light shadow volumes (umbral-lantern-lattice): gas deep in its own optical
 # thickness (κ = 100 makes midplanes many τ) stops glowing from inside — the QUICK
 # A/B (M:\claud_projects\temp\shadow_ab) shows ~11% less mid-frame scattered flux,
@@ -150,8 +158,9 @@ shadows = true
 # px 68 vs 5). Adopting a fixed ε would only decouple the scatter glow from the
 # octree REFINE_TOL (refinement-invariance) — an aesthetic wash here, and it does
 # NOT touch the approach white-blob (that is star-splat piling). CONSEQUENCE: since
-# the coupling stays, a future REFINE_TOL freeze must ALSO pin core brightness, not
-# treat the scatter glow as tol-independent.
+# the coupling stays, the REFINE_TOL freeze ALSO pinned core brightness — and it was
+# frozen at the COARSER 1e-2 (see render/src/volume.rs), the softer, dimmer, less
+# blob-prone scattered core, not a tol-neutral choice.
 
 [[look.ramps]]
 inner = [0.05, 0.035, 0.025]

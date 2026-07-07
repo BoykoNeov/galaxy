@@ -70,8 +70,13 @@ pub const MAX_LIGHTS: usize = 512;
 /// when the worst leaf's metric (`P·spread²`) falls below `REFINE_TOL ×` the
 /// root metric. This keeps the *typical* light count adaptive — a compact frame
 /// clusters to few lights instead of greedily burning all [`MAX_LIGHTS`] every
-/// frame. Tuned once from the A/B's measured counts + wall-clock, then frozen.
-pub const REFINE_TOL: f64 = 1e-3;
+/// frame. Frozen at `1e-2` from the gasrich QUICK A/B (coarse/1e-3/fine sweep).
+///
+/// This value ALSO sets scattered-core brightness: `scatter_softening` stayed
+/// `None` (per-cluster radius), so a coarser cut (larger cells ⇒ larger softening
+/// radii) dims and diffuses the scattered cores. `1e-2` was picked as the softer,
+/// less blob-prone look — not a neutral quality knob. See the gasrich preset.
+pub const REFINE_TOL: f64 = 1e-2;
 
 /// Octree depth backstop for [`cluster_lights`]: two distinct positions
 /// separate into different octants within ~mantissa-many levels, so this bound
@@ -258,10 +263,10 @@ pub struct Light {
 /// This is the shipped entry point — the quality constants [`REFINE_TOL`] and
 /// [`MAX_LIGHTS`] are baked in. It delegates to [`cluster_lights_with`], which
 /// exposes both as parameters so a test can drive the budget-cap path at a
-/// *reachable* budget (the shipped 512 is unreachable at `REFINE_TOL = 1e-3` —
-/// the octree metric drops 32× per level, so natural distributions cap at
-/// ~64 leaves and heavy-tailed ones at a few hundred; the cap is a GPU-buffer
-/// backstop, never the normal terminator).
+/// *reachable* budget (the shipped 512 is unreachable at `REFINE_TOL` — the
+/// octree metric drops 32× per level, so natural distributions cap at ~64 leaves
+/// and heavy-tailed ones at a few hundred; the cap is a GPU-buffer backstop,
+/// never the normal terminator).
 pub fn cluster_lights(frame: &FrameData) -> Vec<Light> {
     cluster_lights_with(frame, REFINE_TOL, MAX_LIGHTS)
 }

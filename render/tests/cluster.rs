@@ -25,7 +25,7 @@
 //! `scatter.rs` / `volume.rs` suites never call the clusterer — that containment
 //! is itself the proof the replacement is contained.
 
-use galaxy_render::volume::{cluster_lights, cluster_lights_with, Light, MAX_LIGHTS, REFINE_TOL};
+use galaxy_render::volume::{cluster_lights, cluster_lights_with, Light, MAX_LIGHTS};
 use galaxy_renderprep::FrameData;
 use glam::Vec3;
 use proptest::prelude::*;
@@ -374,20 +374,25 @@ fn near_field_flux_matches_exact() {
 
 /// A scale-free hierarchical LCG cloud. TWO facts, both load-bearing:
 ///
-/// 1. **Cap arithmetic (at a reachable budget).** The 512 shipped budget is
-///    UNREACHABLE at `REFINE_TOL = 1e-3`: each octree level drops the metric
-///    ~32× (⅛ power × ¼ spread²), so `32² > 1/REFINE_TOL` kills uniform
-///    refinement at ~64 leaves and heavy tails plateau in the low hundreds —
-///    the cap is a GPU-buffer backstop, not the normal terminator. The cap
-///    logic is scale-free, so we drive it at `budget = 16`: this cloud makes
-///    ~33 leaves unbudgeted, so 16 binds, and the greedy stop (a split adds
-///    1–7 leaves, break when the next would breach) lands the count in
+/// 1. **Cap arithmetic (at a reachable budget).** The greedy cap logic is
+///    scale-free — all that matters is that the budget binds before natural
+///    termination. We drive it at `budget = 16` under an EXPLICIT fine
+///    `CAP_TOL = 1e-3`, deliberately NOT the shipped `REFINE_TOL` (a look const
+///    now frozen at the coarser `1e-2`, under which this fixture terminates
+///    BELOW 16 and the budget would never bind). At `1e-3` the cloud makes ~33
+///    leaves unbudgeted, so 16 binds, and the greedy stop (a split adds 1–7
+///    leaves, break when the next would breach) lands the count in
 ///    `[budget − 6, budget] = [10, 16]` — a property DERIVED from the
-///    arithmetic, not fitted to output.
+///    arithmetic, not fitted to output. Decoupling the tol from the ship look
+///    const keeps this gate green across look retunes (that is `cluster_lights_with`'s
+///    whole reason to exist).
 /// 2. **Safety contract (realistic input).** On a large power-law-brightness
-///    cloud the shipped `cluster_lights` stays `≤ MAX_LIGHTS`. The bound is
-///    never tight (that is the point of fact 1) — a backstop that always passes
-///    with margin is still the correct thing to assert.
+///    cloud the shipped `cluster_lights` (at the frozen `1e-2`) stays
+///    `≤ MAX_LIGHTS`. The 512 budget is UNREACHABLE at any sane tol: each octree
+///    level drops the metric ~32× (⅛ power × ¼ spread²), so `32² > 1/REFINE_TOL`
+///    kills uniform refinement at ~64 leaves and heavy tails plateau in the low
+///    hundreds — the cap is a GPU-buffer backstop, not the normal terminator. A
+///    backstop that always passes with margin is still the correct thing to assert.
 #[test]
 fn budget_cap_path_and_safety() {
     // hierarchical fractal cloud: 8 top clusters × 8 sub × 64 stars = 4096
@@ -413,15 +418,20 @@ fn budget_cap_path_and_safety() {
         frame(pos, color, b)
     };
 
+    // Fine tol so the budget genuinely binds; independent of the shipped look
+    // const REFINE_TOL (frozen at the coarser 1e-2, under which this fixture
+    // terminates below 16). See the fn doc.
+    const CAP_TOL: f64 = 1e-3;
+
     // Unbudgeted the cloud refines past 16, so budget = 16 genuinely binds.
-    let natural = cluster_lights_with(&f6, REFINE_TOL, MAX_LIGHTS).len();
+    let natural = cluster_lights_with(&f6, CAP_TOL, MAX_LIGHTS).len();
     assert!(
         natural > 16,
         "fixture must exceed the test budget (got {natural})"
     );
 
     let budget = 16usize;
-    let capped = cluster_lights_with(&f6, REFINE_TOL, budget).len();
+    let capped = cluster_lights_with(&f6, CAP_TOL, budget).len();
     assert!(
         capped <= budget && capped >= budget - 6,
         "budget-cap count {capped} outside the derived [{}, {budget}] slack window",

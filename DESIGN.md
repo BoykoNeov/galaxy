@@ -59,7 +59,14 @@ cosmological expansion (10^8 particles, comoving integration).
   factor and evaluates at render time (D9-safe); knobs (`[look.gas]
   scattering`/`anisotropy`) live in the look, `scattering = 0` is gated
   bit-identical to the pre-scatter march — the M7e-sufficiency judgement stays
-  a one-knob decision.
+  a one-knob decision. The clusterer's `REFINE_TOL` is frozen at `1e-2` (the
+  coarser bracket of the gasrich QUICK A/B; K ≈ 18–24 lights/frame): with
+  `scatter_softening` left `None` it is ALSO the scattered-core brightness knob
+  (see below), and the coarse cut gives the softer, dimmer, less blob-prone
+  core. Optional per-channel `scatter_tint` multiplies the SCATTERED radiance
+  only (chromatic single-scatter albedo); gasrich ships `[0.6, 0.8, 1.3]` (a
+  mild blue lean so the veil separates from the warm cores by hue), neutral
+  `[1,1,1]` is bit-identical.
 - Scatter softening decoupling (optional, plan `radiant-*` "more controls"):
   the `1/d²` softening length `r` defaults to each cluster's own cell radius —
   which makes the scattered core brightness silently track the octree

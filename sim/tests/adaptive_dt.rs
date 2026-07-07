@@ -212,7 +212,11 @@ fn block_dt_never_exceeds_end_of_block_cfl_limit_under_contraction() {
     let mut solver = hydro_solver(c_s);
     let mut integ = LeapfrogKdk::new();
     let bg = StaticBackground;
-    let c = cfg(0.25, 8, 0.05, 1); // block_steps = 8, courant = 0.25
+    // Gate at the SHIPPED block_steps = 16 (gasrich's default) — the tighter test: if the
+    // staleness bound holds at 16 it holds a fortiori at any smaller block. Since CflGuard
+    // is retired on the adaptive path (D6), this gate is the sole guard on mid-block
+    // over-step, so it must run at the value that actually ships.
+    let c = cfg(0.25, 16, 0.05, 1); // block_steps = 16 (shipped), courant = 0.25
 
     let t_end = c.output_dt * c.n_outputs as f64;
     let mut t = 0.0;

@@ -86,6 +86,13 @@ fn gasrich_quick_adaptive_completes() {
 /// preset CFL-aborts before pericenter); (2) short-prefix convergence to a finer-courant
 /// reference (the chaotic-showpiece gate — no full-trajectory match, D5); (3) records the
 /// CFL bound's realized dynamic range across the snapshots (measured, not estimated).
+///
+/// ALSO fold into the deferred A5 session (advisor #2): drive a QUICK `run_movie` on the
+/// flipped gasrich preset end-to-end (`cargo run -p galaxy-xtask -- movie gasrich <out>`
+/// with `GALAXY_MOVIE_QUICK=1`) — the preset flip is a shipped behavior change, and the
+/// renderprep→render pipeline is exercised by no unit test (only `simulate_snapshots` is).
+/// Low risk (snapshots consumed generically by sorted-glob + time), but it is the real
+/// "the shipped showpiece still renders" verification.
 #[test]
 #[ignore = "deferred A5: full-res gasrich adaptive is >30 min; run with --release --ignored"]
 fn full_res_gasrich_adaptive_completes_and_converges() {

@@ -40,6 +40,7 @@
 //! device-churn flake, **not** a solver bug: every binary passes when run on its own
 //! (`cargo test -p galaxy-gpu --test <name>`), which is the reliable way to run them.
 
+pub(crate) mod context;
 pub(crate) mod fused_core;
 pub mod gpu_direct_sum;
 pub mod gpu_lbvh;
@@ -71,7 +72,7 @@ pub use sph_hydro::GpuHydro;
 
 /// Errors bringing up or driving the GPU compute context. Returned rather than
 /// panicking so callers can degrade to a CPU solver on a headless / GPU-less box.
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum GpuError {
     /// No wgpu adapter is available (e.g. a headless box with no GPU).
     #[error("no wgpu adapter available (headless GPU compute needs a GPU)")]

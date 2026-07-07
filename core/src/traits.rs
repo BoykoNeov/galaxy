@@ -11,6 +11,19 @@ pub trait ForceSolver {
     /// Total gravitational potential energy, using the SAME softened kernel as
     /// `accelerations` so energy diagnostics stay consistent with the forces.
     fn potential_energy(&self, state: &State) -> f64;
+
+    /// The CFL limit the solver's physics imposes at this state — the largest dt
+    /// stable at Courant number 1 (for SPH, `min_i h_i / v_sig,i`). `+∞` when the
+    /// solver imposes no timestep constraint (pure gravity has none in v1, so the
+    /// default is `+∞`).
+    ///
+    /// This reports only the *physics* limit. The adaptive-dt loop applies its own
+    /// Courant number and safety factor strictly BELOW this — timestep POLICY lives
+    /// in the loop, never in the solver (mirroring how the pipeline `C_CFL` guard is
+    /// a policy constant, not a solver property).
+    fn max_stable_dt(&self, _state: &State) -> f64 {
+        f64::INFINITY
+    }
 }
 
 /// Cosmological background. `StaticBackground` => a≡1, H≡0 (Newtonian).

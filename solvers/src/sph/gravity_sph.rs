@@ -98,4 +98,12 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
             None => 0.0,
         }
     }
+
+    fn max_stable_dt(&self, _state: &State) -> f64 {
+        // The CFL limit at Courant number 1 (the raw `min_i h_i / v_sig,i`
+        // timescale); the adaptive loop applies its own Courant × safety below it.
+        // Reuses the gas-subset CFL reduction verbatim (`c_cfl = 1.0`), so a
+        // gas-free state returns `+∞` exactly as the free function does.
+        todo!("A1 green: super::cfl::max_stable_dt(state, &self.params, &self.density_cfg, 1.0)")
+    }
 }

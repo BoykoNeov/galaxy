@@ -312,9 +312,10 @@ fn invalid_species_byte_is_rejected() {
     let mut buf = Vec::new();
     snapshot::to_writer(&mut buf, &header, &state).unwrap();
 
-    // The kind column is the final n bytes of the v2 stream.
-    let last = buf.len() - 1;
-    buf[last] = 0xFF;
+    // The kind column (n × u8) is followed by the v3 `u` column (n × f64), so
+    // its last byte sits 8n bytes before the end of the stream.
+    let last_kind = buf.len() - 1 - 8 * state.len();
+    buf[last_kind] = 0xFF;
     let err = snapshot::from_reader(&mut Cursor::new(&buf)).unwrap_err();
     assert!(
         matches!(err, SnapshotError::Corrupt(_)),
@@ -398,7 +399,10 @@ fn v2_stream_reads_with_zero_internal_energy() {
     let (back_h, back) = snapshot::from_reader(&mut Cursor::new(&bytes))
         .expect("v2 must remain readable after the v3 bump");
     assert_eq!(back_h, header);
-    assert_eq!(back.kind, state.kind, "v2 kind column must still round-trip");
+    assert_eq!(
+        back.kind, state.kind,
+        "v2 kind column must still round-trip"
+    );
     assert_eq!(
         back.u,
         vec![0.0; state.len()],
@@ -414,8 +418,8 @@ fn v1_stream_defaults_zero_internal_energy() {
     let header = sample_header(&state);
     let bytes = v1_bytes(&header, &state);
 
-    let (_, back) = snapshot::from_reader(&mut Cursor::new(&bytes))
-        .expect("v1 must remain readable");
+    let (_, back) =
+        snapshot::from_reader(&mut Cursor::new(&bytes)).expect("v1 must remain readable");
     assert_eq!(back.u, vec![0.0; state.len()], "v1 must default u = 0");
 }
 

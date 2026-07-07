@@ -39,7 +39,7 @@ const MAX_STR_LEN: usize = 1 << 16;
 pub const MAGIC: [u8; 8] = *b"GLXYSNAP";
 /// On-disk format version written by this build. Bumped when the layout
 /// changes; older versions remain readable back to v1 (see the module docs).
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Oldest on-disk format version this build can still read.
 pub const MIN_READ_VERSION: u32 = 1;
@@ -169,7 +169,11 @@ pub fn to_writer<W: Write>(
     for k in &state.kind {
         write_u8(writer, *k as u8)?;
     }
-    // RED baseline (E1a): v3 will append the `u` column here.
+    // The internal-energy column (v3+), full f64 — it feeds the energy gate and
+    // cannot afford the f32 rounding `mass` accepts.
+    for &u in &state.u {
+        write_f64(writer, u)?;
+    }
     Ok(())
 }
 
@@ -245,9 +249,17 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         vec![Species::Collisionless; n]
     };
 
-    // RED baseline (E1a): v3 reads the `u` column here; for now every particle
-    // defaults to `u = 0.0`, so a state with nonzero `u` fails to round-trip.
-    let u = vec![0.0; n];
+    // The internal-energy column arrived in v3; v1/v2 predate the energy
+    // equation, and `u = 0.0` is exactly the inert isothermal value they imply.
+    let u = if version >= 3 {
+        let mut u = Vec::with_capacity(cap);
+        for _ in 0..n {
+            u.push(read_f64(reader)?);
+        }
+        u
+    } else {
+        vec![0.0; n]
+    };
 
     let header = Header {
         time,

@@ -22,15 +22,16 @@ pub fn potential_energy(state: &State, solver: &dyn ForceSolver) -> f64 {
 /// Total thermal (internal) energy: Σ mᵢ uᵢ, the adiabatic path's contribution
 /// to the total energy. Zero on the isothermal path (`u ≡ 0`), where the EOS
 /// fixes pressure from ρ alone and there is no thermal reservoir to conserve.
-pub fn thermal_energy(_state: &State) -> f64 {
-    todo!("E1a: Σ mᵢ uᵢ over the particles")
+pub fn thermal_energy(state: &State) -> f64 {
+    state.mass.iter().zip(&state.u).map(|(m, u)| *m * *u).sum()
 }
 
-/// Total energy E = T + U (gravitational). The adiabatic path adds
-/// [`thermal_energy`] once the energy equation is wired (E1b); on the isothermal
-/// path `u ≡ 0`, so the thermal term is identically zero.
+/// Total energy E = T + U (gravitational) + U_thermal. On the isothermal path
+/// `u ≡ 0`, so [`thermal_energy`] is identically zero and this is numerically
+/// the pure-gravity total; on the adiabatic path it carries the gas internal
+/// energy that the energy equation conserves.
 pub fn total_energy(state: &State, solver: &dyn ForceSolver) -> f64 {
-    kinetic_energy(state) + solver.potential_energy(state)
+    kinetic_energy(state) + solver.potential_energy(state) + thermal_energy(state)
 }
 
 /// Total linear momentum: Σ mᵢ vᵢ.

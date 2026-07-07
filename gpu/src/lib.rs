@@ -32,13 +32,22 @@
 //! now with the tree approximation controlled by θ. It opens the 10⁷ band O(N²) cannot;
 //! a GPU-resident build (Morton/LBVH) and TreePM/PM remain the deferred 10⁸ door.
 //!
+//! ## Shared compute device
+//! Every compute struct here gets its device/queue from [`context::gpu_context`],
+//! which brings up **one** wgpu device per process and hands out `Arc`-backed
+//! clones — so a whole test *binary* creates a single device, not one per struct.
+//! That cut `cargo test -p galaxy-gpu` from ~71 s to ~26 s (the Vulkan driver was
+//! serialising the ~119 per-struct bring-ups).
+//!
 //! ## Testing caveat (Windows / wgpu)
-//! Each test binary here spins up many wgpu devices; running the *whole* crate suite
-//! (`cargo test -p galaxy-gpu`) back-to-back occasionally trips a **nondeterministic**
-//! `STATUS_ACCESS_VIOLATION` in the Vulkan driver on device teardown (observed once,
-//! gone on re-run — the failing binary and run-order both vary). It is a driver
-//! device-churn flake, **not** a solver bug: every binary passes when run on its own
-//! (`cargo test -p galaxy-gpu --test <name>`), which is the reliable way to run them.
+//! Running the *whole* crate suite (`cargo test -p galaxy-gpu`) back-to-back has
+//! occasionally tripped a **nondeterministic** `STATUS_ACCESS_VIOLATION` in the
+//! Vulkan driver on device teardown (observed once, gone on re-run — the failing
+//! binary and run-order both vary). It is a driver device-churn flake, **not** a
+//! solver bug: every binary passes when run on its own (`cargo test -p galaxy-gpu
+//! --test <name>`). The shared device above collapses per-process churn from ~119
+//! devices to one, which should make this rarer; if it recurs, the per-binary run
+//! is still the reliable fallback.
 
 pub(crate) mod context;
 pub(crate) mod fused_core;

@@ -64,8 +64,12 @@ throws that win away. So the adaptation unit is the **block**: hold `dt` fixed
 across a block of ≤`B` steps, recompute at the block boundary from
 `min_stable_dt` (the no-readback scalar min G5c built — cheap to pull per boundary,
 never the N-vector). The **CPU path adapts on the same block cadence** even though
-it could adapt per step, so CPU and GPU stay trajectory-comparable per D4. Block
-size `B` is a tunable bounded by D2b (contraction staleness).
+it could adapt per step — NOT for a cross-path trajectory gate (D4 forbids
+comparing trajectories across paths), but because it is the *same algorithm* and so
+shares D2b's single contraction-staleness safety analysis. Block size `B` is a
+tunable bounded by D2b (contraction staleness). Note: do NOT reprime the integrator
+at a block boundary — the cached position-only acceleration carries across a dt
+change correctly (velocity-Verlet), so re-priming just wastes a force eval.
 
 ### D2 — variable-dt leapfrog is NOT symplectic and NOT time-reversible
 The dt-from-state dependence means forward and backward integration pick different
@@ -78,13 +82,22 @@ project's invariant gates:
   it, and a future session must NOT "fix" them by loosening.
 - **Keep the fixed-dt path's reversibility + energy-oscillation gates intact and
   untouched** (they gate the fixed-dt integrator, which is unchanged).
-- **The adaptive path gets DIFFERENT gates** (see Gates below): (i) **convergence
-  to a fixed-tiny-dt reference trajectory** as the block-growth cap → 1 and the
-  safety factor → 0 (the adaptive run must approach the fixed-fine-dt run); (ii)
-  **bounded energy drift over the merger timescale** (a stated, generous bound —
-  drift, not oscillation, but bounded).
+- **The adaptive path gets DIFFERENT gates** (see Gates below): (i) PRIMARY —
+  **full-DURATION convergence to a fine-dt reference trajectory** on a non-chaotic
+  testbed as courant → 0 (the coarse adaptive run must monotonically approach the
+  fine one). Full-duration, not a short prefix: that is what catches the secular
+  variable-dt error the (dropped) energy-drift gate was meant to catch — a fixed-dt
+  symplectic run can't drift, a variable-dt one can, and convergence subsumes the
+  energy curve as a trajectory functional. (ii) SECONDARY — **contraction staleness
+  (D2b)**, the real second gate.
 
-Document this in the adaptive test module's header so the intent survives.
+**NB — there is NO energy gate on the adaptive path (D4 constraint).** An isothermal
+EOS is an implicit heat bath (DESIGN.md 1582–1583), so total energy legitimately
+changes even with a perfect fixed-dt integrator — there is no flat baseline to
+measure spurious *drift* against, and gas-free can't substitute (it returns `+∞`,
+the adaptive loop needs a finite bound). Full-duration convergence replaces it.
+Document this in the adaptive test module's header so the intent survives (a future
+session must not add an energy-conservation gate here).
 
 #### D2b — mid-block CFL staleness under CONTRACTION (the dual of frozen-h_max)
 As gas contracts toward pericenter, `h↓` and `v_sig↑`, so the CFL bound **drops
@@ -195,12 +208,13 @@ green."
 | Gate | Path | What it asserts |
 |---|---|---|
 | Reversibility + energy-oscillation | fixed-dt | UNCHANGED, kept intact (D2) |
-| Convergence to fixed-tiny-dt reference | adaptive, per-path | adaptivity is correct (D2 i, D4c) |
-| Bounded energy drift over merger timescale | adaptive | drift bounded, not oscillating (D2 ii) |
-| Contraction staleness | adaptive | realized dt ≤ end-of-block bound (D2b) |
+| **Full-duration convergence to fine-dt reference** | adaptive, per-path | PRIMARY: coarse run monotonically → fine as courant↓ (D2 i, D4c). Assert `err(c/2)<err(c)` + generous abs cap — NOT a numeric order factor (variable-dt leapfrog is between 1st and 2nd order). Testbed must MOVE the CFL bound (compress the blob) or it tests fixed-dt in disguise. |
+| **Contraction staleness (D2b)** | adaptive | SECOND: realized dt ≤ end-of-block C=1 bound over a converging `v=−k·x` flow — the real instability guard |
+| Momentum / L conservation | adaptive | TRIPWIRE only — conserved by construction for global adaptive (`Σmᵢaᵢ·dt/2=0`), won't catch a dt/clamp/growth bug; a cheap regression guard, not a correctness gate |
 | Bound-agreement at fixed state | CPU vs GPU | `max_stable_dt` ≈ `min_stable_dt`, f32 tol (D4a) |
 | Fixed-dt force/step oracle | CPU vs GPU | UNCHANGED (D4b) |
 | Gas-free byte identity | gas-free | UNCHANGED (D5, A4) |
+| ~~Energy drift~~ | ~~adaptive~~ | DROPPED — isothermal = heat bath, no flat baseline (D4); convergence subsumes it |
 
 ---
 

@@ -178,7 +178,7 @@ fn gpu_adaptive_snapshots_land_on_the_output_time_grid() {
         assert_eq!(h.time, st.time, "header/state time disagree");
         // Column re-attach survived (gas subset non-empty).
         assert!(
-            st.kind.iter().any(|&kd| kd == Species::Gas),
+            st.kind.contains(&Species::Gas),
             "gas subset lost — kind not re-attached after snapshot()"
         );
     }

@@ -246,8 +246,126 @@ pub fn simulate_gas_gpu_adaptive(
     density_cfg: DensityConfig,
     snap_dir: &Path,
 ) -> Result<RunSummary, Box<dyn std::error::Error>> {
-    let _ = (state, adaptive, hydro, density_cfg, snap_dir, plan_block);
-    todo!("A3 green: resident block-adaptive loop — min_stable_dt(1.0) + plan_block + step_many, re-upload/reattach per interval, land on the output grid")
+    // Validate the policy + schedule (mirrors `galaxy_sim::run_adaptive`).
+    if !(adaptive.courant.is_finite() && adaptive.courant > 0.0) {
+        return Err(format!(
+            "courant must be a positive finite number, got {}",
+            adaptive.courant
+        )
+        .into());
+    }
+    if !(adaptive.max_growth.is_finite() && adaptive.max_growth >= 1.0) {
+        return Err(format!(
+            "max_growth must be a finite number >= 1, got {}",
+            adaptive.max_growth
+        )
+        .into());
+    }
+    if adaptive.block_steps == 0 {
+        return Err("block_steps must be >= 1".into());
+    }
+    if !(adaptive.output_dt.is_finite() && adaptive.output_dt > 0.0) {
+        return Err(format!(
+            "output_dt must be a positive finite number, got {}",
+            adaptive.output_dt
+        )
+        .into());
+    }
+    if adaptive.n_outputs == 0 {
+        return Err("n_outputs must be >= 1".into());
+    }
+
+    let mut stepper =
+        GpuResidentLeapfrog::new_with_sph(G, adaptive.softening, THETA, hydro, density_cfg)?;
+    stepper.upload(state);
+
+    // Raw CFL limit (c_cfl = 1; the Courant number lives in `plan_block`, the same
+    // physics/policy split the CPU path uses). Adaptive dt needs a finite bound — a
+    // gas-free IC returns +∞, which has no finite target.
+    let limit0 = stepper.min_stable_dt(1.0);
+    if !(limit0.is_finite() && limit0 > 0.0) {
+        return Err(format!(
+            "adaptive dt requires a finite positive CFL bound (gas present); min_stable_dt = {limit0}"
+        )
+        .into());
+    }
+
+    let mut sink = DirectorySink::new(snap_dir)?;
+
+    // Step 0: the IC (columns intact) at time 0.
+    let mut ic = state.clone();
+    ic.time = 0.0;
+    emit_gpu_adaptive_snapshot(&mut sink, &ic, 0, adaptive)?;
+    let mut emitted = 1u64;
+
+    // Seed the growth memory with the initial CFL target so the first block is uncapped.
+    let mut prev_target = adaptive.courant * limit0;
+    let mut total_steps = 0u64;
+    let mut t = 0.0_f64;
+
+    for k in 1..=adaptive.n_outputs {
+        let t_target = k as f64 * adaptive.output_dt;
+        let eps = 1e-12 * t_target.max(adaptive.output_dt);
+        while t < t_target - eps {
+            let limit = stepper.min_stable_dt(1.0);
+            if !(limit.is_finite() && limit > 0.0) {
+                return Err(format!(
+                    "CFL bound became non-finite mid-run (t = {t}); min_stable_dt = {limit}"
+                )
+                .into());
+            }
+            // Same block-sizing decision as the CPU path (shared D2b analysis): hold
+            // `plan.dt` across the block, land the interval's final block exactly on
+            // `t_target`. `step_many` runs the block at the single fixed dt (the
+            // residency win) — the cached accel carries across the dt change.
+            let plan = plan_block(limit, prev_target, t_target - t, adaptive);
+            stepper.step_many(plan.dt, plan.n_steps);
+            t += plan.dt * plan.n_steps as f64;
+            prev_target = plan.dt_target;
+            total_steps += plan.n_steps;
+        }
+        // Emit at the output time: read back, re-attach the columns `snapshot` dropped,
+        // stamp the absolute time (the stepper clock reset on the last upload).
+        let mut snap = stepper.snapshot();
+        reattach_columns(&mut snap, state);
+        snap.time = t_target;
+        emit_gpu_adaptive_snapshot(&mut sink, &snap, k, adaptive)?;
+        emitted += 1;
+
+        // Re-upload to recalibrate the frozen `h_max` (the expansion landmine); the block
+        // re-query already handles the contraction landmine (D2b). Skip after the final
+        // emit — nothing steps afterward.
+        if k != adaptive.n_outputs {
+            stepper.upload(&snap);
+        }
+        t = t_target; // kill accumulated FP wander before the next interval
+    }
+
+    Ok(RunSummary {
+        steps: total_steps,
+        final_time: adaptive.n_outputs as f64 * adaptive.output_dt,
+        snapshots_emitted: emitted,
+    })
+}
+
+/// Stamp a header for an adaptive GPU snapshot (output index `k`, time already set on
+/// `state`) and hand it to the sink.
+fn emit_gpu_adaptive_snapshot(
+    sink: &mut DirectorySink,
+    state: &State,
+    k: u64,
+    adaptive: &AdaptiveConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let header = Header::for_state(
+        state,
+        k,
+        adaptive.softening,
+        adaptive.rng_seed,
+        adaptive.config_hash,
+        adaptive.units.as_str(),
+    );
+    sink.emit(&header, state)?;
+    Ok(())
 }
 
 /// Re-stamp the identity columns (`id`, `progenitor`, `kind`) a GPU `snapshot` dropped,

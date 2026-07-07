@@ -60,7 +60,13 @@ pub struct LocalToneConfig {
 /// surround never raises the gain — the "never brightens" safety property) and
 /// always in `[floor, 1]`. `strength = 0` returns exactly `1.0`.
 pub fn local_gain(surround_luminance: f32, cfg: &LocalToneConfig) -> f32 {
-    todo!("local_gain: g = max(floor, 1/(1 + strength·V))")
+    // Short-circuit the identity: `1/(1 + 0·V)` is already `1.0`, but the guard
+    // also keeps a degenerate `V = +∞` (from `0·∞`) out of the arithmetic.
+    if cfg.strength == 0.0 {
+        return 1.0;
+    }
+    let g = 1.0 / (1.0 + cfg.strength * surround_luminance);
+    g.max(cfg.floor)
 }
 
 /// Apply the local tone-compression gain map to a row-major linear-HDR image,
@@ -80,5 +86,65 @@ pub fn apply_local_tonemap(
     exposure: f32,
     cfg: &LocalToneConfig,
 ) -> Vec<[f32; 3]> {
-    todo!("apply_local_tonemap: V = blur(exposed lum); scale rgb by max(floor, 1/(1+strength·V))")
+    assert_eq!(
+        pixels.len(),
+        width * height,
+        "apply_local_tonemap: pixel buffer does not match {width}x{height}"
+    );
+    // `strength = 0` (or an empty frame) is a bit-exact no-op.
+    if pixels.is_empty() || cfg.strength == 0.0 {
+        return pixels.to_vec();
+    }
+
+    // Surround = large-σ Gaussian low-pass of the EXPOSED luminance, so `strength`
+    // is calibrated against where the tone curve actually saturates.
+    let lum: Vec<f32> = pixels.iter().map(|p| exposure * luminance(*p)).collect();
+    let kernel = crate::bloom::gaussian_kernel(cfg.radius);
+    let surround = blur_scalar(&lum, width, height, &kernel);
+
+    // Scale the (pre-exposure) linear RGB by the per-pixel scalar gain. A single
+    // scalar per pixel preserves hue exactly and, with `g ≤ 1`, only darkens.
+    pixels
+        .iter()
+        .zip(&surround)
+        .map(|(p, &v)| {
+            let g = local_gain(v, cfg);
+            [p[0] * g, p[1] * g, p[2] * g]
+        })
+        .collect()
+}
+
+/// Rec.709 relative luminance of a linear RGB triple.
+fn luminance(p: [f32; 3]) -> f32 {
+    0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
+}
+
+/// Separable Gaussian convolution of a scalar field with symmetric-reflected
+/// borders (the same edge handling and kernel as [`crate::bloom`]). The kernel is
+/// normalized, so a constant field blurs to a constant — the surround of a flat
+/// region is that region's value.
+fn blur_scalar(field: &[f32], w: usize, h: usize, kernel: &[f32]) -> Vec<f32> {
+    use crate::bloom::reflect;
+    let r = (kernel.len() / 2) as i64;
+    // Rows.
+    let mut rows = vec![0.0f32; w * h];
+    for y in 0..h {
+        let src = &field[y * w..(y + 1) * w];
+        for (x, d) in rows[y * w..(y + 1) * w].iter_mut().enumerate() {
+            for (j, &k) in kernel.iter().enumerate() {
+                *d += k * src[reflect(x as i64 + j as i64 - r, w)];
+            }
+        }
+    }
+    // Columns.
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h {
+        for (j, &k) in kernel.iter().enumerate() {
+            let s = reflect(y as i64 + j as i64 - r, h);
+            for x in 0..w {
+                out[y * w + x] += k * rows[s * w + x];
+            }
+        }
+    }
+    out
 }

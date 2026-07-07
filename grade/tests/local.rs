@@ -44,7 +44,11 @@ fn zero_strength_gain_is_exactly_one() {
         floor: 0.0,
     };
     for v in [0.0f32, 0.5, 8.0, 1.0e6] {
-        assert_eq!(local_gain(v, &cfg), 1.0, "zero strength must be unit gain at V={v}");
+        assert_eq!(
+            local_gain(v, &cfg),
+            1.0,
+            "zero strength must be unit gain at V={v}"
+        );
     }
 }
 
@@ -82,7 +86,10 @@ fn gain_matches_hand_values() {
             floor: 0.25,
         },
     );
-    assert!((g - 0.25).abs() < EPS, "g below floor must clamp to 0.25, got {g}");
+    assert!(
+        (g - 0.25).abs() < EPS,
+        "g below floor must clamp to 0.25, got {g}"
+    );
 }
 
 /// `g` is monotone *decreasing* in the surround `V` (more surround never raises
@@ -163,9 +170,17 @@ fn apply_preserves_hue_and_only_darkens() {
     for p in &out {
         // Uniform input → uniform output.
         for c in 0..3 {
-            assert!((p[c] - first[c]).abs() < EPS, "output not uniform: {p:?} vs {first:?}");
+            assert!(
+                (p[c] - first[c]).abs() < EPS,
+                "output not uniform: {p:?} vs {first:?}"
+            );
             // Never brightens.
-            assert!(p[c] <= color[c] + EPS, "channel {c} brightened: {} > {}", p[c], color[c]);
+            assert!(
+                p[c] <= color[c] + EPS,
+                "channel {c} brightened: {} > {}",
+                p[c],
+                color[c]
+            );
         }
         // Chroma ratios preserved: p0·C1 == p1·C0, p0·C2 == p2·C0.
         assert!(
@@ -178,7 +193,10 @@ fn apply_preserves_hue_and_only_darkens() {
         );
     }
     // And it actually darkened (g<1 for a nonzero surround).
-    assert!(first[0] < color[0] - EPS, "expected darkening, got {first:?}");
+    assert!(
+        first[0] < color[0] - EPS,
+        "expected darkening, got {first:?}"
+    );
 }
 
 /// Every output channel is ≤ the input (`g ≤ 1` everywhere), for an arbitrary
@@ -199,7 +217,12 @@ fn apply_never_brightens_any_pixel() {
     );
     for (o, i) in out.iter().zip(&img) {
         for c in 0..3 {
-            assert!(o[c] <= i[c] + EPS, "brightened a pixel: {} > {}", o[c], i[c]);
+            assert!(
+                o[c] <= i[c] + EPS,
+                "brightened a pixel: {} > {}",
+                o[c],
+                i[c]
+            );
         }
     }
 }
@@ -244,9 +267,20 @@ fn local_operator_recovers_blob_structure() {
     };
     let g_core = tonemap(img[ci], &global);
     let g_floor = tonemap(img[fi], &global);
-    assert_eq!(g_core, [u16::MAX; 3], "global: core should blow out to white");
-    assert_eq!(g_floor, [u16::MAX; 3], "global: floor should blow out to white");
-    assert_eq!(g_core, g_floor, "global: blob structure is lost (the problem)");
+    assert_eq!(
+        g_core,
+        [u16::MAX; 3],
+        "global: core should blow out to white"
+    );
+    assert_eq!(
+        g_floor,
+        [u16::MAX; 3],
+        "global: floor should blow out to white"
+    );
+    assert_eq!(
+        g_core, g_floor,
+        "global: blob structure is lost (the problem)"
+    );
 
     // --- Local grade: apply the spatial gain, then the SAME global curve. ---
     let local_cfg = LocalToneConfig {
@@ -289,13 +323,35 @@ fn invalid_local_config_is_rejected() {
         floor: 0.1,
     };
     // Negative strength would invert the operator (brighten bright regions).
-    assert!(with(LocalToneConfig { strength: -1.0, ..base }).validate().is_err());
+    assert!(with(LocalToneConfig {
+        strength: -1.0,
+        ..base
+    })
+    .validate()
+    .is_err());
     // Floor outside [0, 1] — >1 would brighten, <0 is meaningless.
-    assert!(with(LocalToneConfig { floor: 1.5, ..base }).validate().is_err());
-    assert!(with(LocalToneConfig { floor: -0.1, ..base }).validate().is_err());
+    assert!(with(LocalToneConfig { floor: 1.5, ..base })
+        .validate()
+        .is_err());
+    assert!(with(LocalToneConfig {
+        floor: -0.1,
+        ..base
+    })
+    .validate()
+    .is_err());
     // Non-finite knobs.
-    assert!(with(LocalToneConfig { strength: f32::NAN, ..base }).validate().is_err());
-    assert!(with(LocalToneConfig { radius: f32::INFINITY, ..base }).validate().is_err());
+    assert!(with(LocalToneConfig {
+        strength: f32::NAN,
+        ..base
+    })
+    .validate()
+    .is_err());
+    assert!(with(LocalToneConfig {
+        radius: f32::INFINITY,
+        ..base
+    })
+    .validate()
+    .is_err());
     // A valid local config, and no local at all, both pass.
     assert!(with(base).validate().is_ok());
     assert!(GradeConfig::default().validate().is_ok());

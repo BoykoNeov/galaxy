@@ -234,7 +234,7 @@ fn blur(img: &[[f32; 3]], w: usize, h: usize, kernel: &[f32]) -> Vec<[f32; 3]> {
 /// Symmetric (edge-inclusive) reflection of index `i` into `[0, n)`:
 /// `… 2 1 0 | 0 1 2 … n-1 | n-1 n-2 …` — total for any overrun (kernels wider
 /// than the image keep bouncing).
-fn reflect(i: i64, n: usize) -> usize {
+pub(crate) fn reflect(i: i64, n: usize) -> usize {
     let period = 2 * n as i64;
     let m = i.rem_euclid(period);
     if m < n as i64 {
@@ -256,7 +256,7 @@ fn sorted_flux(px: &[[f32; 3]]) -> f64 {
 
 /// Normalized Gaussian kernel truncated at ⌈3σ⌉. Non-positive/non-finite σ (and
 /// NaN, via `max`) degenerate to the δ kernel `[1.0]` — blur stays total.
-fn gaussian_kernel(sigma: f32) -> Vec<f32> {
+pub(crate) fn gaussian_kernel(sigma: f32) -> Vec<f32> {
     let sigma = if sigma.is_finite() {
         sigma.max(0.0)
     } else {

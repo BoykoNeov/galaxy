@@ -110,6 +110,27 @@ impl GradeConfig {
                 "levels gamma ({g}) must be > 0"
             )));
         }
+        if let Some(l) = &self.local {
+            let (s, r, f) = (l.strength, l.radius, l.floor);
+            if !s.is_finite() || !r.is_finite() || !f.is_finite() {
+                return Err(GradeError::Config(format!(
+                    "local knobs must be finite: strength={s}, radius={r}, floor={f}"
+                )));
+            }
+            if s < 0.0 {
+                // A negative strength would brighten bright regions — the operator
+                // inverts and stops being a "never brightens" compressor.
+                return Err(GradeError::Config(format!(
+                    "local strength ({s}) must be >= 0"
+                )));
+            }
+            if !(0.0..=1.0).contains(&f) {
+                // floor > 1 would brighten; floor < 0 is meaningless.
+                return Err(GradeError::Config(format!(
+                    "local floor ({f}) must be in [0, 1]"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -252,6 +273,15 @@ pub fn grade_file<P: AsRef<Path>, Q: AsRef<Path>>(
     // frame before the per-pixel exposure/tone-curve/quantize path.
     if let Some(bloom_cfg) = &cfg.bloom {
         rgb.px = bloom(&rgb.px, rgb.w, rgb.h, bloom_cfg);
+    }
+
+    // Local (spatially-adaptive) tone compression is likewise an image-space op:
+    // it needs the surround, which the per-pixel path cannot see. It runs after
+    // bloom (so it adapts to the final linear image) and before the per-pixel
+    // exposure/tone-curve path — the gain is applied to the pre-exposure RGB and
+    // the surround is computed on the exposed luminance (see `apply_local_tonemap`).
+    if let Some(local_cfg) = &cfg.local {
+        rgb.px = apply_local_tonemap(&rgb.px, rgb.w, rgb.h, cfg.exposure, local_cfg);
     }
 
     // Tonemap each pixel to a 16-bit sRGB triple, packed big-endian for PNG.

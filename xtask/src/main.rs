@@ -1069,6 +1069,9 @@ fn run_movie(
         // Screen-space splat cap (pinprick-starfield), per-scenario; absent =
         // INFINITY = off, bit-identical to the uncapped M6g render.
         max_splat_px: s.max_splat_px.unwrap_or(f32::INFINITY),
+        // Per-light shadow bake strategy (DDA/hierarchical deferral); bit-identical
+        // to the brute default, faster on sparse frames.
+        shadow_bake: s.shadow_bake,
         ..RenderConfig::default()
     };
     let path = match s.rig {

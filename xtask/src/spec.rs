@@ -22,6 +22,7 @@ use galaxy_ic::{
     DiskCollision, ExponentialDisk, Nfw, NfwCollision, Orientation, Plummer, SphericalHalo,
     TruncatedNfw,
 };
+use galaxy_render::ShadowBake;
 use galaxy_renderprep::{ColorMode, DensityColoring, PrepConfig, SizeByDensity};
 
 use crate::{
@@ -305,6 +306,33 @@ pub struct GasLookSpec {
     /// `scattering` — present without one it is a dead knob and is rejected
     /// loud; must be finite and `> 0`.
     pub scatter_softening: Option<f32>,
+    /// Per-light shadow-volume bake strategy (the named deferral of
+    /// umbral-lantern-lattice): `"brute"` (the reference) marches every voxel
+    /// chord; `"dda"` skips provably-empty spans via a hierarchical occupancy —
+    /// a **bit-identical** result, faster on sparse frames. Omitted = `brute`.
+    /// Requires `shadows = true` (it accelerates the shadow bake) — present
+    /// without it is a dead knob and is rejected loud.
+    #[serde(default)]
+    pub shadow_bake: Option<ShadowBakeSpec>,
+}
+
+/// TOML spelling of [`galaxy_render::ShadowBake`] (`shadow_bake = "brute" |
+/// "dda"`). A separate type so the render crate stays serde-free; converted at
+/// the scenario boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShadowBakeSpec {
+    Brute,
+    Dda,
+}
+
+impl From<ShadowBakeSpec> for ShadowBake {
+    fn from(s: ShadowBakeSpec) -> ShadowBake {
+        match s {
+            ShadowBakeSpec::Brute => ShadowBake::Brute,
+            ShadowBakeSpec::Dda => ShadowBake::Dda,
+        }
+    }
 }
 
 /// One progenitor's initial-radius color ramp.
@@ -709,6 +737,17 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                      knob (add scattering > 0, or remove shadows)"
                     .into());
             }
+            // Shadow-bake strategy (DDA/hierarchical deferral): a bit-identical
+            // acceleration of the shadow bake, so it shapes nothing unless
+            // shadows are actually baked — present without `shadows = true` it is
+            // a dead knob (same discipline).
+            if gl.shadow_bake.is_some() && gl.shadows != Some(true) {
+                return Err(
+                    "look.gas shadow_bake without shadows = true is a dead knob \
+                     (add shadows = true, or remove shadow_bake)"
+                        .into(),
+                );
+            }
             // Chromatic scattering albedo (tinted-octree-lanterns): a physical
             // albedo — every component finite and ≥ 0. Present without a live
             // scatter term it shapes nothing (the dead-knob discipline); an
@@ -889,6 +928,11 @@ pub struct Scenario {
     /// omits `[look.gas]`. Kept render-free (plain values, mirroring
     /// `sound_speed`) so the lib seam stays decoupled from the renderer.
     pub gas_look: Option<GasLookValues>,
+    /// Per-light shadow-volume bake strategy, mapped verbatim into
+    /// `RenderConfig.shadow_bake` (the runtime form of `[look.gas].shadow_bake`).
+    /// `Brute` (default) or the bit-identical `Dda` acceleration. Inert unless
+    /// the gas look bakes shadows.
+    pub shadow_bake: ShadowBake,
     pub info: String,
 }
 
@@ -1137,6 +1181,15 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                 })
                 .unwrap_or_default()
         }),
+        // Shadow-bake strategy (DDA/hierarchical deferral): sourced from
+        // `[look.gas].shadow_bake`, `Brute` by default. Bit-identical either way
+        // — a perf choice routed to RenderConfig, not part of the GasLook mirror.
+        shadow_bake: spec
+            .look
+            .gas
+            .and_then(|g| g.shadow_bake)
+            .map(Into::into)
+            .unwrap_or_default(),
         info,
     }
 }
@@ -1943,5 +1996,44 @@ mod tests {
                 "scatter_softening = {bad_val} must be rejected"
             );
         }
+    }
+
+    // --- [look.gas] shadow_bake (DDA/hierarchical deferral) ---------------------
+
+    /// A declared `shadow_bake` threads parse → build into `Scenario.shadow_bake`
+    /// (routed to RenderConfig, bit-identical either way); absent, it resolves to
+    /// the brute default.
+    #[test]
+    fn look_gas_shadow_bake_threads_to_scenario() {
+        let gasrich = preset("gasrich").unwrap();
+        // Absent by default: the shipped gasrich bakes with the brute reference.
+        let s0 = build_scenario(&parse_scenario_toml(gasrich).unwrap(), true);
+        assert_eq!(
+            s0.shadow_bake,
+            ShadowBake::Brute,
+            "absent shadow_bake must resolve to Brute"
+        );
+        // Declared "dda": threads through to the scenario strategy.
+        let with = gasrich.replace("shadows = true", "shadows = true\nshadow_bake = \"dda\"");
+        let s1 = build_scenario(&parse_scenario_toml(&with).unwrap(), true);
+        assert_eq!(
+            s1.shadow_bake,
+            ShadowBake::Dda,
+            "declared shadow_bake = \"dda\" must thread through"
+        );
+    }
+
+    /// `shadow_bake` without `shadows = true` accelerates a bake that never runs —
+    /// the same dead-knob discipline as the other gas knobs.
+    #[test]
+    fn shadow_bake_without_shadows_is_a_dead_knob() {
+        let gasrich = preset("gasrich").unwrap();
+        // Replace the `shadows = true` line with a lone shadow_bake: present, but
+        // no shadows to bake.
+        let bad = gasrich.replace("shadows = true", "shadow_bake = \"dda\"");
+        assert!(
+            parse_scenario_toml(&bad).is_err(),
+            "shadow_bake without shadows = true must be rejected"
+        );
     }
 }

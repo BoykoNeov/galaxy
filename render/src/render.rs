@@ -638,6 +638,110 @@ fn cs_shadow_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// The DDA/hierarchical shadow bake (the named deferral of umbral-lantern-lattice)
+/// — [`WGSL_SHADOW_BAKE`] with empty-space skipping over the CPU-packed
+/// occupancy pyramid (`occ`, coarsest level first, `res³` u32s per level
+/// x-fastest, derived from `{shadow_occ_res}` / `{shadow_occ_coarsest}`). `n` /
+/// `ds` / `s` and the τ accumulation are the BYTE-IDENTICAL expressions of the
+/// brute bake, so evaluated samples match bit-for-bit; skipped samples land in
+/// inactive (⇒ exactly-zero density) cells and contribute `κ·0·ds = 0`. Mirrors
+/// `volume::light_transmittance_dda` operation-for-operation.
+const WGSL_SHADOW_BAKE_DDA: &str = r#"
+@group(2) @binding(0) var<storage, read_write> shadow_out: array<f32>;
+@group(2) @binding(1) var<storage, read> occ: array<u32>;
+
+@compute @workgroup_size({workgroup})
+fn cs_shadow_bake_dda(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let r = {shadow_res}u;
+    let r3 = r * r * r;
+    let vox = gid.x;
+    let k = gid.y;
+    if (vox >= r3) {
+        return;
+    }
+    let iz = vox / (r * r);
+    let iy = (vox / r) % r;
+    let ix = vox % r;
+    let cell = (g.mmax.xyz - g.mmin.xyz) / vec3<f32>(f32(r));
+    let vc = g.mmin.xyz
+        + (vec3<f32>(f32(ix), f32(iy), f32(iz)) + vec3<f32>(0.5)) * cell;
+    let idx = k * r3 + vox;
+    let lp = lights[k].pos;
+    let d = vc - lp;
+    let dist = length(d);
+    if (dist == 0.0) {
+        shadow_out[idx] = 1.0;
+        return;
+    }
+    let dir = d / dist;
+    let tt = clip_aabb(lp, dir, g.mmin.xyz, g.mmax.xyz);
+    let t0 = max(tt.x, 0.0);
+    let t1 = min(tt.y, dist);
+    if (t0 >= t1) {
+        shadow_out[idx] = 1.0;
+        return;
+    }
+    // Byte-identical n/ds to cs_shadow_bake — the evaluated samples must match.
+    let n = clamp(u32(ceil((t1 - t0) / g.kms.z)), 1u, {max_steps}u);
+    let ds = (t1 - t0) / f32(n);
+
+    let omin = g.mmin.xyz;
+    let oext = g.mmax.xyz - g.mmin.xyz;
+
+    var tau = 0.0;
+    var i = 0u;
+    loop {
+        if (i >= n) {
+            break;
+        }
+        let s = t0 + (f32(i) + 0.5) * ds;
+        let p = lp + dir * s;
+        // Descend the pyramid coarsest -> finest: the first inactive level jumps
+        // across its (as-large-as-possible) empty cell; reaching the finest
+        // level active is a real occupied sample to evaluate.
+        var res = {shadow_occ_coarsest}u;
+        var offset = 0u;
+        var jumped = false;
+        loop {
+            let csize = oext / vec3<f32>(f32(res));
+            let cf = floor((p - omin) / csize);
+            let m = f32(res - 1u);
+            let cx = u32(clamp(cf.x, 0.0, m));
+            let cy = u32(clamp(cf.y, 0.0, m));
+            let cz = u32(clamp(cf.z, 0.0, m));
+            if (occ[offset + (cz * res + cy) * res + cx] == 0u) {
+                // Inactive cell: jump to the first sample at/after the exit, with
+                // the same -1 sample float margin and +1 progress guard as the
+                // CPU DDA (volume::light_transmittance_dda).
+                let cmin = omin + vec3<f32>(f32(cx), f32(cy), f32(cz)) * csize;
+                let cmax = cmin + csize;
+                var s_exit = 1e30;
+                for (var a = 0; a < 3; a++) {
+                    if (abs(dir[a]) >= 1e-12) {
+                        let boundary = select(cmin[a], cmax[a], dir[a] > 0.0);
+                        s_exit = min(s_exit, (boundary - lp[a]) / dir[a]);
+                    }
+                }
+                let jump = i32(ceil((s_exit - t0) / ds - 0.5)) - 1;
+                i = u32(clamp(max(i32(i) + 1, jump), 0, i32(n)));
+                jumped = true;
+                break;
+            }
+            if (res == {shadow_occ_res}u) {
+                break; // finest level active -> evaluate this sample
+            }
+            offset += res * res * res;
+            res = res * 2u;
+        }
+        if (!jumped) {
+            tau += g.kms.x * density_at(p) * ds;
+            i += 1u;
+        }
+    }
+    shadow_out[idx] = exp(-tau);
+}
+"#;
+
 /// Threads per prepass workgroup (one star per thread; one voxel per thread
 /// for the shadow bake).
 const PREPASS_WORKGROUP: u32 = 64;
@@ -700,6 +804,8 @@ pub struct Renderer {
     gas_pipeline: wgpu::RenderPipeline,
     prepass_pipeline: wgpu::ComputePipeline,
     shadow_pipeline: wgpu::ComputePipeline,
+    /// DDA/hierarchical shadow-bake variant (RenderConfig::shadow_bake = Dda).
+    shadow_dda_pipeline: wgpu::ComputePipeline,
     quad_buf: wgpu::Buffer,
     uniform_buf: wgpu::Buffer,
     gas_uniform_buf: wgpu::Buffer,
@@ -713,6 +819,9 @@ pub struct Renderer {
     gas_bgl: wgpu::BindGroupLayout,
     prepass_io_bgl: wgpu::BindGroupLayout,
     shadow_write_bgl: wgpu::BindGroupLayout,
+    /// The DDA bake's layout: the shadow buffer (read_write) plus the occupancy
+    /// pyramid (read-only).
+    shadow_dda_bgl: wgpu::BindGroupLayout,
     shadow_read_bgl: wgpu::BindGroupLayout,
 }
 
@@ -898,6 +1007,34 @@ impl Renderer {
                 count: None,
             }],
         });
+        // The DDA bake adds a second binding: the read-only occupancy pyramid
+        // (packed by volume::pack_shadow_occupancy) it descends to skip empty
+        // spans.
+        let shadow_dda_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow-dda-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
         let shadow_read_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow-read-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -1055,6 +1192,39 @@ impl Renderer {
             cache: None,
         });
 
+        // DDA/hierarchical bake variant: same prepass, plus the occupancy
+        // pyramid binding it descends to skip empty spans.
+        let shadow_dda_src = format!("{WGSL_UNIFORMS}{WGSL_GAS_COMMON}{WGSL_SHADOW_BAKE_DDA}")
+            .replace("{max_steps}", &max_steps)
+            .replace("{shadow_res}", &shadow_res)
+            .replace(
+                "{shadow_occ_coarsest}",
+                &crate::volume::SHADOW_OCC_COARSEST.to_string(),
+            )
+            .replace(
+                "{shadow_occ_res}",
+                &crate::volume::SHADOW_OCC_RES.to_string(),
+            )
+            .replace("{workgroup}", &PREPASS_WORKGROUP.to_string());
+        let shadow_dda_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow-bake-dda-shader"),
+            source: wgpu::ShaderSource::Wgsl(shadow_dda_src.into()),
+        });
+        let shadow_dda_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow-bake-dda-pl"),
+            bind_group_layouts: &[Some(&bgl), Some(&gas_bgl), Some(&shadow_dda_bgl)],
+            immediate_size: 0,
+        });
+        let shadow_dda_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("shadow-bake-dda-pipeline"),
+                layout: Some(&shadow_dda_layout),
+                module: &shadow_dda_shader,
+                entry_point: Some("cs_shadow_bake_dda"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
         Ok(Renderer {
             device,
             queue,
@@ -1062,6 +1232,7 @@ impl Renderer {
             gas_pipeline,
             prepass_pipeline,
             shadow_pipeline,
+            shadow_dda_pipeline,
             quad_buf,
             uniform_buf,
             gas_uniform_buf,
@@ -1070,6 +1241,7 @@ impl Renderer {
             gas_bgl,
             prepass_io_bgl,
             shadow_write_bgl,
+            shadow_dda_bgl,
             shadow_read_bgl,
         })
     }
@@ -1282,12 +1454,18 @@ impl Renderer {
                 // Off binds a 4-byte dummy the shader never reads (scat.w = 0).
                 let shadows_on = want_shadows && n_lights > 0;
                 // DDA/hierarchical bake option (bit-identical to the brute bake):
-                // build the occupancy pyramid CPU-side and hand it to the GPU
-                // descent. Wired in D5.
-                if shadows_on && cfg.shadow_bake == ShadowBake::Dda {
-                    let _occ = crate::volume::pack_shadow_occupancy(gf);
-                    todo!("D5: GPU DDA shadow bake");
-                }
+                // build the occupancy pyramid CPU-side and upload it for the GPU
+                // descent. Only when shadows are actually baked and Dda is asked.
+                let use_dda = shadows_on && cfg.shadow_bake == ShadowBake::Dda;
+                let occ_buf = use_dda.then(|| {
+                    let packed = crate::volume::pack_shadow_occupancy(gf);
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("shadow-occupancy"),
+                            contents: bytemuck::cast_slice(&packed),
+                            usage: wgpu::BufferUsages::STORAGE,
+                        })
+                });
                 let r3 = (crate::volume::SHADOW_RES as u64).pow(3);
                 let shadow_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("shadow-volumes"),
@@ -1369,17 +1547,34 @@ impl Renderer {
                         resource: shadow_buf.as_entire_binding(),
                     }],
                 });
-                let shadow_write_bg = shadows_on.then(|| {
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                // The bake's write face: for Dda the layout also carries the
+                // occupancy pyramid at binding 1; otherwise the single-binding
+                // brute layout.
+                let shadow_write_bg = shadows_on.then(|| match &occ_buf {
+                    Some(occ) => self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("shadow-dda-write-bind-group"),
+                        layout: &self.shadow_dda_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: shadow_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: occ.as_entire_binding(),
+                            },
+                        ],
+                    }),
+                    None => self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("shadow-write-bind-group"),
                         layout: &self.shadow_write_bgl,
                         entries: &[wgpu::BindGroupEntry {
                             binding: 0,
                             resource: shadow_buf.as_entire_binding(),
                         }],
-                    })
+                    }),
                 });
-                Some((gas_bg, shadow_read_bg, shadow_write_bg, n_lights))
+                Some((gas_bg, shadow_read_bg, shadow_write_bg, n_lights, use_dda))
             }
         };
 
@@ -1461,13 +1656,17 @@ impl Renderer {
         }
         // 1b. Shadow-bake prepass (umbral-lantern-lattice): one thread per
         //     (light, voxel), before the gas pass reads the volumes.
-        if let Some((gas_bg, _, Some(write_bg), n_lights)) = &gas_bg {
+        if let Some((gas_bg, _, Some(write_bg), n_lights, use_dda)) = &gas_bg {
             let r3 = crate::volume::SHADOW_RES.pow(3);
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("shadow-bake-prepass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_pipeline(if *use_dda {
+                &self.shadow_dda_pipeline
+            } else {
+                &self.shadow_pipeline
+            });
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_bind_group(1, gas_bg, &[]);
             pass.set_bind_group(2, write_bg, &[]);

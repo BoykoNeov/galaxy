@@ -77,10 +77,19 @@ pericenter = 1.5
 separation = 8.0
 
 [sim]
-dt = 0.005 # gas hydro CFL: this seed's QUICK realization stays clean at 0.005
+# Block-adaptive dt (courant-quickening-cadence): `dt` no longer sets the integration
+# step — the substep is chosen per block from the hydro CFL bound, so the run tracks the
+# bound down and never CFL-aborts (full-res was unproducible at any fixed dt). `dt` now
+# only fixes the snapshot output cadence: output_dt = snapshot_every · dt = 0.5.
+dt = 0.005
 n_steps = 6000 # T = 30, same physical span as `disk` (1500 * 0.02)
 snapshot_every = 100 # -> 61 snapshots, matching the `disk` cadence
 eps = 0.05
+
+# Enable block-adaptive timestepping at the shipped defaults (courant 0.25, growth 1.25,
+# block 16). This is the showpiece adaptive dt was built for — it retires the fixed-dt
+# CFL abort that made full-res gasrich unproducible.
+[sim.adaptive]
 
 [look]
 splat_size = 0.12

@@ -229,6 +229,44 @@ pub struct SimSpec {
     pub snapshot_every_quick: Option<u64>,
     /// Plummer force softening ε (also the kNN distance floor in renderprep).
     pub eps: f64,
+    /// Block-adaptive timestepping on the gas path (`[sim.adaptive]`, plan
+    /// courant-quickening-cadence). Its **presence** enables it; all knobs default.
+    /// When enabled and the scenario carries gas, the simulate step chooses `dt` per
+    /// block from the hydro CFL bound instead of using the fixed `dt` — so a run whose
+    /// fixed `dt` would trip the CFL sentinel instead completes, tracking the bound
+    /// down automatically. Snapshots stay on the SAME time grid
+    /// (`output_dt = snapshot_every · dt`), so `dt` now only sets the output cadence;
+    /// the actual substep is CFL-derived. A gas-free scenario ignores it (no hydro
+    /// constraint), keeping its fixed-dt byte-identity.
+    #[serde(default)]
+    pub adaptive: Option<AdaptiveSpec>,
+}
+
+/// Block-adaptive timestep policy (`[sim.adaptive]`). All fields default, so an empty
+/// `[sim.adaptive]` table enables it at the shipped defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdaptiveSpec {
+    /// Courant number applied to the CFL limit (0, 1). Default 0.25.
+    #[serde(default = "default_courant")]
+    pub courant: f64,
+    /// Per-block dt growth cap (≥ 1) — dt shrinks instantly, grows gradually. Default 1.25.
+    #[serde(default = "default_max_growth")]
+    pub max_growth: f64,
+    /// Max steps held at one dt before re-querying the bound (≥ 1, ≤ GPU MAX_BATCH 64).
+    /// Default 16.
+    #[serde(default = "default_block_steps")]
+    pub block_steps: u64,
+}
+
+fn default_courant() -> f64 {
+    0.25
+}
+fn default_max_growth() -> f64 {
+    1.25
+}
+fn default_block_steps() -> u64 {
+    16
 }
 
 /// Splat look and framing.
@@ -957,6 +995,7 @@ fn positive(v: f64, what: &str) -> Result<(), String> {
 /// softening, splat look, and framing knobs. Built from a [`ScenarioSpec`] by
 /// [`build_scenario`]; the pipeline (`run_movie` in the binary) is single-sourced
 /// over this.
+#[derive(Clone)]
 pub struct Scenario {
     pub state: State,
     pub prep: PrepConfig,
@@ -1004,6 +1043,10 @@ pub struct Scenario {
     /// pass. A grade type (not a render one), so it lives directly on the
     /// scenario, unlike the render-free `GasLookValues` mirror.
     pub local_tone: Option<LocalToneConfig>,
+    /// Block-adaptive timestep policy (`[sim.adaptive]`, courant-quickening-cadence),
+    /// `None` = fixed-dt. When `Some` and the scenario is gas-rich, `simulate_snapshots`
+    /// routes the gas path through the adaptive driver; a gas-free scenario ignores it.
+    pub adaptive: Option<AdaptiveSpec>,
     pub info: String,
 }
 
@@ -1271,6 +1314,10 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
             radius: lt.radius.unwrap_or(DEFAULT_LOCAL_RADIUS),
             floor: lt.floor.unwrap_or(DEFAULT_LOCAL_FLOOR),
         }),
+        // Block-adaptive timestep policy ([sim.adaptive], courant-quickening-cadence):
+        // carried verbatim; `simulate_snapshots` acts on it only when the scenario is
+        // gas-rich (a gas-free run has no hydro CFL constraint and ignores it).
+        adaptive: spec.sim.adaptive,
         info,
     }
 }

@@ -150,6 +150,14 @@ scatter_tint = [0.6, 0.8, 1.3]
 # kept (the change is well inside the 200/800 bracket's step). DISABLE by removing
 # this knob — that path is gated bit-identical to the unshadowed v1 scatter.
 shadows = true
+# Shadow-bake strategy (hollow-lantern-stride): "dda" strides past the empty space
+# between each light and the gas over a hierarchical occupancy pyramid instead of
+# brute-marching every step of it. It is BIT-IDENTICAL to "brute" (the reference) —
+# density is exactly 0 outside particle support, so a skipped sample adds κ·0·ds = 0,
+# a float no-op (the equivalence gate asserts assert_eq!, and the GPU-Dda ≡ GPU-brute
+# pixel gate holds exactly). Measured 2× at this QUICK scale, up to ~8× at FULL by
+# sparsity — pure speed, zero visual change. "brute" restores the reference march.
+shadow_bake = "dda"
 # `scatter_softening` is DELIBERATELY omitted (kept None = the v1 per-cluster
 # radius softening). A QUICK A/B (M:\claud_projects\temp\eps_adopt_ab, None vs a
 # fixed ε ∈ {0.5, 3, 6, 12}) confirmed the per-cluster look reads best here: None's

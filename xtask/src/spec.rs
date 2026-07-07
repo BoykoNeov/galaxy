@@ -2002,24 +2002,25 @@ mod tests {
 
     /// A declared `shadow_bake` threads parse → build into `Scenario.shadow_bake`
     /// (routed to RenderConfig, bit-identical either way); absent, it resolves to
-    /// the brute default.
+    /// the brute default. The shipped gasrich now declares `"dda"`, so it is the
+    /// positive fixture; the brute default is checked by stripping the knob.
     #[test]
     fn look_gas_shadow_bake_threads_to_scenario() {
         let gasrich = preset("gasrich").unwrap();
-        // Absent by default: the shipped gasrich bakes with the brute reference.
-        let s0 = build_scenario(&parse_scenario_toml(gasrich).unwrap(), true);
+        // The shipped gasrich declares "dda" — it threads through to the strategy.
+        let s1 = build_scenario(&parse_scenario_toml(gasrich).unwrap(), true);
+        assert_eq!(
+            s1.shadow_bake,
+            ShadowBake::Dda,
+            "shipped gasrich must thread shadow_bake = \"dda\""
+        );
+        // Strip the knob: it resolves to the brute default (bit-identical output).
+        let no_bake = gasrich.replace("shadow_bake = \"dda\"\n", "");
+        let s0 = build_scenario(&parse_scenario_toml(&no_bake).unwrap(), true);
         assert_eq!(
             s0.shadow_bake,
             ShadowBake::Brute,
             "absent shadow_bake must resolve to Brute"
-        );
-        // Declared "dda": threads through to the scenario strategy.
-        let with = gasrich.replace("shadows = true", "shadows = true\nshadow_bake = \"dda\"");
-        let s1 = build_scenario(&parse_scenario_toml(&with).unwrap(), true);
-        assert_eq!(
-            s1.shadow_bake,
-            ShadowBake::Dda,
-            "declared shadow_bake = \"dda\" must thread through"
         );
     }
 
@@ -2028,9 +2029,11 @@ mod tests {
     #[test]
     fn shadow_bake_without_shadows_is_a_dead_knob() {
         let gasrich = preset("gasrich").unwrap();
-        // Replace the `shadows = true` line with a lone shadow_bake: present, but
-        // no shadows to bake.
-        let bad = gasrich.replace("shadows = true", "shadow_bake = \"dda\"");
+        // Strip the shipped knob first (avoid a duplicate key), then re-add it in
+        // place of `shadows = true`: the bake strategy is declared, but no shadows.
+        let bad = gasrich
+            .replace("shadow_bake = \"dda\"\n", "")
+            .replace("shadows = true", "shadow_bake = \"dda\"");
         assert!(
             parse_scenario_toml(&bad).is_err(),
             "shadow_bake without shadows = true must be rejected"

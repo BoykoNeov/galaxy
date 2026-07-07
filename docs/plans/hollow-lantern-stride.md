@@ -70,8 +70,12 @@ reassociation exposure** (unlike the M4j two-sum trap).
   GPU-Dda ≡ GPU-brute **bit-identical** pixels (the exact gate held — no driver
   FMA divergence between the two modules) + GPU-Dda ≡ CPU brute reference within
   the `1e-3 rel + 1e-5 abs` GPU tolerance.
-- **D6** (f8eb899, this): `[look.gas].shadow_bake = "brute"|"dda"` knob
+- **D6** (f8eb899): `[look.gas].shadow_bake = "brute"|"dda"` knob
   (dead-knob gated: requires `shadows = true`) → `RenderConfig`; docs, memory.
+- **D7**: flip the shipped gasrich preset to `shadow_bake = "dda"` (the user's
+  call — bit-identical, so pure speed). Spec fixtures re-pointed (the shipped
+  preset is now the positive `dda` fixture; brute default checked by stripping
+  the knob). Confirmed end-to-end: QUICK CLI A/B, 0 differing pixels / 33 frames.
 
 ## Perf
 
@@ -79,8 +83,15 @@ Measured net speedup (bit-identical throughout): 2× at gasrich-QUICK scale
 (64³ thin disk, 8–20 lights, CPU bake incl. occupancy build), 2–8× at 128³
 by sparsity. The empty-space walk was the bottleneck for the sparse frames the
 galaxy actually produces (compact gas + large empty margin + shadow rays from
-distant clustered lights); the mip removes it. Default stays `brute` (the
-reference); `dda` is opt-in, zero visual risk.
+distant clustered lights); the mip removes it. The `ShadowBake` *default* stays
+`brute` (the reference oracle); `dda` is opt-in, zero visual risk.
+
+**gasrich ships `dda`.** Since the output is bit-identical (unit-proven, and
+re-confirmed end-to-end: a 5-snapshot QUICK A/B through the real `xtask` CLI —
+`dda` vs a `brute` copy of the shipped preset — was 0 differing pixels across
+all 33 rendered frames), there is no reason for the showpiece to leave the
+speedup on the table. Flip back with `shadow_bake = "brute"` to render against
+the reference march.
 
 ## Deferrals (named)
 

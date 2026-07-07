@@ -261,27 +261,7 @@ impl GpuLbvhFlattener {
     async fn new_async() -> Result<Self, GpuError> {
         let builder = GpuLbvhBuilder::new()?;
 
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None, // headless
-                force_fallback_adapter: false,
-            })
-            .await
-            .map_err(|_| GpuError::NoAdapter)?;
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("galaxy-gpu-lbvh-flatten-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|e| GpuError::Device(e.to_string()))?;
+        let crate::context::GpuContext { device, queue } = crate::context::gpu_context()?;
 
         let structure_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gpu-lbvh-flatten-structure"),

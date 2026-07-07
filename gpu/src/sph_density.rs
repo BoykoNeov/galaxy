@@ -299,27 +299,7 @@ impl GpuDensity {
     }
 
     async fn new_async() -> Result<Self, GpuError> {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })
-            .await
-            .map_err(|_| GpuError::NoAdapter)?;
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("galaxy-gpu-sph-density-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|e| GpuError::Device(e.to_string()))?;
+        let crate::context::GpuContext { device, queue } = crate::context::gpu_context()?;
 
         let src = format!("{DENSITY_DECLS}{GRID_HELPERS_WGSL}{DENSITY_KERNELS}");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

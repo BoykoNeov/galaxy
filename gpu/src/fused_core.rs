@@ -221,27 +221,7 @@ impl FusedCore {
     }
 
     async fn new_async(g: f64, softening: f64, theta: f64) -> Result<Self, GpuError> {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None, // headless
-                force_fallback_adapter: false,
-            })
-            .await
-            .map_err(|_| GpuError::NoAdapter)?;
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("galaxy-gpu-fused-core-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .map_err(|e| GpuError::Device(e.to_string()))?;
+        let crate::context::GpuContext { device, queue } = crate::context::gpu_context()?;
 
         // Compile the reused (verbatim) kernels + the two new trivial ones as separate modules.
         let module = |label: &str, src: &str| {

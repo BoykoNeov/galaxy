@@ -19,13 +19,14 @@ use galaxy_core::{LeapfrogKdk, State, StaticBackground};
 use galaxy_gpu::GpuResidentLeapfrog;
 use galaxy_io::Header;
 use galaxy_sim::{
-    plan_block, run, AdaptiveConfig, DirectorySink, RunSummary, SimConfig, SnapshotSink,
+    plan_block, run, run_adaptive, AdaptiveConfig, DirectorySink, RunSummary, SimConfig,
+    SnapshotSink,
 };
 use galaxy_solvers::sph::{DensityConfig, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
 use crate::cfl_guard::{CflGuard, C_CFL};
-use crate::spec::Scenario;
+use crate::spec::{AdaptiveSpec, Scenario};
 use crate::{G, THETA};
 
 /// Which force backend runs the gas-rich (`GravitySph`) branch of the simulate step.
@@ -84,12 +85,11 @@ pub fn simulate_snapshots(
                 ..HydroParams::default()
             };
             let density_cfg = DensityConfig::default();
-            match backend {
-                Backend::Cpu => {
-                    // No separate t=0 pre-check: `run` emits the t=0 IC as its first
-                    // snapshot before any integration step, and `CflGuard` validates
-                    // before delegating — so an over-large `dt` already fails loud at
-                    // the IC emit, before a single `.snap` file is written.
+            match (backend, s.adaptive) {
+                // Fixed-dt CPU (adaptive off): the pre-A4 path. No separate t=0 pre-check
+                // — `run` emits the t=0 IC first and `CflGuard` validates before
+                // delegating, so an over-large `dt` fails loud before any file is written.
+                (Backend::Cpu, None) => {
                     let gravity = BarnesHut::new(G, s.eps, THETA);
                     let mut solver = GravitySph::new(gravity, hydro, density_cfg.clone());
                     let inner = DirectorySink::new(snap_dir)?;
@@ -103,7 +103,34 @@ pub fn simulate_snapshots(
                         &mut sink,
                     )?)
                 }
-                Backend::Gpu => simulate_gas_gpu(&state, &cfg, hydro, density_cfg, snap_dir),
+                // Block-adaptive CPU (A4): the timestep is CFL-derived per block, so the
+                // fixed-dt `CflGuard` is retired on this path — its premise (a human might
+                // pick too large a `dt`) is void, since `plan_block` picks `dt ≤ courant·
+                // limit` by construction; stability is structural + D2b-gated (D6).
+                (Backend::Cpu, Some(a)) => {
+                    let adaptive_cfg = build_adaptive_config(s, &a)?;
+                    let gravity = BarnesHut::new(G, s.eps, THETA);
+                    let mut solver = GravitySph::new(gravity, hydro, density_cfg);
+                    let mut sink = DirectorySink::new(snap_dir)?;
+                    Ok(run_adaptive(
+                        &mut state,
+                        &mut solver,
+                        &mut integ,
+                        &bg,
+                        &adaptive_cfg,
+                        &mut sink,
+                    )?)
+                }
+                // Fixed-dt GPU-resident SPH (G6, adaptive off).
+                (Backend::Gpu, None) => {
+                    simulate_gas_gpu(&state, &cfg, hydro, density_cfg, snap_dir)
+                }
+                // Block-adaptive GPU-resident SPH (A3/A4): dt recomputed per block from
+                // the on-device CFL bound.
+                (Backend::Gpu, Some(a)) => {
+                    let adaptive_cfg = build_adaptive_config(s, &a)?;
+                    simulate_gas_gpu_adaptive(&state, &adaptive_cfg, hydro, density_cfg, snap_dir)
+                }
             }
         }
         // Gas-free: the pre-M7c pipeline, byte-for-byte — plain Barnes-Hut, plain
@@ -121,6 +148,40 @@ pub fn simulate_snapshots(
             )?)
         }
     }
+}
+
+/// Build the [`AdaptiveConfig`] for a gas-rich scenario's block-adaptive run. The output
+/// cadence is derived so the adaptive run emits on the SAME time grid as the fixed-dt
+/// path would (`output_dt = snapshot_every · dt`, `n_outputs = n_steps / snapshot_every`)
+/// — the movie sees the identical snapshot times, only the substeps in between become
+/// CFL-adaptive. Requires `n_steps` a clean multiple of `snapshot_every` (a whole output
+/// grid); rejects otherwise so a mis-timed movie can't be produced silently.
+fn build_adaptive_config(
+    s: &Scenario,
+    a: &AdaptiveSpec,
+) -> Result<AdaptiveConfig, Box<dyn std::error::Error>> {
+    if s.snapshot_every == 0 {
+        return Err("snapshot_every must be >= 1".into());
+    }
+    if !s.n_steps.is_multiple_of(s.snapshot_every) {
+        return Err(format!(
+            "adaptive dt needs a whole output grid: n_steps ({}) must be a multiple of \
+             snapshot_every ({})",
+            s.n_steps, s.snapshot_every
+        )
+        .into());
+    }
+    Ok(AdaptiveConfig {
+        courant: a.courant,
+        max_growth: a.max_growth,
+        block_steps: a.block_steps,
+        output_dt: s.snapshot_every as f64 * s.dt,
+        n_outputs: s.n_steps / s.snapshot_every,
+        softening: s.eps,
+        rng_seed: s.seed,
+        config_hash: 0,
+        units: "nbody-G1".to_string(),
+    })
 }
 
 /// The GPU-resident SPH simulate branch (G6): drive `GpuResidentLeapfrog` in gas mode

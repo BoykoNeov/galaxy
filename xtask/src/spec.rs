@@ -1552,6 +1552,7 @@ mod tests {
                 snapshot_every: 25,
                 snapshot_every_quick: None,
                 eps: 0.05,
+                adaptive: None,
             },
             look: LookSpec {
                 splat_size: 0.12,
@@ -1608,6 +1609,7 @@ mod tests {
                 snapshot_every: 200,
                 snapshot_every_quick: Some(400),
                 eps: 0.05,
+                adaptive: None,
             },
             look: LookSpec {
                 splat_size: 0.6,
@@ -1703,6 +1705,7 @@ mod tests {
                 snapshot_every: 25,
                 snapshot_every_quick: None,
                 eps: 0.02,
+                adaptive: None,
             },
             look: LookSpec {
                 splat_size: 0.15,

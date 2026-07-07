@@ -142,6 +142,16 @@ anisotropy = 0.5
 # kept (the change is well inside the 200/800 bracket's step). DISABLE by removing
 # this knob — that path is gated bit-identical to the unshadowed v1 scatter.
 shadows = true
+# `scatter_softening` is DELIBERATELY omitted (kept None = the v1 per-cluster
+# radius softening). A QUICK A/B (M:\claud_projects\temp\eps_adopt_ab, None vs a
+# fixed ε ∈ {0.5, 3, 6, 12}) confirmed the per-cluster look reads best here: None's
+# effective softening is r_k ≈ 3–6 sim units near the cores (the voxel floor ~0.24
+# is the sharp/bright extreme, not a neutral center — ε=0.5 blazed the cores, peak
+# px 68 vs 5). Adopting a fixed ε would only decouple the scatter glow from the
+# octree REFINE_TOL (refinement-invariance) — an aesthetic wash here, and it does
+# NOT touch the approach white-blob (that is star-splat piling). CONSEQUENCE: since
+# the coupling stays, a future REFINE_TOL freeze must ALSO pin core brightness, not
+# treat the scatter glow as tol-independent.
 
 [[look.ramps]]
 inner = [0.05, 0.035, 0.025]

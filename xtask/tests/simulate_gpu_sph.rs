@@ -130,9 +130,13 @@ fn gas_scenario() -> Scenario {
         &parse_scenario_toml(GAS_TOML).expect("gas toml parses"),
         true,
     );
+    // 40 steps at dt = 1e-4 ⇒ t_final = 4e-3, still far pre-chaos (dynamical time ~1), so
+    // the pure-hydro signal grows well past the f32 port error while the per-particle
+    // bracket stays meaningful. snapshot_every = 10 exercises real 10-step `step_many`
+    // batches AND the mid-run re-upload (h_max recalibration) — not just a single batch.
     s.dt = 1e-4;
-    s.n_steps = 4;
-    s.snapshot_every = 1;
+    s.n_steps = 40;
+    s.snapshot_every = 10;
     s
 }
 
@@ -260,35 +264,50 @@ fn gpu_gas_brackets_between_gravity_only_and_cpu_sph() {
     );
     assert!(!v_gpu.is_empty(), "the scenario must carry gas");
 
-    // (a) Hydro acted: the GPU gas velocity field is NOT the gravity-only field.
-    let max_vs_grav = v_gpu
-        .iter()
-        .zip(&v_grav)
-        .map(|(a, b)| (*a - *b).length())
-        .fold(0.0_f64, f64::max);
-    // (b) Hydro acted CORRECTLY: the GPU gas field tracks the CPU-SPH field to an f32
-    //     tolerance at this early snapshot (before chaos e-folds).
-    let max_vs_cpu = v_gpu
-        .iter()
-        .zip(&v_cpu)
-        .map(|(a, b)| (*a - *b).length())
-        .fold(0.0_f64, f64::max);
-    eprintln!("G6 bracket: max|v_gpu - v_grav| = {max_vs_grav:.3e} (must be large), max|v_gpu - v_cpu| = {max_vs_cpu:.3e} (must be small)");
+    // The PURE hydro signal is `v_cpu - v_grav` — both f64, so it isolates what SPH does
+    // to the gas velocity field with NO f32-vs-f64 gravity contamination (the reason we
+    // do NOT bracket against `v_gpu - v_grav`, which mixes the f32-gravity error in).
+    let (sig_max, sig_rms) = diff_max_rms(&v_cpu, &v_grav);
+    // GPU-SPH vs CPU-SPH agreement: the f32 port error the gate must keep BELOW the signal.
+    let (agr_max, agr_rms) = diff_max_rms(&v_gpu, &v_cpu);
+    eprintln!(
+        "G6 bracket over {} steps: pure-hydro signal max {sig_max:.3e} rms {sig_rms:.3e} | gpu-vs-cpu agree max {agr_max:.3e} rms {agr_rms:.3e}",
+        s.n_steps
+    );
 
+    // (a) Hydro is non-trivial in this scenario — there is a signal to bracket against
+    //     (measured pure-hydro max ~4.4e-4 over these 40 steps).
     assert!(
-        max_vs_grav > 1e-6,
-        "GPU gas is indistinguishable from gravity-only — hydro did not act (max Δ = {max_vs_grav:.3e})"
+        sig_max > 1e-4,
+        "pure-hydro signal too small to bracket (max {sig_max:.3e})"
     );
-    // Measured-then-tightened placeholder bound; refined once the green run prints it.
+    // (b) The load-bearing side: GPU-SPH agreement sits DECISIVELY below the hydro signal
+    //     it must reproduce, so a gas-present-but-broken-hydro bug (which gives agreement
+    //     ≈ the full signal) fails — unlike a loose absolute tolerance, which it would
+    //     pass. This relative bound is run-length-INVARIANT: both signal and the f32 port
+    //     error accumulate linearly in the step count, so their ratio is fixed (measured
+    //     ~5× in max, ~8× in rms); the 3× margin is grounded in that with headroom.
     assert!(
-        max_vs_cpu < 1e-4,
-        "GPU gas diverged from CPU-SPH beyond the f32 bracket (max Δ = {max_vs_cpu:.3e})"
+        agr_max * 3.0 < sig_max,
+        "GPU-SPH agreement ({agr_max:.3e}) is not decisively below the hydro signal ({sig_max:.3e}) — hydro may be degraded, not just present"
     );
-    // The bracket is only meaningful if the correct side is far tighter than the wrong one.
+    // Absolute backstop against gross blowup, independent of the signal measurement
+    // (calibrated to this 40-step scenario; measured worst ~8.8e-5).
     assert!(
-        max_vs_cpu < 0.1 * max_vs_grav,
-        "GPU is not decisively closer to CPU-SPH than to gravity-only"
+        agr_max < 2e-4,
+        "GPU-SPH diverged from CPU-SPH beyond the f32 bracket (max {agr_max:.3e})"
     );
+}
+
+/// Worst-case and RMS magnitude of the per-particle difference between two equal-length
+/// velocity fields.
+fn diff_max_rms(a: &[DVec3], b: &[DVec3]) -> (f64, f64) {
+    let n = a.len().max(1) as f64;
+    let (max, sumsq) = a.iter().zip(b).fold((0.0_f64, 0.0_f64), |(m, s), (x, y)| {
+        let d = (*x - *y).length();
+        (m.max(d), s + d * d)
+    });
+    (max, (sumsq / n).sqrt())
 }
 
 // --- cheap unit guards, each pinning a named failure -----------------------------

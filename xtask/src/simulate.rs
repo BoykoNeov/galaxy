@@ -15,8 +15,10 @@
 
 use std::path::Path;
 
-use galaxy_core::{LeapfrogKdk, StaticBackground};
-use galaxy_sim::{run, DirectorySink, RunSummary, SimConfig};
+use galaxy_core::{LeapfrogKdk, State, StaticBackground};
+use galaxy_gpu::GpuResidentLeapfrog;
+use galaxy_io::Header;
+use galaxy_sim::{run, DirectorySink, RunSummary, SimConfig, SnapshotSink};
 use galaxy_solvers::sph::{DensityConfig, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
@@ -126,12 +128,124 @@ pub fn simulate_snapshots(
 /// its step loop (positions/velocities live on the GPU across steps), so the loop is
 /// hand-rolled — `upload → step_many(interval) → snapshot → emit` — mirroring `run`'s
 /// snapshot schedule exactly (including the always-capture-final-step tail).
+///
+/// Two resident-specific hazards are handled explicitly:
+/// - **Re-upload per snapshot interval.** G5b freezes the hydro gather radius at
+///   `SUPPORT·h_max` at upload; contraction over-covers (safe) but *expansion*
+///   under-covers → missing hydro pairs, silently, with no gate red. The QUICK gasrich
+///   merger expands post-pericenter, so we re-upload each interval to recalibrate
+///   `h_max`/`cell` (the sanctioned mitigation — the on-GPU gas-bbox reduction that
+///   would make a single-upload long run safe is deferred). **Consequence:** this path
+///   does NOT exercise the single-upload-long-run failure mode, so a green gate here
+///   must not be read as "frozen `h_max` proven safe for one upload".
+/// - **Column re-attach.** [`GpuResidentLeapfrog::snapshot`] rebuilds `State` via
+///   `from_phase_space`, which resets `kind→Collisionless`, `progenitor→0`,
+///   `id→sequential`. The stepper preserves upload index order, so we re-stamp the
+///   uploaded `id`/`progenitor`/`kind` onto every snapshot — before both the emit (or
+///   the gas subset and `sf_progenitors` coloring vanish) AND the re-upload (or the gas
+///   map rebuilt from `kind` comes back empty).
+///
+/// The stepper resets its clock to 0 on each [`upload`](GpuResidentLeapfrog::upload), so
+/// absolute time is tracked here (`step·dt`) and stamped onto each snapshot; otherwise
+/// every snapshot after the first would be mis-timed.
 fn simulate_gas_gpu(
-    _state: &galaxy_core::State,
-    _cfg: &SimConfig,
-    _hydro: HydroParams,
-    _density_cfg: DensityConfig,
-    _snap_dir: &Path,
+    state: &State,
+    cfg: &SimConfig,
+    hydro: HydroParams,
+    density_cfg: DensityConfig,
+    snap_dir: &Path,
 ) -> Result<RunSummary, Box<dyn std::error::Error>> {
-    todo!("G6: GPU-resident SPH simulate branch")
+    if cfg.snapshot_every == 0 {
+        return Err("snapshot_every must be >= 1".into());
+    }
+    if !cfg.dt.is_finite() || cfg.dt <= 0.0 {
+        return Err(format!("dt must be a positive finite number, got {}", cfg.dt).into());
+    }
+
+    let mut stepper =
+        GpuResidentLeapfrog::new_with_sph(G, cfg.softening, THETA, hydro, density_cfg)?;
+    stepper.upload(state);
+
+    // Fail-loud t=0 CFL check, mirroring the CPU path's `CflGuard`: reject an over-large
+    // fixed `dt` against the hydro CFL bound of the IC before any `.snap` is written.
+    let dt_max = stepper.min_stable_dt(C_CFL);
+    if cfg.dt > dt_max {
+        return Err(format!(
+            "dt {} exceeds the t=0 hydro CFL bound {} (c_cfl = {})",
+            cfg.dt, dt_max, C_CFL
+        )
+        .into());
+    }
+
+    let mut sink = DirectorySink::new(snap_dir)?;
+
+    // The exact emit schedule `galaxy_sim::run` uses: step 0 (IC) always, then every
+    // `snapshot_every`-th step, then the final step if it did not already land on cadence.
+    let mut schedule: Vec<u64> = vec![0];
+    for step in 1..=cfg.n_steps {
+        if step % cfg.snapshot_every == 0 {
+            schedule.push(step);
+        }
+    }
+    if *schedule.last().expect("schedule always has step 0") != cfg.n_steps {
+        schedule.push(cfg.n_steps);
+    }
+    let last_step = *schedule.last().expect("schedule non-empty");
+
+    // Step 0: the IC is exactly the uploaded state (columns intact, time 0) — emit it
+    // directly, bit-faithful to `run`'s first snapshot.
+    emit_gpu_snapshot(&mut sink, state, 0, cfg)?;
+    let mut emitted = 1u64;
+
+    let mut prev = 0u64;
+    for &target in &schedule[1..] {
+        stepper.step_many(cfg.dt, target - prev);
+        let mut snap = stepper.snapshot();
+        reattach_columns(&mut snap, state);
+        snap.time = target as f64 * cfg.dt; // absolute — the stepper clock reset on re-upload
+        emit_gpu_snapshot(&mut sink, &snap, target, cfg)?;
+        emitted += 1;
+
+        // Re-upload to bound frozen-`h_max` staleness (the expansion landmine). Skip after
+        // the final emit — nothing steps afterward, so its recalibration would be wasted.
+        if target != last_step {
+            stepper.upload(&snap);
+        }
+        prev = target;
+    }
+
+    Ok(RunSummary {
+        steps: cfg.n_steps,
+        final_time: cfg.n_steps as f64 * cfg.dt,
+        snapshots_emitted: emitted,
+    })
+}
+
+/// Re-stamp the identity columns (`id`, `progenitor`, `kind`) a GPU `snapshot` dropped,
+/// from the uploaded state. The resident stepper preserves upload index order, so the
+/// columns map 1:1 by index (Species does not change without star formation).
+fn reattach_columns(snap: &mut State, src: &State) {
+    snap.id.clone_from(&src.id);
+    snap.progenitor.clone_from(&src.progenitor);
+    snap.kind.clone_from(&src.kind);
+}
+
+/// Stamp a header for `state` at `step` and hand it to the sink — the GPU branch's
+/// equivalent of `galaxy_sim::run`'s private `emit_snapshot`.
+fn emit_gpu_snapshot(
+    sink: &mut DirectorySink,
+    state: &State,
+    step: u64,
+    cfg: &SimConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let header = Header::for_state(
+        state,
+        step,
+        cfg.softening,
+        cfg.rng_seed,
+        cfg.config_hash,
+        cfg.units.as_str(),
+    );
+    sink.emit(&header, state)?;
+    Ok(())
 }

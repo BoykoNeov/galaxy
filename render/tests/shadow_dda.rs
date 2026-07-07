@@ -11,11 +11,14 @@
 //! two-grid mix (a sample is empty iff BOTH grids are), the fully-dense slab
 //! (nothing to skip), and the all-empty frame (everything skipped).
 
+use galaxy_render::camera::Camera;
+use galaxy_render::render::{RenderConfig, Renderer};
 use galaxy_render::volume::{
-    bake_shadows, bake_shadows_with, GasFrame, GasLook, Light, ScatterLook, ShadowBake, SHADOW_RES,
+    bake_shadows, bake_shadows_with, render_gas_cpu, GasFrame, GasLook, Light, ScatterLook,
+    ShadowBake, SHADOW_RES,
 };
-use galaxy_renderprep::GasGrid;
-use glam::Vec3;
+use galaxy_renderprep::{FrameData, GasGrid};
+use glam::{Vec2, Vec3};
 use proptest::prelude::*;
 
 // ---------- fixtures ----------
@@ -364,4 +367,186 @@ proptest! {
             bake_shadows(&gas)
         );
     }
+}
+
+// ---------- GPU mirror gates ----------
+//
+// The GPU DDA bake consumes the CPU-packed occupancy pyramid and skips
+// provably-empty spans on device. It must render the same shadowed gas as the
+// brute GPU bake (and, within the project's GPU ≡ CPU tolerance, as the CPU
+// reference). GPU tests need a wgpu adapter and fail loudly without one.
+
+fn renderer() -> Renderer {
+    Renderer::new().expect("wgpu adapter required for the GPU DDA shadow gates")
+}
+
+/// A sparse two-grid scene (different dims/bounds, mostly-empty grids so the DDA
+/// genuinely skips) with scatter + shadows live, and lights inside and outside
+/// the domain — the scene the GPU DDA path must render correctly.
+fn gpu_scene() -> (GasGrid, GasGrid, Vec<Light>) {
+    let mut c0 = Vec::new();
+    for ix in 5..9 {
+        for iy in 6..10 {
+            for iz in 4..8 {
+                c0.push((ix, iy, iz));
+            }
+        }
+    }
+    let g0 = blob_grid(
+        [16, 16, 14],
+        Vec3::new(-1.2, -1.0, -0.9),
+        Vec3::new(1.0, 1.1, 1.0),
+        &c0,
+        0.8,
+    );
+    let mut c1 = Vec::new();
+    for ix in 7..11 {
+        for iy in 5..8 {
+            for iz in 6..10 {
+                c1.push((ix, iy, iz));
+            }
+        }
+    }
+    let g1 = blob_grid(
+        [12, 18, 15],
+        Vec3::new(-0.9, -1.1, -1.0),
+        Vec3::new(1.2, 0.9, 1.1),
+        &c1,
+        0.6,
+    );
+    let lights = vec![
+        Light {
+            pos: Vec3::new(0.3, 0.2, 0.1),
+            radius: 0.12,
+            rgb: [8.0, 5.0, 3.0],
+        },
+        Light {
+            pos: Vec3::new(-0.6, -0.4, 0.5),
+            radius: 0.25,
+            rgb: [2.0, 6.0, 4.0],
+        },
+        Light {
+            pos: Vec3::new(0.1, 2.0, -0.5),
+            radius: 0.0,
+            rgb: [5.0, 5.0, 9.0],
+        },
+    ];
+    (g0, g1, lights)
+}
+
+fn gpu_gas<'a>(g0: &'a GasGrid, g1: &'a GasGrid, lights: &'a [Light]) -> GasFrame<'a> {
+    GasFrame {
+        grid0: g0,
+        grid1: g1,
+        mix: 0.37,
+        lights,
+        look: GasLook {
+            color: [0.9, 0.5, 0.3],
+            emissivity: 1.7,
+            opacity: 2.1,
+            scatter: Some(ScatterLook {
+                strength: 1.3,
+                anisotropy: 0.4,
+                shadows: true,
+                tint: [1.0; 3],
+                softening: None,
+            }),
+        },
+    }
+}
+
+/// The GPU DDA bake ≡ the CPU brute reference (the project's established GPU
+/// discipline: `1e-3` relative + `1e-5` absolute per channel), end to end
+/// through the on-device bake + trilinear + shadowed march.
+#[test]
+fn gpu_dda_shadow_matches_cpu_reference() {
+    let r = renderer();
+    let (g0, g1, lights) = gpu_scene();
+    let gas = gpu_gas(&g0, &g1, &lights);
+    let cam = Camera::orthographic(
+        Vec3::new(0.1, -0.05, 0.0),
+        Vec3::new(0.3, -0.2, -1.0),
+        Vec3::Y,
+        Vec2::new(1.4, 1.05),
+    );
+    let cfg = RenderConfig {
+        width: 64,
+        height: 48,
+        falloff: 6.0,
+        shadow_bake: ShadowBake::Dda,
+        ..RenderConfig::default()
+    };
+    let gpu = r
+        .render_frame_with_gas(&FrameData::default(), Some(&gas), &cam, &cfg)
+        .unwrap();
+    let cpu = render_gas_cpu(&gas, &cam, cfg.width, cfg.height);
+    let mut nonzero = false;
+    for y in 0..cfg.height {
+        for x in 0..cfg.width {
+            let (gp, cp) = (gpu.pixel(x, y), cpu.pixel(x, y));
+            nonzero |= cp[0] > 0.0;
+            for k in 0..4 {
+                let tol = 1e-3 * cp[k].abs() + 1e-5;
+                assert!(
+                    (gp[k] - cp[k]).abs() <= tol,
+                    "pixel ({x},{y}) ch {k}: GPU-DDA {} vs CPU {}",
+                    gp[k],
+                    cp[k]
+                );
+            }
+        }
+    }
+    assert!(nonzero, "reference image all black — degenerate gate");
+}
+
+/// The GPU DDA bake renders bit-identically to the GPU brute bake: DDA only
+/// removes exact-zero addends from an otherwise-identical fold, so the pixels
+/// must match to the last bit. (Both entry points compile from shared source for
+/// one Vulkan target; if a driver ever contracts an FMA differently between the
+/// two modules this could drift a ULP — that would be codegen, not the skip
+/// logic, and the tolerance gate above still guards correctness.)
+#[test]
+fn gpu_dda_shadow_equals_brute_bit_identical() {
+    let r = renderer();
+    let (g0, g1, lights) = gpu_scene();
+    let gas = gpu_gas(&g0, &g1, &lights);
+    let cam = Camera::perspective(
+        Vec3::ZERO,
+        Vec3::new(0.25, 0.15, -1.0),
+        Vec3::Y,
+        Vec2::new(1.2, 0.9),
+        3.5,
+        0.05,
+    );
+    let cfg = |bake| RenderConfig {
+        width: 64,
+        height: 48,
+        falloff: 6.0,
+        shadow_bake: bake,
+        ..RenderConfig::default()
+    };
+    let brute = r
+        .render_frame_with_gas(
+            &FrameData::default(),
+            Some(&gas),
+            &cam,
+            &cfg(ShadowBake::Brute),
+        )
+        .unwrap();
+    let dda = r
+        .render_frame_with_gas(
+            &FrameData::default(),
+            Some(&gas),
+            &cam,
+            &cfg(ShadowBake::Dda),
+        )
+        .unwrap();
+    assert!(
+        brute.total_flux()[0] > 0.0,
+        "scene scattered nothing — degenerate gate"
+    );
+    assert_eq!(
+        brute.pixels, dda.pixels,
+        "GPU DDA bake must render bit-identically to the brute bake"
+    );
 }

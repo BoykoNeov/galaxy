@@ -19,6 +19,7 @@ use wgpu::util::DeviceExt;
 use galaxy_renderprep::FrameData;
 
 use crate::camera::{Camera, Projection};
+use crate::volume::ShadowBake;
 use crate::RenderError;
 
 /// HDR accumulation format: 32-bit float so galaxy cores don't saturate/band (16F
@@ -57,6 +58,13 @@ pub struct RenderConfig {
     /// window is a config error). The `max_splat_ndc` fill-rate guard stays
     /// outermost and saturating.
     pub max_splat_px: f32,
+    /// Per-light shadow-volume bake strategy (the named deferral of
+    /// umbral-lantern-lattice). [`ShadowBake::Brute`] (default) marches every
+    /// voxel chord; [`ShadowBake::Dda`] skips provably-empty spans via a
+    /// hierarchical occupancy — a **bit-identical** result, faster on sparse
+    /// frames. Only consulted when the look actually bakes shadows (scatter live
+    /// + `shadows` on + lights present); otherwise inert.
+    pub shadow_bake: ShadowBake,
 }
 
 impl Default for RenderConfig {
@@ -68,6 +76,7 @@ impl Default for RenderConfig {
             min_splat_px: 1.5,
             max_splat_ndc: 1.0,
             max_splat_px: f32::INFINITY,
+            shadow_bake: ShadowBake::Brute,
         }
     }
 }
@@ -1272,6 +1281,13 @@ impl Renderer {
                 // render_gas_cpu's bake policy, so the oracle stays lockstep.
                 // Off binds a 4-byte dummy the shader never reads (scat.w = 0).
                 let shadows_on = want_shadows && n_lights > 0;
+                // DDA/hierarchical bake option (bit-identical to the brute bake):
+                // build the occupancy pyramid CPU-side and hand it to the GPU
+                // descent. Wired in D5.
+                if shadows_on && cfg.shadow_bake == ShadowBake::Dda {
+                    let _occ = crate::volume::pack_shadow_occupancy(gf);
+                    todo!("D5: GPU DDA shadow bake");
+                }
                 let r3 = (crate::volume::SHADOW_RES as u64).pow(3);
                 let shadow_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("shadow-volumes"),

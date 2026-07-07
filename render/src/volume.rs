@@ -229,18 +229,21 @@ pub fn bake_shadows_with(gas: &GasFrame, bake: ShadowBake) -> ShadowVolumes {
 /// Occupancy-lattice resolution per axis for [`bake_shadows_dda`]: a conservative
 /// boolean grid over the union AABB whose active cells enclose everywhere the
 /// density could be nonzero. A quality/perf **constant** (not a look knob): finer
-/// tightens the skip but adds DDA steps; the hierarchical mip (a later, purely
-/// perf refinement) restores big jumps over a fine base. Bit-exactness is
-/// independent of this value — it only trades build cost against skip precision.
-const SHADOW_OCC_RES: u32 = 64;
+/// tightens the skip but adds DDA steps; the hierarchical mip restores big jumps
+/// over a fine base. Bit-exactness is independent of this value — it only trades
+/// build cost against skip precision. `pub` so the WGSL DDA bake and its buffer
+/// sizing inject it (the GPU mirror consumes the CPU-packed pyramid).
+pub const SHADOW_OCC_RES: u32 = 64;
 
 /// Coarsest level resolution per axis of the occupancy pyramid: the top of the
 /// mip lets a shadow ray crossing a large empty region skip it in ONE coarse
 /// step instead of walking every fine cell. Must divide [`SHADOW_OCC_RES`] by a
 /// power of two (`64 → 32 → 16 → 8 → 4`, five levels). Purely a perf constant —
 /// bit-exactness is level-count-independent (every level is a max-pool of the
-/// base, so an inactive coarse cell still implies exactly-zero density).
-const SHADOW_OCC_COARSEST: u32 = 4;
+/// base, so an inactive coarse cell still implies exactly-zero density). `pub`
+/// so the WGSL DDA descent injects it (the packer and the shader derive the same
+/// per-level offsets from this and [`SHADOW_OCC_RES`]).
+pub const SHADOW_OCC_COARSEST: u32 = 4;
 
 /// One resolution level of the [`Occupancy`] pyramid: a `res³` boolean lattice
 /// over the union AABB, x-fastest.
@@ -429,6 +432,30 @@ fn bake_shadows_dda(gas: &GasFrame) -> ShadowVolumes {
         count: gas.lights.len(),
         data,
     }
+}
+
+/// Pack the shadow-bake occupancy pyramid into a flat `u32` buffer for the GPU
+/// DDA mirror: **coarsest level first**, `res³` cells per level x-fastest, `1` =
+/// active. The WGSL descent derives the identical per-level offsets and
+/// resolutions from [`SHADOW_OCC_COARSEST`] / [`SHADOW_OCC_RES`], and the caller
+/// sizes the storage buffer from this slice's length (never a re-derived
+/// formula).
+///
+/// The GPU consumes this against its OWN density (the uploaded 3-D texture holds
+/// the identical [`GasGrid`] data), and the occupancy stays conservative there:
+/// an inactive cell means no nonzero density cell's ±1 influence overlaps it, so
+/// every point inside it has all eight trilinear-stencil texels zero, so the
+/// shader's `sample_one` returns exactly `0.0` and `κ·0·ds` is a no-op — the same
+/// bit-exact skip as the CPU. (A mismatch between this dilation and the shader's
+/// stencil reach would surface as darkened rims, not a crash — hence the care.)
+pub fn pack_shadow_occupancy(gas: &GasFrame) -> Vec<u32> {
+    let (bmin, bmax) = union_bounds(gas);
+    let occ = Occupancy::build(gas, bmin, bmax);
+    let mut out = Vec::new();
+    for lvl in &occ.levels {
+        out.extend(lvl.active.iter().map(|&a| a as u32));
+    }
+    out
 }
 
 /// [`light_transmittance`] with empty-space skipping over `occ`. It walks the

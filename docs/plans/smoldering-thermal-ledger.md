@@ -113,18 +113,27 @@ code**. A later gated GPU-adiabatic sub-milestone mirrors the G-series.
 ## Session arc — four TDD slices, each a hard gate
 
 ### E1 — EOS enum + `u` column + per-particle pressure/`c_s` + `U_thermal` (`du/dt ≡ 0`, frozen)
-No integrator change yet — the most contained slice.
-- `HydroParams::Eos` enum (`Isothermal { c_s } | Adiabatic { gamma }`), threaded
-  through `forces.rs`/`cfl.rs`.
+No integrator change yet — the most contained slice. Split into two commits:
+
+**E1a — `u` column + snapshot v3 + `U_thermal` — DONE (2026-07-08).**
 - `State.u: Vec<f64>` column: into `assert_consistent`, `from_phase_space`
-  (all `0.0`), a gas-`u` setter; non-gas rows inert `0.0`.
-- Snapshot **v3**: append `u[n]` (f64) after `kind`; reader defaults `u=0.0`
-  for v1/v2 (exact same version-tolerant pattern v2 used for `kind`).
-- `diagnostics::thermal_energy` + `total_energy` includes it.
+  (all `0.0`); threaded through every `State` literal / IC constructor;
+  non-gas rows inert `0.0`.
+- Snapshot **v3**: append `u[n]` (f64) after `kind`; reader gates on version and
+  defaults `u=0.0` for v1/v2 (exact same version-tolerant pattern v2 used for
+  `kind`). Retained pre-energy-equation snapshot zoo still reads.
+- `diagnostics::thermal_energy = Σ mᵢuᵢ`, folded into `total_energy` (inert on
+  the isothermal path where `u≡0` → every existing energy gate numerically
+  unchanged).
+- Gates green: hand-derived `U_thermal`, isothermal `u≡0` invariant,
+  `FORMAT_VERSION==3`, bit-exact `u` round-trip, v1/v2 forward-compat reads.
+
+**E1b — EOS enum + per-particle pressure/`c_s` — TODO (next).**
+- `HydroParams::Eos` enum (`Isothermal { c_s } | Adiabatic { gamma }`), threaded
+  through `forces.rs`/`cfl.rs`; a gas-`u` setter.
 - **Gates:** isothermal path **byte-identical** to pre-E1 (EOS enum default =
   Isothermal, no behavior change); adiabatic `P = (γ−1)ρu` correct on a hand
-  case; a static adiabatic blob (`du/dt` frozen) stays put; snapshot v3
-  round-trips and reads v2 with `u=0`.
+  case; a static adiabatic blob (`du/dt` frozen) stays put.
 
 ### E2 — `du/dt` PdV work + thermal integrator (no shocks)
 - `accel_and_dudt` fused pass; PdV term only (viscous heating in E3).

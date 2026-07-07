@@ -1150,6 +1150,11 @@ fn run_movie(
             levels: DEFAULT_BLOOM_LEVELS,
             radius: DEFAULT_BLOOM_RADIUS,
         }),
+        // Baked local tonemap ([look.local_tone]): the same spatial blob-relief the
+        // `regrade --local` A/B settled on, now part of the movie grade instead of a
+        // separate regrade pass. `None` (any scenario without the section) is
+        // bit-identical to the pre-tonemap grade.
+        local: s.local_tone,
         ..GradeConfig::default()
     };
     let renderer = Renderer::new()?;

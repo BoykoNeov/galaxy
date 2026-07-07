@@ -18,17 +18,17 @@
 use serde::Deserialize;
 
 use galaxy_core::State;
+use galaxy_grade::LocalToneConfig;
 use galaxy_ic::{
     DiskCollision, ExponentialDisk, Nfw, NfwCollision, Orientation, Plummer, SphericalHalo,
     TruncatedNfw,
 };
-use galaxy_grade::LocalToneConfig;
 use galaxy_render::ShadowBake;
 use galaxy_renderprep::{ColorMode, DensityColoring, PrepConfig, SizeByDensity};
 
 use crate::{
-    DENSITY_K, DENSITY_STRENGTH, FRAME_H, FRAME_W, G, PEAK_BRIGHTNESS, QUICK_H, QUICK_W,
-    SIZE_MAX_FRAC, SIZE_MIN_FRAC, SUBFRAMES,
+    DEFAULT_LOCAL_FLOOR, DEFAULT_LOCAL_RADIUS, DENSITY_K, DENSITY_STRENGTH, FRAME_H, FRAME_W, G,
+    PEAK_BRIGHTNESS, QUICK_H, QUICK_W, SIZE_MAX_FRAC, SIZE_MIN_FRAC, SUBFRAMES,
 };
 
 /// A parsed, validated scenario description — everything a movie needs that is
@@ -825,6 +825,36 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
         (None, _) => {}
     }
 
+    // Local tone compression ([look.local_tone], render-more-controls): a GRADE
+    // knob (whole-frame, applied to the linear HDR before the tone curve), NOT a
+    // gas knob — so it is NOT gated on scattering/gas the way [look.gas] is. Mirror
+    // `GradeConfig::validate` at parse time so a bad knob fails with a scenario
+    // message, not deep in the grade stage: strength finite & > 0 (a declared 0 is
+    // a bit-exact no-op — reject it, absence already means "off"), radius finite &
+    // > 0, floor finite & in [0, 1].
+    if let Some(lt) = &s.look.local_tone {
+        if !(lt.strength.is_finite() && lt.strength > 0.0) {
+            return Err(format!(
+                "look.local_tone strength must be finite and > 0 (absence means off), got {}",
+                lt.strength
+            ));
+        }
+        if let Some(r) = lt.radius {
+            if !(r.is_finite() && r > 0.0) {
+                return Err(format!(
+                    "look.local_tone radius must be finite and > 0 (pixels), got {r}"
+                ));
+            }
+        }
+        if let Some(f) = lt.floor {
+            if !(f.is_finite() && (0.0..=1.0).contains(&f)) {
+                return Err(format!(
+                    "look.local_tone floor must be finite and in [0, 1], got {f}"
+                ));
+            }
+        }
+    }
+
     // Rig.
     match &s.rig {
         RigSpec::Static => {}
@@ -1231,8 +1261,16 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
             .and_then(|g| g.shadow_bake)
             .map(Into::into)
             .unwrap_or_default(),
-        // Local tonemap ([look.local_tone]): resolved in the green pass.
-        local_tone: None,
+        // Local tonemap ([look.local_tone], render-more-controls): the runtime
+        // `LocalToneConfig` the movie grade bakes, or `None` when omitted. Not
+        // gas-gated (a whole-frame grade knob), so it resolves independently of
+        // `sound_speed`. `radius`/`floor` default to the same constants the
+        // `regrade --local` CLI uses, so `strength = k` reproduces `--local k`.
+        local_tone: spec.look.local_tone.map(|lt| LocalToneConfig {
+            strength: lt.strength,
+            radius: lt.radius.unwrap_or(DEFAULT_LOCAL_RADIUS),
+            floor: lt.floor.unwrap_or(DEFAULT_LOCAL_FLOOR),
+        }),
         info,
     }
 }
@@ -2147,8 +2185,10 @@ mod tests {
         }
         // radius: finite and > 0.
         for bad_val in ["0.0", "-4.0", "nan"] {
-            let bad =
-                gasrich.replace("strength = 2.0", &format!("strength = 2.0\nradius = {bad_val}"));
+            let bad = gasrich.replace(
+                "strength = 2.0",
+                &format!("strength = 2.0\nradius = {bad_val}"),
+            );
             assert!(
                 parse_scenario_toml(&bad).is_err(),
                 "look.local_tone radius = {bad_val} must be rejected"
@@ -2156,8 +2196,10 @@ mod tests {
         }
         // floor: finite and in [0, 1].
         for bad_val in ["-0.1", "1.5", "nan"] {
-            let bad =
-                gasrich.replace("strength = 2.0", &format!("strength = 2.0\nfloor = {bad_val}"));
+            let bad = gasrich.replace(
+                "strength = 2.0",
+                &format!("strength = 2.0\nfloor = {bad_val}"),
+            );
             assert!(
                 parse_scenario_toml(&bad).is_err(),
                 "look.local_tone floor = {bad_val} must be rejected"

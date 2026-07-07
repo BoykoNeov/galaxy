@@ -239,9 +239,18 @@ late-time positions — N-body is chaotic).
     preserved; `g ≤ 1` ⇒ never brightens; `floor` bounds the dark-halo ring).
     Deliberately **spatial, not temporal** (no per-frame luminance key — one grade
     regrades a whole sequence without exposure pumping). `local: None` (the default)
-    is bit-identical; ships **opt-in**, not baked into a preset (the blob fix is
-    tuned jointly with the `max_splat_px` and scatter-σ levers). A/B verified on the
-    approach blob (`frame_00120`): resolves the core into colored stars, halo-free.
+    is bit-identical. Beyond the regrade CLI it is a **baked movie knob** via a
+    `[look.local_tone]` grade section on the scenario (whole-frame, so it sits beside
+    `[look.gas]` under `[look]` but is *not* gas-gated); the movie pipeline drops it
+    verbatim into `GradeConfig::local`, so a preset ships the exact tonemap its A/B
+    settled on with no separate regrade pass. **gasrich ships `strength = 2.0`**
+    (radius/floor at the CLI defaults 32 px / 0.2 — "s2"), the winner of the
+    frame-by-frame render-tune A/B: it resolves the approach blob into colored stars
+    while keeping `max_splat_px` at 2.0 (relaxing the cap only *defocused* the stars
+    for no gain) and `REFINE_TOL` at 1e-2. Confirm-render gate: a QUICK movie through
+    `run_movie` with the baked knob is **byte-identical** (481/481 frames) to the
+    approved `regrade --local 2` output. `radius` is resolution-literal (pixels; a
+    FULL 1080p render wants ~3× the QUICK value, like `max_splat_px`).
   - **Accuracy of the "tidal-tail" goal:** classic thin Toomre tails come from
     *rotating, dynamically cold disks* (coherent disk angular momentum, resonantly
     amplified in a prograde passage). The current IC samples two **isotropic,

@@ -7,6 +7,7 @@ pub mod spec;
 
 use std::path::PathBuf;
 
+use crate::simulate::Backend;
 use galaxy_grade::{BloomConfig, GradeConfig, LocalToneConfig, ToneMap};
 use galaxy_renderprep::FrameData;
 use glam::Vec3;
@@ -100,6 +101,9 @@ pub struct MovieArgs {
     /// Skip the simulation and read existing `snapshots/*.snap` under the out dir
     /// (errors downstream if none exist — reuse is an explicit promise).
     pub reuse_snapshots: bool,
+    /// Which force backend runs the gas-rich simulate step (`--gpu` ⇒ the GPU-resident
+    /// SPH stepper, G6). Ignored for a gas-free scenario (always CPU Barnes-Hut).
+    pub backend: Backend,
 }
 
 /// Map movie CLI arguments (everything except a leading `regrade`) to a
@@ -116,6 +120,7 @@ pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut color = ColorModeArg::default();
     let mut reuse_snapshots = false;
+    let mut backend = Backend::default();
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -136,9 +141,10 @@ pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
                 };
             }
             "--reuse-snapshots" => reuse_snapshots = true,
+            "--gpu" => backend = Backend::Gpu,
             flag if flag.starts_with("--") => {
                 return Err(format!(
-                    "unknown flag `{flag}` (expected --color, --reuse-snapshots)"
+                    "unknown flag `{flag}` (expected --color, --reuse-snapshots, --gpu)"
                 ));
             }
             positional => positionals.push(positional),
@@ -171,6 +177,7 @@ pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
         out_dir: out_dir.map(PathBuf::from),
         color,
         reuse_snapshots,
+        backend,
     })
 }
 
@@ -897,6 +904,7 @@ mod tests {
                 out_dir: None,
                 color: ColorModeArg::Progenitor,
                 reuse_snapshots: false,
+                backend: Backend::Cpu,
             }
         );
     }

@@ -6,7 +6,8 @@
 //! `bullseye`, `minor`) — or any user toml on the same schema (see `spec`).
 //!
 //! Usage: `cargo run -p galaxy-xtask --release [<preset>|<scenario.toml>] [out_dir]
-//! [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]`
+//! [--color progenitor|initial-radius|dispersion] [--reuse-snapshots] [--gpu]`
+//! (`--gpu` runs the gas-rich sim on the GPU-resident SPH stepper, G6.)
 //!   * A bare first arg that is no preset name (and not a `.toml` path) is taken as
 //!     `out_dir` with the `disk` scenario (back-compat with the original CLI).
 //!   * `regrade <exr_dir> <png_dir> [--exposure E] [--tonemap aces|reinhard|asinh]
@@ -148,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let movie = parse_movie_args(&args).map_err(|e| {
         format!(
             "{e}\nusage: [<preset>|<scenario.toml>] [out_dir] \
-             [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]"
+             [--color progenitor|initial-radius|dispersion] [--reuse-snapshots] [--gpu]"
         )
     })?;
     let spec: ScenarioSpec = match &movie.scenario {
@@ -183,7 +184,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scenario = build_scenario(&spec, quick);
     println!("{}", scenario.info);
-    run_movie(&scenario, &out, movie.color, movie.reuse_snapshots)
+    run_movie(
+        &scenario,
+        &out,
+        movie.color,
+        movie.reuse_snapshots,
+        movie.backend,
+    )
 }
 
 /// The M6a look loop: re-grade a directory of retained linear-HDR EXRs into PNGs
@@ -935,6 +942,7 @@ fn run_movie(
     out: &Path,
     color: ColorModeArg,
     reuse_snapshots: bool,
+    backend: galaxy_xtask::simulate::Backend,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let snap_dir = out.join("snapshots");
     let exr_dir = out.join("exr");
@@ -951,7 +959,7 @@ fn run_movie(
         // the scenario carries gas — with the fixed dt validated against the hydro
         // CFL bound at t=0 before the first snapshot.
         let t_sim = std::time::Instant::now();
-        let summary = simulate_snapshots(s, &snap_dir, galaxy_xtask::simulate::Backend::Cpu)?;
+        let summary = simulate_snapshots(s, &snap_dir, backend)?;
         println!(
             "simulated {} steps → {} snapshots (t_final = {:.2}) in {:.1} s",
             summary.steps,

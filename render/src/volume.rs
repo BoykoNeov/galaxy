@@ -234,39 +234,90 @@ pub fn bake_shadows_with(gas: &GasFrame, bake: ShadowBake) -> ShadowVolumes {
 /// independent of this value — it only trades build cost against skip precision.
 const SHADOW_OCC_RES: u32 = 64;
 
-/// A conservative empty-space acceleration structure for the shadow bake: a
-/// [`SHADOW_OCC_RES`]³ boolean lattice over the union AABB where `active[c]` is
-/// `true` for every cell in which [`density_at`] could be nonzero. It is
-/// deliberately **over-inclusive** — a cell may be active where the density is
-/// actually zero (harmless: the march evaluates it and adds `κ·0·ds = 0`) — but
-/// never **under-inclusive**: a sample with nonzero density always falls in an
-/// active cell, which is what makes the DDA skip bit-exact.
-struct Occupancy {
-    /// Lattice minimum (the union AABB min — shared with the shadow lattice).
-    bmin: Vec3,
-    /// World-space occupancy cell edge lengths (`extent / SHADOW_OCC_RES`).
+/// Coarsest level resolution per axis of the occupancy pyramid: the top of the
+/// mip lets a shadow ray crossing a large empty region skip it in ONE coarse
+/// step instead of walking every fine cell. Must divide [`SHADOW_OCC_RES`] by a
+/// power of two (`64 → 32 → 16 → 8 → 4`, five levels). Purely a perf constant —
+/// bit-exactness is level-count-independent (every level is a max-pool of the
+/// base, so an inactive coarse cell still implies exactly-zero density).
+const SHADOW_OCC_COARSEST: u32 = 4;
+
+/// One resolution level of the [`Occupancy`] pyramid: a `res³` boolean lattice
+/// over the union AABB, x-fastest.
+struct OccLevel {
+    res: u32,
+    /// World-space cell edge lengths (`extent / res`).
     cell: Vec3,
     /// `1 / cell`, cached for the point → index map.
     inv_cell: Vec3,
-    /// `SHADOW_OCC_RES³` flags, x-fastest (`active[(cz·R + cy)·R + cx]`).
     active: Vec<bool>,
 }
 
+impl OccLevel {
+    /// Integer cell index of world point `p`, clamped to `[0, res)` (the march
+    /// only samples inside the clipped chord, i.e. inside the AABB up to float
+    /// slop at the faces).
+    fn cell_of(&self, p: Vec3, bmin: Vec3) -> [usize; 3] {
+        let c = ((p - bmin) * self.inv_cell).floor();
+        let m = (self.res - 1) as usize;
+        let ax = |v: f32| (v.max(0.0) as usize).min(m);
+        [ax(c.x), ax(c.y), ax(c.z)]
+    }
+
+    fn is_active(&self, cell: [usize; 3]) -> bool {
+        let r = self.res as usize;
+        self.active[(cell[2] * r + cell[1]) * r + cell[0]]
+    }
+
+    /// Arc-length parameter (from `origin`, `dir` unit) at which the ray leaves
+    /// `cell` — the nearest exit face. Axes with `|dir| < 1e-12` never cross (∞).
+    fn cell_exit(&self, cell: [usize; 3], bmin: Vec3, origin: Vec3, dir: Vec3) -> f32 {
+        let cmin = bmin + Vec3::new(cell[0] as f32, cell[1] as f32, cell[2] as f32) * self.cell;
+        let cmax = cmin + self.cell;
+        let mut s = f32::INFINITY;
+        for a in 0..3 {
+            if dir[a].abs() < 1e-12 {
+                continue;
+            }
+            let boundary = if dir[a] > 0.0 { cmax[a] } else { cmin[a] };
+            s = s.min((boundary - origin[a]) / dir[a]);
+        }
+        s
+    }
+}
+
+/// A conservative HIERARCHICAL empty-space acceleration structure for the shadow
+/// bake: a mip pyramid of boolean lattices over the union AABB (coarsest first,
+/// finest = [`SHADOW_OCC_RES`]³ last), where an active cell encloses everywhere
+/// [`density_at`] could be nonzero. The base is deliberately **over-inclusive**
+/// — a cell may be active where the density is actually zero (harmless: the
+/// march evaluates it and adds `κ·0·ds = 0`) — but never **under-inclusive**: a
+/// sample with nonzero density always falls in an active base cell, and every
+/// coarse level is a max-pool of the base, so an inactive coarse cell still
+/// implies all its fine children (and hence the density everywhere within) are
+/// zero. That is what makes the hierarchical DDA skip bit-exact.
+struct Occupancy {
+    /// Lattice minimum (the union AABB min — shared with the shadow lattice).
+    bmin: Vec3,
+    /// Pyramid levels, COARSEST first, finest (`SHADOW_OCC_RES`) last.
+    levels: Vec<OccLevel>,
+}
+
 impl Occupancy {
-    /// Build the occupancy over `[bmin, bmax]` by splatting each nonzero density
-    /// cell's *influence region* — the cell center ± one cell edge, the exact
-    /// reach of the trilinear stencil (a point in geometric cell `i` reads
+    /// Build the base occupancy over `[bmin, bmax]` by splatting each nonzero
+    /// density cell's *influence region* — the cell center ± one cell edge, the
+    /// exact reach of the trilinear stencil (a point in geometric cell `i` reads
     /// centers `{i−1, i, i+1}`, so a nonzero center can raise the density
-    /// anywhere within ±one cell) — into every occupancy cell it overlaps. The
-    /// two endpoint grids are unioned, and a grid weighted exactly zero by the
-    /// mix (`u = 0` drops grid1, `u = 1` drops grid0) is skipped since it cannot
-    /// affect the density. This ±1-cell dilation is the whole correctness
-    /// argument: it guarantees no nonzero sample is ever skipped.
+    /// anywhere within ±one cell) — into every occupancy cell it overlaps, then
+    /// max-pool it up to [`SHADOW_OCC_COARSEST`]. The two endpoint grids are
+    /// unioned, and a grid weighted exactly zero by the mix (`u = 0` drops
+    /// grid1, `u = 1` drops grid0) is skipped since it cannot affect the density.
+    /// The ±1-cell dilation is the whole correctness argument: it guarantees no
+    /// nonzero sample is ever skipped.
     fn build(gas: &GasFrame, bmin: Vec3, bmax: Vec3) -> Occupancy {
         let r = SHADOW_OCC_RES as usize;
-        let cell = (bmax - bmin) / Vec3::splat(SHADOW_OCC_RES as f32);
-        let inv_cell = Vec3::ONE / cell;
-        let mut active = vec![false; r * r * r];
+        let inv_cell = Vec3::ONE / ((bmax - bmin) / Vec3::splat(SHADOW_OCC_RES as f32));
+        let mut base = vec![false; r * r * r];
 
         let mut mark_grid = |g: &GasGrid| {
             let gcell = g.cell_size().as_vec3();
@@ -290,7 +341,7 @@ impl Occupancy {
                         for cz in z0..=z1 {
                             for cy in y0..=y1 {
                                 for cx in x0..=x1 {
-                                    active[(cz * r + cy) * r + cx] = true;
+                                    base[(cz * r + cy) * r + cx] = true;
                                 }
                             }
                         }
@@ -305,46 +356,46 @@ impl Occupancy {
         if gas.mix != 0.0 {
             mark_grid(gas.grid1);
         }
-        Occupancy {
-            bmin,
-            cell,
-            inv_cell,
-            active,
-        }
-    }
 
-    /// Integer occupancy-cell index of world point `p`, clamped to the lattice
-    /// (the march only samples inside the clipped chord, i.e. inside the AABB up
-    /// to float slop at the faces).
-    fn cell_of(&self, p: Vec3) -> [usize; 3] {
-        let c = ((p - self.bmin) * self.inv_cell).floor();
-        let r = SHADOW_OCC_RES as usize;
-        let ax = |v: f32| (v.max(0.0) as usize).min(r - 1);
-        [ax(c.x), ax(c.y), ax(c.z)]
-    }
-
-    fn is_active(&self, cell: [usize; 3]) -> bool {
-        let r = SHADOW_OCC_RES as usize;
-        self.active[(cell[2] * r + cell[1]) * r + cell[0]]
-    }
-
-    /// Arc-length parameter (from `origin`, `dir` unit) at which the ray leaves
-    /// occupancy `cell` — the nearest exit face. Axes with `|dir| < 1e-12` never
-    /// cross (∞). Always `≥` the entry parameter; the caller's progress guard
-    /// covers the degenerate float case.
-    fn cell_exit(&self, cell: [usize; 3], origin: Vec3, dir: Vec3) -> f32 {
-        let cmin =
-            self.bmin + Vec3::new(cell[0] as f32, cell[1] as f32, cell[2] as f32) * self.cell;
-        let cmax = cmin + self.cell;
-        let mut s = f32::INFINITY;
-        for a in 0..3 {
-            if dir[a].abs() < 1e-12 {
-                continue;
+        let level = |res: u32, active: Vec<bool>| {
+            let cell = (bmax - bmin) / Vec3::splat(res as f32);
+            OccLevel {
+                res,
+                cell,
+                inv_cell: Vec3::ONE / cell,
+                active,
             }
-            let boundary = if dir[a] > 0.0 { cmax[a] } else { cmin[a] };
-            s = s.min((boundary - origin[a]) / dir[a]);
+        };
+        // Fine → coarse: each coarser level is the 2³ OR-pool of the finer one.
+        let mut levels = vec![level(SHADOW_OCC_RES, base)];
+        while levels.last().unwrap().res > SHADOW_OCC_COARSEST {
+            let finer = levels.last().unwrap();
+            let fr = finer.res as usize;
+            let cr = fr / 2;
+            let mut coarse = vec![false; cr * cr * cr];
+            for cz in 0..cr {
+                for cy in 0..cr {
+                    for cx in 0..cr {
+                        let mut any = false;
+                        'pool: for dz in 0..2 {
+                            for dy in 0..2 {
+                                for dx in 0..2 {
+                                    let (fx, fy, fz) = (cx * 2 + dx, cy * 2 + dy, cz * 2 + dz);
+                                    if finer.active[(fz * fr + fy) * fr + fx] {
+                                        any = true;
+                                        break 'pool;
+                                    }
+                                }
+                            }
+                        }
+                        coarse[(cz * cr + cy) * cr + cx] = any;
+                    }
+                }
+            }
+            levels.push(level(cr as u32, coarse));
         }
-        s
+        levels.reverse(); // coarsest first for the descent
+        Occupancy { bmin, levels }
     }
 }
 
@@ -418,19 +469,28 @@ fn light_transmittance_dda(
         // is bit-identical to the reference's.
         let s = t0 + (i as f32 + 0.5) * ds;
         let p = light + dir * s;
-        let cell = occ.cell_of(p);
-        if occ.is_active(cell) {
+        // Descend the pyramid coarsest → finest: the first inactive level jumps
+        // across its (as-large-as-possible) empty cell; reaching the finest
+        // level still active means a real occupied sample to evaluate.
+        let mut jumped = false;
+        for lvl in &occ.levels {
+            let cell = lvl.cell_of(p, occ.bmin);
+            if !lvl.is_active(cell) {
+                // Inactive cell: every sample within it is a zero addend. Jump to
+                // the first sample at/after the cell exit. The `−1` sample of
+                // margin (re-classified next iteration) keeps a boundary sample —
+                // which a float-ε over-estimate of the exit could otherwise
+                // mis-skip — on the safe side; `max(i+1, …)` guarantees progress.
+                let s_exit = lvl.cell_exit(cell, occ.bmin, light, dir);
+                let jump = ((s_exit - t0) / ds - 0.5).ceil() as i64 - 1;
+                i = ((i as i64 + 1).max(jump).min(n as i64)) as u32;
+                jumped = true;
+                break;
+            }
+        }
+        if !jumped {
             tau += gas.look.opacity * density_at(gas, p) * ds;
             i += 1;
-        } else {
-            // Inactive cell: every sample within it is a zero addend. Jump to the
-            // first sample at/after the cell exit. The `−1` sample of margin
-            // (re-classified next iteration) keeps a boundary sample — which a
-            // float-ε over-estimate of the exit could otherwise mis-skip — on the
-            // safe side; `max(i+1, …)` guarantees forward progress.
-            let s_exit = occ.cell_exit(cell, light, dir);
-            let jump = ((s_exit - t0) / ds - 0.5).ceil() as i64 - 1;
-            i = ((i as i64 + 1).max(jump).min(n as i64)) as u32;
         }
     }
     (-tau).exp()

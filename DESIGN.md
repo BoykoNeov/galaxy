@@ -81,7 +81,13 @@ cosmological expansion (10^8 particles, comoving integration).
   step rule, trilinearly sampled in the march (clamp-to-edge, no zero-outside:
   a transmittance has no natural zero). Camera-independent per-frame data
   (D9-safe), nothing baked into the ρ grid (D8); `shadows` off is gated
-  bit-identical to the unshadowed v1 scatter.
+  bit-identical to the unshadowed v1 scatter. The bake has two strategies
+  (`[look.gas] shadow_bake`, plan `hollow-lantern-stride`): the default `brute`
+  march, and `dda` — a hierarchical empty-space skip over an occupancy pyramid
+  that is **bit-identical** to brute (skipped samples fall in provably-zero
+  density, so `κ·0·ds` is a no-op) and 2–8× faster on the sparse frames the
+  galaxy actually produces. CPU reference + WGSL mirror; the equivalence is the
+  gate, so the mip is pure perf with no new correctness surface.
 
 ## Architecture: 3-stage offline pipeline
 

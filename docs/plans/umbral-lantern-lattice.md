@@ -147,7 +147,12 @@ when the knob is on.
 
 ## Deferrals (named)
 
-- DDA / hierarchical bake acceleration (the brute march is the reference).
+- ~~DDA / hierarchical bake acceleration (the brute march is the reference).~~
+  **DONE** — see `docs/plans/hollow-lantern-stride.md`. `ShadowBake::Dda`
+  skips provably-empty spans over a hierarchical occupancy pyramid,
+  bit-identical to the brute reference (the equivalence gate); CPU + WGSL
+  mirror, `[look.gas].shadow_bake = "dda"` opt-in. Measured 2–8× depending
+  on sparsity.
 - Hardware-filtered shadow lookups (manual trilinear keeps GPU ≡ CPU exact).
 - Per-channel κ / colored shadows.
 - Octree light clustering and scatter tint (inherited from v1).

@@ -197,6 +197,43 @@ pub fn bake_shadows(gas: &GasFrame) -> ShadowVolumes {
     }
 }
 
+/// Traversal strategy for the shadow bake (plan: DDA/hierarchical acceleration,
+/// the named deferral of umbral-lantern-lattice). Both strategies produce a
+/// **bit-identical** [`ShadowVolumes`]: [`ShadowBake::Dda`] is a pure speedup
+/// that skips only samples it can prove add exactly `κ·0·ds = 0` to τ — the
+/// density field is trilinear over deposited grids and returns exactly `0.0`
+/// outside particle support, so adding those zeros is a float no-op and the two
+/// bakes coincide to the last bit (the equivalence gate). [`ShadowBake::Brute`]
+/// is the reference oracle: every sample of every chord evaluated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ShadowBake {
+    /// Evaluate every sample of the uniform chord lattice — the reference.
+    #[default]
+    Brute,
+    /// Hierarchical empty-space skipping over a conservative occupancy grid;
+    /// bit-identical to [`ShadowBake::Brute`], faster on sparse frames.
+    Dda,
+}
+
+/// [`bake_shadows`] with a selectable traversal [`ShadowBake`]. The `Brute` arm
+/// is [`bake_shadows`] verbatim (the reference); the `Dda` arm skips
+/// provably-empty samples for the same result. Callers plumb the strategy from
+/// the look/xtask; production keeps `Brute` as the default via [`bake_shadows`].
+pub fn bake_shadows_with(gas: &GasFrame, bake: ShadowBake) -> ShadowVolumes {
+    match bake {
+        ShadowBake::Brute => bake_shadows(gas),
+        ShadowBake::Dda => bake_shadows_dda(gas),
+    }
+}
+
+/// The DDA/hierarchical accelerated bake: identical `ShadowVolumes` to
+/// [`bake_shadows`], computed by skipping samples in provably-empty occupancy
+/// cells. Bit-exact — the equivalence gate is `assert_eq!(bake_shadows(gas),
+/// bake_shadows_dda(gas))`.
+fn bake_shadows_dda(_gas: &GasFrame) -> ShadowVolumes {
+    todo!("D2: DDA/hierarchical shadow bake")
+}
+
 /// One shadow chord: `T = exp(−τ)` over the light → voxel-center segment,
 /// clipped to the union AABB and truncated at the voxel — the bake's per-voxel
 /// kernel ([`star_transmittance`]'s operation order: τ summed from the light

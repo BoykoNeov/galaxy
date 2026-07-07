@@ -25,6 +25,7 @@ fn sample_state() -> State {
         id: vec![ParticleId(0), ParticleId(1), ParticleId(2)],
         progenitor: vec![Progenitor(0), Progenitor(1), Progenitor(0)],
         kind: vec![Species::Collisionless; 3],
+        u: vec![0.0; 3],
         time: 5.0,
         a: 1.0,
     }
@@ -121,6 +122,7 @@ fn clustered_state() -> State {
         id: (0..n as u64).map(ParticleId).collect(),
         progenitor: vec![Progenitor(0); n],
         kind: vec![Species::Collisionless; n],
+        u: vec![0.0; n],
         time: 0.0,
         a: 1.0,
         pos,
@@ -203,6 +205,7 @@ fn density_tiny_state_does_not_panic() {
         id: vec![ParticleId(0), ParticleId(1)],
         progenitor: vec![Progenitor(0); 2],
         kind: vec![Species::Collisionless; 2],
+        u: vec![0.0; 2],
         time: 0.0,
         a: 1.0,
     };
@@ -292,6 +295,7 @@ fn two_temperature_state() -> State {
         id: (0..6).map(ParticleId).collect(),
         progenitor: vec![Progenitor(0); 6],
         kind: vec![Species::Collisionless; 6],
+        u: vec![0.0; 6],
         time: 0.0,
         a: 1.0,
         pos,
@@ -386,6 +390,7 @@ fn compression_hue_shifts_only_the_compressed_clump() {
         id: (0..8).map(ParticleId).collect(),
         progenitor: vec![Progenitor(0); 8],
         kind: vec![Species::Collisionless; 8],
+        u: vec![0.0; 8],
         time: 0.0,
         a: 1.0,
         pos,
@@ -496,6 +501,7 @@ fn mixed_species_state() -> State {
             Species::Gas,
             Species::Collisionless,
         ],
+        u: vec![0.0; 5],
         time: 5.0,
         a: 1.0,
     }

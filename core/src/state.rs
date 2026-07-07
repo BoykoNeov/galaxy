@@ -33,6 +33,15 @@ pub struct State {
     pub id: Vec<ParticleId>,
     pub progenitor: Vec<Progenitor>,
     pub kind: Vec<Species>,
+    /// Per-particle specific internal energy `u` (energy per unit mass), the
+    /// EVOLVED thermodynamic variable of the adiabatic SPH path (energy
+    /// equation, Chain A). Distinct in kind from the derived-never-stored h/ρ
+    /// (D2): `u` has its own time derivative and is integrated forward, so it is
+    /// a genuine state variable and MUST live here. `0.0` on collisionless rows
+    /// (gravity-only particles carry no internal energy) and throughout the
+    /// isothermal path, where the EOS fixes pressure from ρ alone and `u` is
+    /// inert. Length `n`, like every other column.
+    pub u: Vec<f64>,
     pub time: f64,
     pub a: f64,
 }
@@ -61,6 +70,7 @@ impl State {
             id: (0..n as u64).map(ParticleId).collect(),
             progenitor: vec![Progenitor(0); n],
             kind: vec![Species::Collisionless; n],
+            u: vec![0.0; n],
             time: 0.0,
             a: 1.0,
         }
@@ -74,5 +84,6 @@ impl State {
         assert_eq!(self.id.len(), n, "id length mismatch");
         assert_eq!(self.progenitor.len(), n, "progenitor length mismatch");
         assert_eq!(self.kind.len(), n, "kind length mismatch");
+        assert_eq!(self.u.len(), n, "u length mismatch");
     }
 }

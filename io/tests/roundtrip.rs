@@ -36,6 +36,10 @@ fn sample_state() -> State {
         id: vec![ParticleId(10), ParticleId(20), ParticleId(30)],
         progenitor: vec![Progenitor(0), Progenitor(1), Progenitor(0)],
         kind: vec![Species::Collisionless, Species::Gas, Species::Collisionless],
+        // Distinct nonzero internal energies so a dropped/zeroed `u` column
+        // cannot pass the round-trip; the middle (gas) slot carries the value a
+        // real adiabatic run would, the others exercise the column as storage.
+        u: vec![2.5, 4.0 / 3.0, -0.75],
         time: 12.5,
         a: 1.0,
     }
@@ -205,15 +209,18 @@ fn round_trip_preserves_species() {
     assert_eq!(back.kind, state.kind, "species column did not round-trip");
 }
 
-/// The writer always emits the current format version (2 as of M7a).
+/// The writer always emits the current format version (3 as of the energy eq).
 #[test]
-fn writer_emits_format_version_2() {
+fn writer_emits_format_version_3() {
     let state = sample_state();
     let header = sample_header(&state);
     let mut buf = Vec::new();
     snapshot::to_writer(&mut buf, &header, &state).unwrap();
 
-    assert_eq!(FORMAT_VERSION, 2, "M7a bumps the snapshot format to v2");
+    assert_eq!(
+        FORMAT_VERSION, 3,
+        "the energy equation bumps the snapshot format to v3"
+    );
     let version = u32::from_le_bytes(buf[8..12].try_into().unwrap());
     assert_eq!(version, FORMAT_VERSION, "on-disk version != FORMAT_VERSION");
 }
@@ -312,5 +319,118 @@ fn invalid_species_byte_is_rejected() {
     assert!(
         matches!(err, SnapshotError::Corrupt(_)),
         "expected Corrupt for an unknown species byte, got {err:?}"
+    );
+}
+
+// ---------- format v3: the internal-energy column (energy equation) ----------
+
+/// v3 must round-trip the `u` column bit-exactly (it is stored full f64, unlike
+/// the lossy f32 `mass`, because it feeds the total-energy conservation gate).
+/// `sample_state` carries distinct nonzero `u` so a dropped/zeroed column fails.
+#[test]
+fn round_trip_preserves_internal_energy() {
+    let state = sample_state();
+    let header = sample_header(&state);
+
+    let mut buf = Vec::new();
+    snapshot::to_writer(&mut buf, &header, &state).unwrap();
+    let (_, back) = snapshot::from_reader(&mut Cursor::new(&buf)).unwrap();
+
+    assert_eq!(
+        back.u, state.u,
+        "internal-energy column did not round-trip (bit-exact f64)"
+    );
+}
+
+/// Serialize a state in the FROZEN v2 layout (kind column, but no `u`). Like
+/// `v1_bytes`, an independent re-implementation that pins the bytes a v2 file
+/// actually contains — the retained gas-era snapshots predate the energy eq.
+fn v2_bytes(header: &Header, state: &State) -> Vec<u8> {
+    let mut b = Vec::new();
+    let put_str = |b: &mut Vec<u8>, s: &str| {
+        b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        b.extend_from_slice(s.as_bytes());
+    };
+    b.extend_from_slice(&MAGIC);
+    b.extend_from_slice(&2u32.to_le_bytes()); // v2, frozen forever
+    b.extend_from_slice(&header.time.to_le_bytes());
+    b.extend_from_slice(&header.step.to_le_bytes());
+    b.extend_from_slice(&header.scale_factor.to_le_bytes());
+    b.extend_from_slice(&header.softening.to_le_bytes());
+    b.extend_from_slice(&(state.len() as u64).to_le_bytes());
+    b.extend_from_slice(&header.rng_seed.to_le_bytes());
+    b.extend_from_slice(&header.config_hash.to_le_bytes());
+    put_str(&mut b, &header.units);
+    put_str(&mut b, &header.code_version);
+    for p in &state.pos {
+        for c in [p.x, p.y, p.z] {
+            b.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    for v in &state.vel {
+        for c in [v.x, v.y, v.z] {
+            b.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    for &m in &state.mass {
+        b.extend_from_slice(&(m as f32).to_le_bytes());
+    }
+    for id in &state.id {
+        b.extend_from_slice(&id.0.to_le_bytes());
+    }
+    for pr in &state.progenitor {
+        b.extend_from_slice(&pr.0.to_le_bytes());
+    }
+    for k in &state.kind {
+        b.push(*k as u8);
+    }
+    b
+}
+
+/// A v2 stream (the retained gas-era snapshots) must still read after the v3
+/// bump, with every particle defaulted to `u = 0.0` — the inert isothermal value.
+#[test]
+fn v2_stream_reads_with_zero_internal_energy() {
+    let state = sample_state();
+    let header = sample_header(&state);
+    let bytes = v2_bytes(&header, &state);
+
+    let (back_h, back) = snapshot::from_reader(&mut Cursor::new(&bytes))
+        .expect("v2 must remain readable after the v3 bump");
+    assert_eq!(back_h, header);
+    assert_eq!(back.kind, state.kind, "v2 kind column must still round-trip");
+    assert_eq!(
+        back.u,
+        vec![0.0; state.len()],
+        "v2 particles must default to u = 0"
+    );
+}
+
+/// A v1 stream defaults `u = 0` too (belt-and-suspenders with the collisionless
+/// default): v1 predates both gas and the energy equation.
+#[test]
+fn v1_stream_defaults_zero_internal_energy() {
+    let state = sample_state();
+    let header = sample_header(&state);
+    let bytes = v1_bytes(&header, &state);
+
+    let (_, back) = snapshot::from_reader(&mut Cursor::new(&bytes))
+        .expect("v1 must remain readable");
+    assert_eq!(back.u, vec![0.0; state.len()], "v1 must default u = 0");
+}
+
+/// A truncated v3 `u` column errors, never panics or reads garbage.
+#[test]
+fn truncated_internal_energy_column_is_an_error() {
+    let state = sample_state();
+    let header = sample_header(&state);
+    let mut buf = Vec::new();
+    snapshot::to_writer(&mut buf, &header, &state).unwrap();
+
+    // Drop the final byte: the last particle's `u` is now short.
+    buf.truncate(buf.len() - 1);
+    assert!(
+        snapshot::from_reader(&mut Cursor::new(&buf)).is_err(),
+        "a truncated internal-energy column must error"
     );
 }

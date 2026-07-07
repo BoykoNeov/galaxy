@@ -48,6 +48,7 @@ fn gas_state(pos: Vec<DVec3>) -> State {
         id: (0..n as u64).map(ParticleId).collect(),
         progenitor: vec![Progenitor(4); n],
         kind: vec![Species::Gas; n],
+        u: vec![0.0; n],
         time: 0.0,
         a: 1.0,
         pos,

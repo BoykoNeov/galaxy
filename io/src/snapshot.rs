@@ -1,7 +1,7 @@
 //! The Rust-native snapshot format: a versioned header followed by per-particle
 //! Structure-of-Arrays columns, all little-endian.
 //!
-//! On-disk layout (version 2):
+//! On-disk layout (version 3):
 //! ```text
 //!   magic   : 8 bytes  = b"GLXYSNAP"
 //!   version : u32       = FORMAT_VERSION
@@ -9,16 +9,22 @@
 //!             n_particles u64, rng_seed u64, config_hash u64,
 //!             units String, code_version String         (Strings: u32 len + UTF-8)
 //!   columns : pos[n] (3×f64), vel[n] (3×f64), mass[n] (f32),
-//!             id[n] (u64), progenitor[n] (u16), kind[n] (u8)
+//!             id[n] (u64), progenitor[n] (u16), kind[n] (u8), u[n] (f64)
 //! ```
 //! Columns are stored SoA (all of one field, then the next) so a consumer can
 //! read only the fields it needs. `n_particles` is authoritative on write — it is
 //! always taken from the `State`, never from a caller-supplied header field.
 //!
-//! Version history: v2 (M7a) appended the `kind` species column. The reader
-//! accepts v1 streams (the retained pre-gas scenario zoo) and defaults every v1
-//! particle to `Species::Collisionless` — v1 predates gas. The writer always
-//! emits the current version.
+//! The `u` column is stored **f64** (not f32 like `mass`): it is the evolved
+//! thermodynamic variable of the adiabatic path and feeds the total-energy
+//! conservation gate, so it cannot afford the f32 storage error `mass` accepts.
+//!
+//! Version history: v2 (M7a) appended the `kind` species column; v3 (energy
+//! equation, Chain A) appended the per-particle internal-energy `u` column. The
+//! reader accepts older streams: v1 (the retained pre-gas scenario zoo) defaults
+//! every particle to `Species::Collisionless` (v1 predates gas), and v1/v2 both
+//! default `u = 0.0` (they predate the energy equation, and `u = 0` is exactly
+//! the inert isothermal value). The writer always emits the current version.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -124,6 +130,7 @@ pub fn to_writer<W: Write>(
         || state.id.len() != n
         || state.progenitor.len() != n
         || state.kind.len() != n
+        || state.u.len() != n
     {
         return Err(SnapshotError::Corrupt(
             "State SoA columns have mismatched lengths".to_string(),
@@ -162,6 +169,7 @@ pub fn to_writer<W: Write>(
     for k in &state.kind {
         write_u8(writer, *k as u8)?;
     }
+    // RED baseline (E1a): v3 will append the `u` column here.
     Ok(())
 }
 
@@ -237,6 +245,10 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         vec![Species::Collisionless; n]
     };
 
+    // RED baseline (E1a): v3 reads the `u` column here; for now every particle
+    // defaults to `u = 0.0`, so a state with nonzero `u` fails to round-trip.
+    let u = vec![0.0; n];
+
     let header = Header {
         time,
         step,
@@ -255,6 +267,7 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         id,
         progenitor,
         kind,
+        u,
         time,
         a: scale_factor,
     };

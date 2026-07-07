@@ -48,3 +48,21 @@ fn center_of_mass_matches_hand_calc() {
         "com = {com:?}"
     );
 }
+
+#[test]
+fn thermal_energy_matches_hand_calc() {
+    // U_thermal = Σ mᵢ uᵢ = 2*1.5 + 3*4.0 = 3 + 12 = 15, weighted by mass
+    // (u is SPECIFIC internal energy, per unit mass), independent hand value.
+    let mut s = two_body();
+    s.u = vec![1.5, 4.0];
+    let ut = diagnostics::thermal_energy(&s);
+    assert!((ut - 15.0).abs() < 1e-12, "u_thermal = {ut}");
+}
+
+#[test]
+fn thermal_energy_is_zero_when_internal_energy_is_zero() {
+    // The isothermal invariant: u ≡ 0 ⇒ no thermal reservoir.
+    let s = two_body(); // from_phase_space sets u = 0
+    let ut = diagnostics::thermal_energy(&s);
+    assert!(ut.abs() < 1e-12, "isothermal u_thermal must be 0, got {ut}");
+}

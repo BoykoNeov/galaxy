@@ -164,6 +164,7 @@ impl Collision {
             id,
             progenitor,
             kind: vec![Species::Collisionless; n],
+            u: vec![0.0; n],
             time: 0.0,
             a: 1.0,
         }

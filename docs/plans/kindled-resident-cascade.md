@@ -342,10 +342,64 @@ Sub-milestones, roughly in dependency order. Each lands red→green with its own
     `v_{n+1/2}`-vs-`v_{n+1}` half-kick timing skew, not correctness; frozen-grid staleness is
     already G5b-gated on the same `gas_pos`/`h`. **Block-adaptive dt POLICY still deferred**
     (D6/G6) — G5c is compute+expose only. This completes G5; **G6 is next.**
-- **G6 — `simulate_snapshots` GPU branch + re-run the QUICK gasrich merger**:
-  GPU path selectable alongside the CPU `GravitySph` branch; gate = QUICK gasrich
-  GPU-vs-CPU coarse statistics agree, wall-clock recorded. (Full-res still blocked on
-  adaptive dt — do not expect a producible full-res showpiece here.)
+- **G6 — `simulate_snapshots` GPU branch + re-run the QUICK gasrich merger** ✅ **DONE**
+  (red `75f3fa4` → green `9d79831`; `--gpu` CLI flag `4ddcb3c`). `xtask::simulate::Backend
+  {Cpu, Gpu}` param on `simulate_snapshots` (explicit, never env-read inside — so one test
+  drives both paths); the gas-free path is unchanged (always CPU Barnes-Hut). The GPU
+  branch `simulate_gas_gpu` hand-rolls the resident loop (`upload → step_many(interval) →
+  snapshot → emit`) mirroring `run`'s exact schedule incl. the always-capture-final-step
+  tail — it CANNOT reuse `sim::run` (the resident stepper owns its loop; wrapping it as a
+  `ForceSolver` would force per-step readback and kill the residency win). CLI: gasrich
+  movie on `--gpu` selectable alongside the default CPU path.
+  **Resolutions this batch (advisor-vetted):**
+  - **Re-upload per snapshot interval — DECIDED YES** (the precondition below): bounds
+    frozen-`h_max` staleness; the on-GPU gas-bbox reduction stays deferred. Consequence
+    recorded in-code: this path does NOT exercise the single-upload-long-run failure mode,
+    so a green G6 gate must NOT be read as "frozen `h_max` proven safe for one upload".
+  - **Column re-attach is broader than `kind`.** `from_phase_space` also resets
+    `id`→sequential and `progenitor`→0; the movie's `sf_progenitors` coloring keys on
+    progenitor tags, so the branch re-stamps `id`/`progenitor`/`kind` from the uploaded
+    state (index-order-preserving) before BOTH emit and re-upload.
+  - **Absolute time.** Re-upload resets the resident clock to 0, so the branch stamps
+    `step·dt` onto each snapshot; otherwise every snapshot after the first is mis-timed.
+  - **t=0 CFL fail-loud.** A `min_stable_dt` check mirrors the CPU `CflGuard` (QUICK
+    gasrich is CFL-clean, so it does not fire — cheap insurance).
+  - **Gate design (the real work, D5).** Chaos forbids a trajectory tolerance. The unit
+    gate is a **two-sided bracket at early snapshots**: GPU gas (a) differs from
+    gravity-only AND (b) tracks CPU-SPH. The load-bearing side is RELATIVE — GPU-vs-CPU
+    agreement must sit decisively (≥3×) below the PURE hydro signal `v_cpu − v_grav` (both
+    f64, so no f32-gravity contamination). MEASURED (40 steps, Vulkan): signal max 4.4e-4,
+    agreement max 8.8e-5 — the f32 port error is a FIXED ~15–20% of the hydro signal (both
+    accumulate linearly in step count ⇒ ratio is run-length-invariant; lengthening the run
+    does NOT open the window past ~5×). So a gas-present-but-broken-hydro bug (agreement ≈
+    signal) fails where a loose absolute tolerance would pass. Backed by unit guards:
+    gas-subset non-empty + progenitor re-attached, cadence == CPU, exact gas mass, bounded
+    total-momentum drift (2.8e-6). Headline `#[ignore]` gate = QUICK gasrich CPU-vs-GPU
+    coarse gas stats (COM / half-mass radius / velocity dispersion — chaos-robust bulk
+    morphology, NOT IDs) + wall-clock.
+  - **MEASURED (2026-07-07, Vulkan; `M:\…\g6_gasrich_ab\FINDINGS.md`).** QUICK gasrich (2500
+    gas), dt 0.002 / 1500 steps (CFL-stable proxy — see the CFL note): coarse gas stats
+    agree to **< 0.1 %** (COM drift 2.4e-4, r_half/σ_v rel 0.0 %) → correctness holds.
+    Wall-clock **CPU 52.5 s | GPU 169.7 s (0.31×)** — GPU slower AT QUICK. This is EXPECTED,
+    not a failed value prop: QUICK is below the GPU crossover (Finding B's speed win was
+    FULL, ~2·10⁵ gas), the run is UNDER-OCCUPANCY-bound (110 ms/step is <0.01 % of adapter
+    throughput → serialization, not pair-count), AND the frozen coarse-`h_max` hydro grid
+    over-gathers (D4's 100×+-h-range degeneracy, `h_max≈7.5` ⇒ ~1–2 cells) — stage
+    attribution (hydro over-gather vs the ~30-iter density root-find) NOT isolated. The plan
+    gate is "wall-clock RECORDED", not "faster"; a fair perf verdict needs large-N (blocked
+    on adaptive dt to run FULL, and/or the D4 max-h LBVH endpoint to kill the over-gather).
+    Correctness caveat: t=3.0 is pre-pericenter (gentle) — the SHARP pin is the 40-step
+    bracket, not this bulk agreement. **Diagnostic ruled OUT** escapee-clamp (h_max smooth
+    6.56→7.92), re-upload leak (flat step time to 3000), and TDR (the first "device lost"
+    was teardown-collateral from a killed prior run).
+  - **CFL discrepancy (flagged, NOT G6 — own follow-up):** the CPU `CflGuard` (C_CFL=0.25)
+    REJECTS the preset's shipped dt=0.005 for QUICK gasrich (`bound 0.00340` near
+    pericenter), contradicting the seed's "clean at 0.005" claim. Bound is `n_steps`-
+    independent ⇒ the full run trips too; if the showpiece was simulated at 0.005 it may
+    have integrated unstably. The GPU path has no mid-run CFL enforcement (block-adaptive dt
+    deferred), so at 0.005 it silently rides the unstable step — hence the A/B's shared
+    stable dt=0.002. Re-validate the gasrich dt/seed against the current `v_sig` CFL law.
+    (Full-res still blocked on adaptive dt — no producible full-res showpiece here.)
   - **⚠ PRECONDITION (advisor) — the frozen-`h_max` expansion landmine.** G5b freezes the
     hydro gather radius = SUPPORT·h_max at upload. Contraction over-covers (safe, gated);
     **expansion under-covers → missing hydro pairs → Newton-3 breaks and gas forces silently

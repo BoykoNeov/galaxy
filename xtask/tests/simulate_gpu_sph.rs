@@ -384,6 +384,162 @@ fn gpu_conserves_gas_mass_and_bounds_momentum_drift() {
     );
 }
 
+// --- the headline G6 gate: QUICK gasrich CPU-vs-GPU coarse stats + wall-clock ----
+
+/// Gas bulk statistics robust to the chaotic per-particle shuffling D5 forbids gating
+/// on: mass-weighted COM, half-mass radius about it, and velocity dispersion. These are
+/// morphology summaries — the same merger reached by an f32 and an f64 force must agree
+/// on them even though individual gas IDs have long since diverged.
+struct GasStats {
+    com: DVec3,
+    r_half: f64,
+    sigma_v: f64,
+}
+
+fn gas_stats(state: &State) -> GasStats {
+    let idx: Vec<usize> = (0..state.len())
+        .filter(|&i| state.kind[i] == Species::Gas)
+        .collect();
+    let m_tot: f64 = idx.iter().map(|&i| state.mass[i]).sum();
+    let com = idx
+        .iter()
+        .fold(DVec3::ZERO, |a, &i| a + state.pos[i] * state.mass[i])
+        / m_tot;
+    let v_mean = idx
+        .iter()
+        .fold(DVec3::ZERO, |a, &i| a + state.vel[i] * state.mass[i])
+        / m_tot;
+    let sigma_v = (idx
+        .iter()
+        .map(|&i| (state.vel[i] - v_mean).length_squared() * state.mass[i])
+        .sum::<f64>()
+        / m_tot)
+        .sqrt();
+    // Half-mass radius: sort gas by distance from COM, walk the mass CDF to 50%.
+    let mut radial: Vec<(f64, f64)> = idx
+        .iter()
+        .map(|&i| ((state.pos[i] - com).length(), state.mass[i]))
+        .collect();
+    radial.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let mut acc = 0.0;
+    let mut r_half = radial.last().map(|x| x.0).unwrap_or(0.0);
+    for (r, m) in &radial {
+        acc += m;
+        if acc >= 0.5 * m_tot {
+            r_half = *r;
+            break;
+        }
+    }
+    GasStats {
+        com,
+        r_half,
+        sigma_v,
+    }
+}
+
+/// The QUICK `gasrich` showpiece merger, both backends, timed. Coarse gas stats at the
+/// final snapshot must agree (chaos-robust bulk quantities, NOT a trajectory match), and
+/// the wall-clock of each path is recorded. `--release --ignored` — heavy (6000 steps).
+#[test]
+#[ignore = "heavy: QUICK gasrich merger on both backends; run with --release --ignored"]
+fn gasrich_quick_cpu_vs_gpu_coarse_stats_and_walltime() {
+    let mut s = build_scenario(
+        &parse_scenario_toml(galaxy_xtask::spec::preset("gasrich").unwrap()).unwrap(),
+        true, // QUICK counts
+    );
+    // Bounded proxy for the 6000-step showpiece — per-step cost is representative and the
+    // full run extrapolates ~linearly, so a shorter run keeps the both-backend A/B
+    // tractable while still evolving the coarse gas morphology enough to gate on. The GPU
+    // per-step is dominated by the frozen coarse-h_max hydro grid (effectively O(N²) over
+    // the gas) — a known G6 artifact, not a bug (see the plan's frozen-h_max note); it is
+    // what the deferred grid-cell/gather-radius decoupling fixes.
+    //
+    // dt is dropped BELOW the preset's 0.005: this QUICK realization's hydro CFL bound
+    // dips to ~0.0034 near pericenter, and the GPU path has NO mid-run CFL enforcement
+    // (block-adaptive dt is deferred, D6/G6), so it would silently integrate an unstable
+    // step where the CPU `CflGuard` correctly aborts. A shared CFL-stable dt is required
+    // for the comparison to be apples-to-apples — both backends then integrate the same
+    // stable trajectory family and their bulk morphology must agree.
+    s.dt = 0.002;
+    s.n_steps = 1500;
+
+    let tmp = tempdir();
+    let dir_gpu = tmp.join("gpu");
+    let dir_cpu = tmp.join("cpu");
+    std::fs::create_dir_all(&dir_gpu).unwrap();
+    std::fs::create_dir_all(&dir_cpu).unwrap();
+
+    let t_gpu = std::time::Instant::now();
+    simulate_snapshots(&s, &dir_gpu, Backend::Gpu).expect("gpu gasrich run");
+    let gpu_secs = t_gpu.elapsed().as_secs_f64();
+
+    let t_cpu = std::time::Instant::now();
+    simulate_snapshots(&s, &dir_cpu, Backend::Cpu).expect("cpu gasrich run");
+    let cpu_secs = t_cpu.elapsed().as_secs_f64();
+
+    let (_, gpu_last) = galaxy_io::read_file(snap_paths(&dir_gpu).last().unwrap()).unwrap();
+    let (_, cpu_last) = galaxy_io::read_file(snap_paths(&dir_cpu).last().unwrap()).unwrap();
+    let g = gas_stats(&gpu_last);
+    let c = gas_stats(&cpu_last);
+
+    let com_drift = (g.com - c.com).length();
+    let scale = c.r_half.max(1e-9);
+    let r_half_rel = (g.r_half - c.r_half).abs() / scale;
+    let sigma_rel = (g.sigma_v - c.sigma_v).abs() / c.sigma_v.max(1e-9);
+    eprintln!(
+        "=== G6 QUICK gasrich CPU-vs-GPU (final snapshot, {} steps) ===",
+        s.n_steps
+    );
+    // Wall-clock is RECORDED, never asserted: QUICK (2500 gas) is below the GPU crossover
+    // and under-occupancy-bound, so GPU slower-than-CPU here is expected — the perf verdict
+    // needs large-N (blocked on adaptive dt for FULL and/or the D4 max-h LBVH endpoint).
+    // Measured 2026-07-07 (dt 0.002, 1500 steps): CPU 52.5s | GPU 169.7s (0.31×).
+    eprintln!(
+        "  wall-clock: CPU {cpu_secs:.1}s | GPU {gpu_secs:.1}s | speedup {:.2}x",
+        cpu_secs / gpu_secs
+    );
+    eprintln!(
+        "  gas COM:    CPU {:?} | GPU {:?} | drift {com_drift:.3e} ({:.1}% of r_half)",
+        c.com,
+        g.com,
+        100.0 * com_drift / scale
+    );
+    eprintln!(
+        "  r_half:     CPU {:.4} | GPU {:.4} | rel {:.1}%",
+        c.r_half,
+        g.r_half,
+        100.0 * r_half_rel
+    );
+    eprintln!(
+        "  sigma_v:    CPU {:.4} | GPU {:.4} | rel {:.1}%",
+        c.sigma_v,
+        g.sigma_v,
+        100.0 * sigma_rel
+    );
+
+    // Chaos-robust morphology agreement — generous bounds (per-particle IDs diverge as the
+    // merger evolves; only the bulk shape must survive). Measured <0.1% at this pre-
+    // pericenter epoch — the sharp correctness pin is the 40-step bracket, not this.
+    assert!(
+        g.com.x.is_finite() && g.r_half.is_finite() && g.sigma_v.is_finite(),
+        "GPU gas stats went non-finite"
+    );
+    assert!(
+        com_drift < 0.5 * scale,
+        "gas COM drifted {com_drift:.3e} (> half r_half) — morphology diverged"
+    );
+    assert!(
+        r_half_rel < 0.3,
+        "gas half-mass radius disagrees by {:.1}% (> 30%)",
+        100.0 * r_half_rel
+    );
+    assert!(
+        sigma_rel < 0.3,
+        "gas velocity dispersion disagrees by {:.1}% (> 30%)",
+        100.0 * sigma_rel
+    );
+}
+
 /// A unique-enough temp directory for one test, under the repo-configured temp root.
 fn tempdir() -> std::path::PathBuf {
     let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))

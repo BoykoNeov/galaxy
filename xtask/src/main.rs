@@ -951,7 +951,7 @@ fn run_movie(
         // the scenario carries gas — with the fixed dt validated against the hydro
         // CFL bound at t=0 before the first snapshot.
         let t_sim = std::time::Instant::now();
-        let summary = simulate_snapshots(s, &snap_dir)?;
+        let summary = simulate_snapshots(s, &snap_dir, galaxy_xtask::simulate::Backend::Cpu)?;
         println!(
             "simulated {} steps → {} snapshots (t_final = {:.2}) in {:.1} s",
             summary.steps,

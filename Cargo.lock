@@ -427,6 +427,7 @@ name = "galaxy-xtask"
 version = "0.0.0"
 dependencies = [
  "galaxy-core",
+ "galaxy-gpu",
  "galaxy-grade",
  "galaxy-ic",
  "galaxy-io",

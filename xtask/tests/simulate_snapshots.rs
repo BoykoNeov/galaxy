@@ -18,7 +18,7 @@ use galaxy_core::{LeapfrogKdk, Species, State, StaticBackground};
 use galaxy_io::Header;
 use galaxy_sim::{run, DirectorySink, SimConfig, SimError, SnapshotSink};
 use galaxy_solvers::BarnesHut;
-use galaxy_xtask::simulate::simulate_snapshots;
+use galaxy_xtask::simulate::{simulate_snapshots, Backend};
 use galaxy_xtask::spec::{build_scenario, parse_scenario_toml, Scenario};
 use galaxy_xtask::{G, THETA};
 
@@ -195,7 +195,7 @@ fn gas_scenario_rejects_over_large_dt_before_writing_any_snapshot() {
     // by orders of magnitude — the t=0 validate must reject it.
     s.dt = 1e6;
 
-    let err = simulate_snapshots(&s, &snap_dir);
+    let err = simulate_snapshots(&s, &snap_dir, Backend::Cpu);
     assert!(err.is_err(), "over-large dt must be rejected at t=0");
     assert!(
         snap_paths(&snap_dir).is_empty(),
@@ -210,7 +210,7 @@ fn gas_scenario_at_stable_dt_writes_the_expected_snapshots() {
     std::fs::create_dir_all(&snap_dir).unwrap();
 
     let s = gas_scenario();
-    let summary = simulate_snapshots(&s, &snap_dir).expect("stable dt must run");
+    let summary = simulate_snapshots(&s, &snap_dir, Backend::Cpu).expect("stable dt must run");
 
     // 4 steps, snapshot every step → step 0 + steps 1..=4 = 5 snapshots.
     assert_eq!(summary.snapshots_emitted, 5);
@@ -228,7 +228,7 @@ fn gas_path_applies_hydro_not_bare_gravity() {
     std::fs::create_dir_all(&snap_dir).unwrap();
 
     let s = gas_scenario();
-    simulate_snapshots(&s, &snap_dir).expect("stable dt must run");
+    simulate_snapshots(&s, &snap_dir, Backend::Cpu).expect("stable dt must run");
 
     let last_snap = snap_paths(&snap_dir).pop().expect("a final snapshot");
     let (_, sph_final) = galaxy_io::read_file(&last_snap).unwrap();
@@ -254,7 +254,7 @@ fn gas_free_path_matches_the_bare_barnes_hut_pipeline() {
     let tmp_a = tempdir();
     let dir_a = tmp_a.join("snapshots");
     std::fs::create_dir_all(&dir_a).unwrap();
-    simulate_snapshots(&s, &dir_a).expect("gas-free run");
+    simulate_snapshots(&s, &dir_a, Backend::Cpu).expect("gas-free run");
 
     // The reference: the exact pre-M7c inline pipeline — plain Barnes-Hut, plain
     // DirectorySink, no CFL guard.

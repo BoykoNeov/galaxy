@@ -7,6 +7,7 @@ edition.workspace = true
 galaxy-core = { path = "../core" }
 galaxy-ic = { path = "../ic" }
 galaxy-solvers = { path = "../solvers" }
+galaxy-gpu = { path = "../gpu" }
 galaxy-sim = { path = "../sim" }
 galaxy-io = { path = "../io" }
 galaxy-renderprep = { path = "../renderprep" }

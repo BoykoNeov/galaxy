@@ -151,12 +151,15 @@ takes a `dt: f64`. This keeps the integrator/solver split intact and the gas-fre
 path byte-identical (its solver returns `+∞`, the loop's adaptive branch is never
 taken because the driver only enables adaptation on the gas path).
 
-### D6 — CflGuard becomes a should-never-trip SAFETY NET, not a fail-loud config check
+### D6 — CflGuard is RETIRED on the adaptive path (kept fail-loud on the fixed-dt path)
 Under adaptive dt the guard's premise (a human-chosen fixed dt might be too large)
-is gone — dt is chosen *to satisfy* CFL. The guard is retained as a **defensive
-assertion**: if the adaptive loop ever emits a state whose realized dt exceeded the
-bound, that is an implementation bug, so trip loud. (On the fixed-dt CPU path it
-keeps its original fail-loud role, unchanged.)
+is gone — dt is chosen *to satisfy* CFL. **Realized (A4):** the adaptive path does
+NOT wrap `CflGuard` at all — its fixed-dt validation has no single `dt` to check
+(dt varies per block), and stability is instead structural (`plan_block` picks
+`dt ≤ courant·limit` by construction) + D2b-gated. So the guard is retired on the
+adaptive branch, and kept in its original fail-loud role on the fixed-dt branch. (A
+per-block runtime re-check `dt ≤ limit_end` would double the CFL cost; the D2b
+safety is designed-in and test-gated, not re-asserted at runtime.)
 
 ### D7 — efficiency: do not compute density twice per block
 The block-boundary CFL bound needs `h`; the block's first force eval also needs
@@ -168,6 +171,18 @@ first, then fuse — but flagged here so it is not forgotten.)
 ---
 
 ## Milestones (TDD: red test committed separately, then green)
+
+**STATUS (2026-07-07): A1–A4 DONE, A5 deferred (ready-to-run).** All committed +
+pushed. A1 `ForceSolver::max_stable_dt` (raw c_cfl=1 limit); A2 `sim::run_adaptive`
++ `plan_block` (8 gates); A3 `xtask::simulate::simulate_gas_gpu_adaptive` (per-path
+convergence green); A4 `[sim.adaptive]` opt-in on `Scenario`, `simulate_snapshots`
+routes the gas path through the adaptive driver, **gasrich preset flipped to
+adaptive** (retires the dt=0.005-trips-CflGuard flag), gas-free byte-identity kept.
+A5: the cheap real-preset gate is green; the full-res `--release --ignored` harness
+(completes + fixed-abort contrast + prefix convergence + dynamic-range measurement)
+is ready-to-run, the >30 min run deferred to a later session per the user's call.
+NB: the gate set below is the ADVISOR-CORRECTED one in the Gates table + D2, NOT the
+original bullet text (energy-drift dropped, momentum→tripwire).
 
 Ordered CPU-first (the oracle and the simpler loop), GPU second (reuses the
 substrate), driver/cadence last.

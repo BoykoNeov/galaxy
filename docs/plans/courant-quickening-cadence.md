@@ -172,15 +172,20 @@ first, then fuse — but flagged here so it is not forgotten.)
 
 ## Milestones (TDD: red test committed separately, then green)
 
-**STATUS (2026-07-07): A1–A4 DONE, A5 deferred (ready-to-run).** All committed +
-pushed. A1 `ForceSolver::max_stable_dt` (raw c_cfl=1 limit); A2 `sim::run_adaptive`
-+ `plan_block` (8 gates); A3 `xtask::simulate::simulate_gas_gpu_adaptive` (per-path
-convergence green); A4 `[sim.adaptive]` opt-in on `Scenario`, `simulate_snapshots`
-routes the gas path through the adaptive driver, **gasrich preset flipped to
-adaptive** (retires the dt=0.005-trips-CflGuard flag), gas-free byte-identity kept.
-A5: the cheap real-preset gate is green; the full-res `--release --ignored` harness
-(completes + fixed-abort contrast + prefix convergence + dynamic-range measurement)
-is ready-to-run, the >30 min run deferred to a later session per the user's call.
+**STATUS (2026-07-07): A1–A5 ALL DONE + PUSHED — series complete, showpiece
+producible.** A1 `ForceSolver::max_stable_dt` (raw c_cfl=1 limit); A2
+`sim::run_adaptive` + `plan_block` (8 gates); A3 `xtask::simulate::simulate_gas_gpu_adaptive`
+(per-path convergence green); A4 `[sim.adaptive]` opt-in on `Scenario`,
+`simulate_snapshots` routes the gas path through the adaptive driver, **gasrich preset
+flipped to adaptive** (retires the dt=0.005-trips-CflGuard flag), gas-free byte-identity
+kept. **A5 RAN TO COMPLETION** (the real "done", `--release --ignored --nocapture`):
+full-res gasrich completed 61 snapshots in 2869.4 s (~47.8 min); fixed-dt contrast
+CFL-aborted as required; convergence err(0.25)=1.122e-3 > err(0.125)=3.220e-4 (3.48×
+reduction, monotone); **realized CFL-bound dynamic range 34.2× (min 3.42e-3, max
+1.17e-1)** — wider than the pre-run 2–3× QUICK-scale estimate; the width is driven by the
+high diffuse-gas MAX (0.117), NOT a deep pericenter (min 3.42e-3 ≈ the old QUICK t=0). The
+min 3.42e-3 < shipped fixed dt=0.005 confirms Finding A numerically. Shipped
+courant=0.25/max_growth=1.25/block_steps=16 held across the whole range → NO re-tune.
 NB: the gate set below is the ADVISOR-CORRECTED one in the Gates table + D2, NOT the
 original bullet text (energy-drift dropped, momentum→tripwire).
 
@@ -206,12 +211,14 @@ substrate), driver/cadence last.
   path through the adaptive driver, gas-free unchanged. CflGuard demoted to
   safety-net assertion (D6). Red: even-time-spaced snapshots; gas-free byte
   identity preserved.
-- **A5 — full-res producibility validation (the real "done").** Run the full-res
-  `gasrich` showpiece end-to-end; it must **complete** (Finding A discharged) AND
-  its coarse trajectory must **converge** to a fixed-fine-dt reference on a
-  short prefix. Record the realized dt(t) curve and the achieved dynamic range
-  (the "size the win" number, now measured not estimated). Calibrate `SAFETY`/
-  `GROWTH`/`B` from this run.
+- **A5 — full-res producibility validation (the real "done"). DONE 2026-07-07.**
+  Full-res `gasrich` showpiece ran end-to-end: **completed** 61 snapshots in 2869.4 s
+  (Finding A discharged), the fixed-dt contrast **CFL-aborted** as required, and the
+  coarse trajectory **converged** to the 0.0625 reference on the short prefix
+  (err(0.25)=1.122e-3 > err(0.125)=3.220e-4). Realized CFL-bound **dynamic range 34.2×**
+  (min 3.42e-3 < shipped fixed dt=0.005 → Finding A confirmed numerically; max 1.17e-1).
+  Calibration: shipped `courant=0.25`/`max_growth=1.25`/`block_steps=16` held across the
+  full range with no abort → no re-tune needed.
 
 "Done" = **the showpiece completes AND converges to the reference**, not "tests
 green."

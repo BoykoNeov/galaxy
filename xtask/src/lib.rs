@@ -7,7 +7,7 @@ pub mod spec;
 
 use std::path::PathBuf;
 
-use galaxy_grade::{BloomConfig, GradeConfig, ToneMap};
+use galaxy_grade::{BloomConfig, GradeConfig, LocalToneConfig, ToneMap};
 use galaxy_renderprep::FrameData;
 use glam::Vec3;
 
@@ -216,11 +216,12 @@ pub struct RegradeArgs {
 /// Map `regrade` CLI arguments (everything after the `regrade` selector) to a
 /// [`RegradeArgs`]: `<exr_dir> <png_dir> [--exposure E] [--tonemap
 /// aces|reinhard|asinh] [--beta B] [--bloom S] [--bloom-levels N]
-/// [--bloom-radius R]`. Flags may come in any order. Errors (as a human-readable
-/// message) on missing/extra positionals, unknown flags or tonemap names,
-/// malformed or non-positive numbers, `--beta` without `asinh`, and
-/// `--bloom-levels`/`--bloom-radius` without `--bloom` (sub-knobs of a feature
-/// that is off are a typo worth failing fast on, exactly like β).
+/// [--bloom-radius R] [--local S] [--local-radius R] [--local-floor F]`. Flags
+/// may come in any order. Errors (as a human-readable message) on missing/extra
+/// positionals, unknown flags or tonemap names, malformed or non-positive
+/// numbers, `--beta` without `asinh`, and `--bloom-*`/`--local-*` sub-knobs
+/// without their parent `--bloom`/`--local` (sub-knobs of a feature that is off
+/// are a typo worth failing fast on, exactly like β).
 pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut exposure = 1.0f32;
@@ -229,6 +230,9 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
     let mut bloom_strength: Option<f32> = None;
     let mut bloom_levels: Option<u32> = None;
     let mut bloom_radius: Option<f32> = None;
+    let mut local_strength: Option<f32> = None;
+    let mut local_radius: Option<f32> = None;
+    let mut local_floor: Option<f32> = None;
     // Levels (galaxy-render controls): neutral until a flag moves them.
     let mut black_point = 0.0f32;
     let mut white_point = 1.0f32;
@@ -257,10 +261,18 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
             "--bloom-radius" => {
                 bloom_radius = Some(positive_flag_value("--bloom-radius", it.next())?)
             }
+            "--local" => local_strength = Some(positive_flag_value("--local", it.next())?),
+            "--local-radius" => {
+                local_radius = Some(positive_flag_value("--local-radius", it.next())?)
+            }
+            // Floor is any-sign finite here; the [0, 1] bound is enforced together
+            // with the rest of the local config by GradeConfig::validate below.
+            "--local-floor" => local_floor = Some(finite_flag_value("--local-floor", it.next())?),
             flag if flag.starts_with("--") => {
                 return Err(format!(
                     "unknown flag `{flag}` (expected --exposure, --tonemap, --beta, \
-                     --bloom, --bloom-levels, --bloom-radius, --black-point, \
+                     --bloom, --bloom-levels, --bloom-radius, --local, \
+                     --local-radius, --local-floor, --black-point, \
                      --white-point, --gamma)"
                 ));
             }
@@ -305,6 +317,23 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
         }
     };
 
+    let local = match local_strength {
+        Some(strength) => Some(LocalToneConfig {
+            strength,
+            radius: local_radius.take().unwrap_or(DEFAULT_LOCAL_RADIUS),
+            floor: local_floor.take().unwrap_or(DEFAULT_LOCAL_FLOOR),
+        }),
+        None => {
+            // Local sub-knobs without --local: same fail-fast stance as --beta.
+            if local_radius.is_some() || local_floor.is_some() {
+                return Err(
+                    "--local-radius/--local-floor only apply together with --local".to_string(),
+                );
+            }
+            None
+        }
+    };
+
     let grade = GradeConfig {
         exposure,
         tonemap,
@@ -312,7 +341,7 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
         black_point,
         white_point,
         gamma,
-        local: None,
+        local,
     };
     // Fail fast on a degenerate levels window / gamma (black ≥ white, gamma ≤ 0,
     // non-finite) at parse time rather than deep in grade_file.
@@ -819,7 +848,10 @@ mod tests {
         for (bad, why) in [
             (&["e", "p", "--local"][..], "flag missing its value"),
             (&["e", "p", "--local", "abc"][..], "non-numeric strength"),
-            (&["e", "p", "--local", "0"][..], "zero strength (a no-op typo)"),
+            (
+                &["e", "p", "--local", "0"][..],
+                "zero strength (a no-op typo)",
+            ),
             (&["e", "p", "--local", "-1"][..], "negative strength"),
             (
                 &["e", "p", "--local-radius", "16"][..],

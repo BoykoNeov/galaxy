@@ -11,6 +11,7 @@
 //!     `out_dir` with the `disk` scenario (back-compat with the original CLI).
 //!   * `regrade <exr_dir> <png_dir> [--exposure E] [--tonemap aces|reinhard|asinh]
 //!     [--beta B] [--bloom S] [--bloom-levels N] [--bloom-radius R]
+//!     [--local S] [--local-radius R] [--local-floor F]
 //!     [--black-point B] [--white-point W] [--gamma G]` re-grades
 //!     retained linear EXRs into fresh PNGs (+ movie if ffmpeg is present) in seconds
 //!     — no re-simulation, no re-render (the M6a look loop; bloom added in M6b).
@@ -194,6 +195,7 @@ fn regrade(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     const USAGE: &str = "usage: regrade <exr_dir> <png_dir> \
          [--exposure E] [--tonemap aces|reinhard|asinh] [--beta B] \
          [--bloom S] [--bloom-levels N] [--bloom-radius R] \
+         [--local S] [--local-radius R] [--local-floor F] \
          [--black-point B] [--white-point W] [--gamma G]";
     let cfg = parse_regrade_args(args).map_err(|e| format!("regrade: {e}\n{USAGE}"))?;
 

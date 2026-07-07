@@ -52,6 +52,17 @@ pub const DEFAULT_BLOOM_LEVELS: u32 = 5;
 /// `--bloom-radius` is not given (M6b).
 pub const DEFAULT_BLOOM_RADIUS: f32 = 2.0;
 
+/// Default surround σ (pixels) for `regrade --local S` when `--local-radius` is
+/// not given: a broad low-pass that reads the additive-splat blob as one
+/// surround without collapsing to the whole-frame mean. Starting value —
+/// settled by the white-blob A/B.
+pub const DEFAULT_LOCAL_RADIUS: f32 = 32.0;
+
+/// Default gain floor for `regrade --local S` when `--local-floor` is not given:
+/// caps the darkening at 5× (bounds the dark-halo ring). Starting value —
+/// settled by the white-blob A/B.
+pub const DEFAULT_LOCAL_FLOOR: f32 = 0.2;
+
 /// Which M6e coloring mode a movie invocation asked for (`--color`). This is the
 /// CLI-level selector; the scenario maps it onto a concrete `renderprep::ColorMode`
 /// (frozen ramp colors need snapshot 0, which only the pipeline has).
@@ -493,7 +504,7 @@ mod tests {
 
     // --- regrade arg parsing (M6a) -------------------------------------------
 
-    use galaxy_grade::ToneMap;
+    use galaxy_grade::{LocalToneConfig, ToneMap};
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
@@ -712,6 +723,122 @@ mod tests {
             ),
             (
                 &["e", "p", "--bloom", "0.4", "--bloom-radius", "-1"][..],
+                "non-positive radius",
+            ),
+        ] {
+            assert!(
+                parse_regrade_args(&args(bad)).is_err(),
+                "should reject: {why} ({bad:?})"
+            );
+        }
+    }
+
+    // --- regrade local-tonemap flags (white-blob lever) -----------------------
+
+    #[test]
+    fn regrade_parses_full_local_invocation() {
+        let r = parse_regrade_args(&args(&[
+            "e",
+            "p",
+            "--local",
+            "2.0",
+            "--local-radius",
+            "24",
+            "--local-floor",
+            "0.15",
+        ]))
+        .unwrap();
+        assert_eq!(
+            r.grade.local,
+            Some(LocalToneConfig {
+                strength: 2.0,
+                radius: 24.0,
+                floor: 0.15,
+            })
+        );
+    }
+
+    #[test]
+    fn regrade_local_defaults_radius_and_floor() {
+        let r = parse_regrade_args(&args(&["e", "p", "--local", "2.0"])).unwrap();
+        assert_eq!(
+            r.grade.local,
+            Some(LocalToneConfig {
+                strength: 2.0,
+                radius: DEFAULT_LOCAL_RADIUS,
+                floor: DEFAULT_LOCAL_FLOOR,
+            })
+        );
+    }
+
+    #[test]
+    fn regrade_local_defaults_to_none() {
+        // No --local ⇒ local stays off, and the regrade is bit-identical.
+        let r = parse_regrade_args(&args(&["e", "p"])).unwrap();
+        assert_eq!(r.grade.local, None);
+    }
+
+    #[test]
+    fn regrade_local_flags_are_order_independent() {
+        // Sub-flags before --local must still land on the same config.
+        let a = parse_regrade_args(&args(&[
+            "e",
+            "p",
+            "--local-floor",
+            "0.1",
+            "--local-radius",
+            "16",
+            "--local",
+            "3.0",
+        ]))
+        .unwrap();
+        let b = parse_regrade_args(&args(&[
+            "e",
+            "p",
+            "--local",
+            "3.0",
+            "--local-radius",
+            "16",
+            "--local-floor",
+            "0.1",
+        ]))
+        .unwrap();
+        assert_eq!(a.grade.local, b.grade.local);
+        assert_eq!(
+            a.grade.local,
+            Some(LocalToneConfig {
+                strength: 3.0,
+                radius: 16.0,
+                floor: 0.1,
+            })
+        );
+    }
+
+    #[test]
+    fn regrade_rejects_bad_local_invocations() {
+        for (bad, why) in [
+            (&["e", "p", "--local"][..], "flag missing its value"),
+            (&["e", "p", "--local", "abc"][..], "non-numeric strength"),
+            (&["e", "p", "--local", "0"][..], "zero strength (a no-op typo)"),
+            (&["e", "p", "--local", "-1"][..], "negative strength"),
+            (
+                &["e", "p", "--local-radius", "16"][..],
+                "radius without --local",
+            ),
+            (
+                &["e", "p", "--local-floor", "0.2"][..],
+                "floor without --local",
+            ),
+            (
+                &["e", "p", "--local", "2.0", "--local-floor", "1.5"][..],
+                "floor above 1",
+            ),
+            (
+                &["e", "p", "--local", "2.0", "--local-floor", "-0.1"][..],
+                "floor below 0",
+            ),
+            (
+                &["e", "p", "--local", "2.0", "--local-radius", "0"][..],
                 "non-positive radius",
             ),
         ] {

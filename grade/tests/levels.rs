@@ -119,6 +119,7 @@ fn tonemap_applies_levels_after_the_curve() {
         black_point: 0.5,
         white_point: 1.0,
         gamma: 1.0,
+        local: None,
     };
     // tone_curve → 0.5, levels((0.5−0.5)/0.5)=0 → sRGB(0)=0 → black.
     assert_eq!(tonemap([1.0; 3], &cfg), [0; 3]);

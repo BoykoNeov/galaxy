@@ -301,6 +301,7 @@ pub fn parse_regrade_args(args: &[String]) -> Result<RegradeArgs, String> {
         black_point,
         white_point,
         gamma,
+        local: None,
     };
     // Fail fast on a degenerate levels window / gamma (black ≥ white, gamma ≤ 0,
     // non-finite) at parse time rather than deep in grade_file.

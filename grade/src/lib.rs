@@ -11,8 +11,10 @@
 //! asinh) → sRGB OETF → 16-bit quantize.
 
 mod bloom;
+mod local;
 
 pub use bloom::{bloom, BloomConfig};
+pub use local::{apply_local_tonemap, local_gain, LocalToneConfig};
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -63,6 +65,14 @@ pub struct GradeConfig {
     /// on the black/white-normalized signal. `> 1` brightens mids, `< 1` crushes
     /// them (haze suppression). `1.0` is neutral. Must be `> 0`.
     pub gamma: f32,
+    /// Optional local (spatially-adaptive) tone compression, applied image-wide
+    /// in linear space BEFORE the per-pixel exposure/tone-curve path (`None` ⇒
+    /// off, bit-identical). Like [`bloom`] it is an image-space op — `grade_file`
+    /// runs it; the per-pixel [`tonemap`] cannot and does not. See
+    /// [`LocalToneConfig`]: it relieves the additive-splat "white-blob" by
+    /// pulling exposure down where the surround is bright, so sub-cores inside
+    /// the blob survive the tone curve.
+    pub local: Option<LocalToneConfig>,
 }
 
 impl Default for GradeConfig {
@@ -74,6 +84,7 @@ impl Default for GradeConfig {
             black_point: 0.0,
             white_point: 1.0,
             gamma: 1.0,
+            local: None,
         }
     }
 }

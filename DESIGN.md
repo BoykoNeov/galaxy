@@ -215,6 +215,20 @@ late-time positions — N-body is chaotic).
   after the tone curve and before the sRGB OETF for contrast/star separation)
   without re-simulating. Neutral levels `(0, 1, 1)` are bit-identical to the
   pre-levels grade.
+  - **Local (spatially-adaptive) tonemap** — `--local S [--local-radius R]
+    [--local-floor F]` (`grade::LocalToneConfig`, image-space in `grade_file` like
+    bloom). The fix for the additive-splat "white-blob": where many star splats pile
+    into one region the *global* tone curve saturates the core to flat white and no
+    global remap can recover the sub-cores. This scales the linear RGB by a per-pixel
+    scalar gain `g = max(floor, 1/(1 + S·V))`, `V` = large-σ Gaussian low-pass of the
+    exposed luminance (the surround), so bright surrounds drop back into the curve's
+    responsive range and stars resolve while keeping hue (`g` is one scalar ⇒ chroma
+    preserved; `g ≤ 1` ⇒ never brightens; `floor` bounds the dark-halo ring).
+    Deliberately **spatial, not temporal** (no per-frame luminance key — one grade
+    regrades a whole sequence without exposure pumping). `local: None` (the default)
+    is bit-identical; ships **opt-in**, not baked into a preset (the blob fix is
+    tuned jointly with the `max_splat_px` and scatter-σ levers). A/B verified on the
+    approach blob (`frame_00120`): resolves the core into colored stars, halo-free.
   - **Accuracy of the "tidal-tail" goal:** classic thin Toomre tails come from
     *rotating, dynamically cold disks* (coherent disk angular momentum, resonantly
     amplified in a prograde passage). The current IC samples two **isotropic,

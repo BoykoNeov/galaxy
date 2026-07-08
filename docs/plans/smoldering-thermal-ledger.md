@@ -128,12 +128,54 @@ No integrator change yet — the most contained slice. Split into two commits:
 - Gates green: hand-derived `U_thermal`, isothermal `u≡0` invariant,
   `FORMAT_VERSION==3`, bit-exact `u` round-trip, v1/v2 forward-compat reads.
 
-**E1b — EOS enum + per-particle pressure/`c_s` — TODO (next).**
-- `HydroParams::Eos` enum (`Isothermal { c_s } | Adiabatic { gamma }`), threaded
-  through `forces.rs`/`cfl.rs`; a gas-`u` setter.
-- **Gates:** isothermal path **byte-identical** to pre-E1 (EOS enum default =
-  Isothermal, no behavior change); adiabatic `P = (γ−1)ρu` correct on a hand
-  case; a static adiabatic blob (`du/dt` frozen) stays put.
+**E1b — EOS enum + per-particle pressure/`c_s` — TODO (next). Design locked
+(advisor-vetted 2026-07-08), not yet implemented.**
+
+*API shape:*
+- `Eos::Isothermal { c_s } | Eos::Adiabatic { gamma }`, **replacing** the
+  `HydroParams.sound_speed` field. Default `Isothermal { c_s: 1.0 }`.
+  `#[derive(Clone, Copy, Debug)]` on `Eos` — **load-bearing**: `HydroParams` is
+  `Copy` and ~15 sites rely on it (e.g. `potential_energy_delegates_to_gravity`
+  passes `params` by value twice); a non-`Copy` `Eos` silently drops `HydroParams`'s
+  `Copy` and breaks those sites with unrelated-looking move errors. `Eos` is
+  all-f64 so `Copy` is free.
+- Add `HydroParams::sound_speed(&self) -> f64` accessor returning the isothermal
+  `c_s` (isothermal-only consumers: GPU src, `cfl.rs`).
+- Thread `u: &[f64]` into `hydro_accelerations`/`_serial` **after `h`, before
+  `params`** (unavoidable — adiabatic `P=(γ−1)ρu` needs it). `GravitySph`
+  gathers gas-subset `u` from `State.u` and passes it (all-`0.0` on isothermal →
+  ignored). Ripple is mechanical: every call site adds `&u`; GPU **tests** add
+  `&u` but no shader/logic change ("touches no GPU code" holds).
+- Per particle: Isothermal → `P_i=c_s²ρ_i`, `c_s,i=c_s`; Adiabatic →
+  `P_i=(γ−1)ρ_i u_i`, `c_s,i=√(γ(γ−1)u_i)`. Viscosity `c̄=½(c_s,i+c_s,j)`.
+
+*Scope guards (advisor):*
+- **Do NOT unify the isothermal inner loop.** Keep `term_i = cs2/rho[i]` and the
+  visc `c̄ = params.sound_speed` expressions **verbatim** inside `match eos {
+  Isothermal => … }` so byte-identity is *structural* (zero reassociation risk).
+  (A unified `term[]`/`cs[]` path is IEEE-safe too — `½(c_s+c_s)==c_s`, exact —
+  but the un-unified branch removes the one place byte-identity could slip.)
+- **`cfl.rs`: enum-adapt only** — read `c_s` via the accessor for the isothermal
+  `two_cs`, behavior identical. Per-particle adiabatic `v_sig` is **E4**, not here.
+- **`du/dt` stays frozen (≡0).** No integrator, no thermal kick — that is E2.
+- **Gas-`u` setter: minimal.** All three gates build `State`/arrays directly
+  (`State.u` is `pub`); do NOT wire scenario/IC `u` now.
+
+*Gates (write byte-identity FIRST):*
+- **Isothermal byte-identity** to pre-E1b: frozen-literal regression test —
+  capture the exact f64 bits of the current (pre-change) isothermal force on a
+  fixed compact cloud, embed as `f64::from_bits` literals, `assert_eq!`. (The
+  existing hand-oracle test is `rel<1e-12`, which is NOT byte-identity.)
+- **Adiabatic `P=(γ−1)ρu`** correct on a two-particle hand case (`rel<1e-12`).
+- **Static adiabatic blob stays put**: uniform-ρ/uniform-`u` lattice → `term_i`
+  uniform → ∇P=0 → interior net accel ≈ 0 (adiabatic twin of
+  `uniform_lattice_interior_has_near_zero_net_force`). Single force eval, no
+  integration.
+
+*TDD structure:* red commit keeps the **isothermal branch fully working** and
+`todo!()`s **only the adiabatic branch** → isothermal + byte-identity tests
+pass, adiabatic tests panic (red). Green = implement the adiabatic branch.
+Workspace must `cargo build` at red ([[red-commit-must-compile-workspace]]).
 
 ### E2 — `du/dt` PdV work + thermal integrator (no shocks)
 - `accel_and_dudt` fused pass; PdV term only (viscous heating in E3).

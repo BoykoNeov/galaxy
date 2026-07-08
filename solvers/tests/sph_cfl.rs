@@ -309,6 +309,75 @@ fn adiabatic_hot_neighbor_raises_vsig_at_rest() {
 }
 
 #[test]
+fn adiabatic_approaching_pair_pins_the_minus_3w_term() {
+    // Coverage backfill (advisor-flagged): the two adiabatic tests above hold
+    // every particle at rest (w ≡ 0), so they exercise only the `2·c_s,i` floor
+    // and the `c_s,i + c_s,j` pair branch. The adiabatic arm's APPROACH term
+    // `−3·min(0,w_ij)` is textually separate from the (bit-pinned) isothermal
+    // arm and was executed by no value-pinning adiabatic test. Mirror the
+    // isothermal `cross_support_approacher_tightens_the_bound` in adiabatic form
+    // with a HOT approacher so the exact binding bound
+    //   C_cfl · h_min / (c_s,clump + c_s,hot − 3w),   w ≈ −V,
+    // pins all three terms (floor sound speed, cross-species pair, `−3w`) at
+    // once — and a wrong coefficient (e.g. `−2w`) goes red.
+    let gamma = 1.4_f64;
+    let u_clump = 1.0_f64;
+    let u_hot = 25.0_f64; // c_s,hot = 5× c_s,clump
+    let cs_clump = (gamma * (gamma - 1.0) * u_clump).sqrt();
+    let cs_hot = (gamma * (gamma - 1.0) * u_hot).sqrt();
+    let big_v = 100.0;
+    let d = 5.0;
+
+    let clump = random_points(77, 200, 0.03); // tight ⇒ small h, all static & cold
+    let mut pos = clump.clone();
+    pos.push(DVec3::new(0.0, 0.0, d)); // lone diffuse HOT approacher
+    let mut vel = vec![DVec3::ZERO; clump.len()];
+    vel.push(DVec3::new(0.0, 0.0, -big_v)); // heading straight at the clump
+    let mut u = vec![u_clump; clump.len()];
+    u.push(u_hot);
+
+    let state = gas_state_u(pos.clone(), vel, u);
+    let cfg = DensityConfig::default();
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma },
+        ..HydroParams::default()
+    };
+
+    // Recover h independently and assert the cross-support geometry (same as the
+    // isothermal twin): 2·h_clump < D < 2·h_approacher.
+    let dens = density_adaptive(&pos, &state.mass, &cfg, None);
+    let h_dist = *dens.h.last().unwrap();
+    let h_min = dens.h.iter().cloned().fold(f64::INFINITY, f64::min);
+    assert!(
+        2.0 * h_min < d,
+        "clump 2·h_min = {} must NOT reach the approacher at D = {d}",
+        2.0 * h_min
+    );
+    assert!(
+        2.0 * h_dist > d,
+        "approacher 2·h_dist = {} must reach the clump at D = {d}",
+        2.0 * h_dist
+    );
+
+    // Binding particle = min-h clump member, approached at w ≈ −V, so
+    // v_sig = c_s,clump + c_s,hot − 3w = c_s,clump + c_s,hot + 3V. The `−3w`
+    // approach term dominates (3V = 300 ≫ the pair sound speeds), which is
+    // exactly the line this test exists to pin.
+    let v_sig = cs_clump + cs_hot + 3.0 * big_v;
+    let expect = C_CFL * h_min / v_sig;
+
+    let got = max_stable_dt(&state, &params, &cfg, C_CFL);
+    let rel = (got - expect).abs() / expect;
+    assert!(
+        rel < 5e-2,
+        "adiabatic max_stable_dt = {got}, want ≈ {expect} (approach term −3w seen). \
+         Dropping `−3w` would return the static floor {} — {}× too large.",
+        C_CFL * h_min / (cs_clump + cs_hot),
+        v_sig / (cs_clump + cs_hot),
+    );
+}
+
+#[test]
 fn gas_free_state_has_no_hydro_cfl_constraint() {
     // Pure collisionless state ⇒ no SPH CFL bound (returns +∞, any dt validates).
     let pos = random_points(44, 100, 3.0);

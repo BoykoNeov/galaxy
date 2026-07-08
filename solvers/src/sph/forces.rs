@@ -85,6 +85,8 @@ impl HydroParams {
 /// Hydro acceleration per particle, rayon over targets. `rho`/`h` are supplied
 /// (the density pass ran first); `u` is the per-particle internal energy
 /// (ignored on the isothermal path); every slice has length `pos.len()`.
+/// Thin wrapper over [`hydro_accel_and_dudt`] dropping `dudt` (E2a) — same
+/// code path, so this output stays bit-identical to the pre-E2a function.
 pub fn hydro_accelerations(
     pos: &[DVec3],
     vel: &[DVec3],
@@ -94,7 +96,7 @@ pub fn hydro_accelerations(
     u: &[f64],
     params: &HydroParams,
 ) -> Vec<DVec3> {
-    hydro_impl(pos, vel, mass, rho, h, u, params, true)
+    hydro_accel_and_dudt_impl(pos, vel, mass, rho, h, u, params, true).0
 }
 
 /// Serial twin of [`hydro_accelerations`] for the parallel ≡ serial gate.
@@ -107,7 +109,7 @@ pub fn hydro_accelerations_serial(
     u: &[f64],
     params: &HydroParams,
 ) -> Vec<DVec3> {
-    hydro_impl(pos, vel, mass, rho, h, u, params, false)
+    hydro_accel_and_dudt_impl(pos, vel, mass, rho, h, u, params, false).0
 }
 
 /// Fused acceleration + `du/dt` pass (E2a): the PdV-work partner of
@@ -127,8 +129,7 @@ pub fn hydro_accel_and_dudt(
     u: &[f64],
     params: &HydroParams,
 ) -> (Vec<DVec3>, Vec<f64>) {
-    let _ = (pos, vel, mass, rho, h, u, params);
-    todo!("E2a: fused accel_and_dudt (parallel)")
+    hydro_accel_and_dudt_impl(pos, vel, mass, rho, h, u, params, true)
 }
 
 /// Serial twin of [`hydro_accel_and_dudt`] for the parallel ≡ serial gate.
@@ -142,12 +143,11 @@ pub fn hydro_accel_and_dudt_serial(
     u: &[f64],
     params: &HydroParams,
 ) -> (Vec<DVec3>, Vec<f64>) {
-    let _ = (pos, vel, mass, rho, h, u, params);
-    todo!("E2a: fused accel_and_dudt (serial)")
+    hydro_accel_and_dudt_impl(pos, vel, mass, rho, h, u, params, false)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn hydro_impl(
+fn hydro_accel_and_dudt_impl(
     pos: &[DVec3],
     vel: &[DVec3],
     mass: &[f64],
@@ -156,10 +156,10 @@ fn hydro_impl(
     u: &[f64],
     params: &HydroParams,
     parallel: bool,
-) -> Vec<DVec3> {
+) -> (Vec<DVec3>, Vec<f64>) {
     let n = pos.len();
     if n == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
     assert!(
@@ -190,15 +190,20 @@ fn hydro_impl(
         Eos::Isothermal { c_s } => {
             let cs2 = c_s * c_s;
 
-            // Acceleration on target `i`: gather neighbors in ascending index
-            // (fixed order ⇒ parallel ≡ serial bit-exact), sum the symmetric
-            // pressure term and Monaghan viscosity against the
-            // exactly-negated grad-average.
-            let accel_one = |i: usize| -> DVec3 {
+            // Acceleration + du/dt on target `i`: gather neighbors in ascending
+            // index (fixed order ⇒ parallel ≡ serial bit-exact), sum the
+            // symmetric pressure term and Monaghan viscosity against the
+            // exactly-negated grad-average. `dudt_i` accumulates the PdV work
+            // ALONE (`term_i`, not `term_i+term_j+visc`) — the exact
+            // energy-conserving partner of the symmetric momentum term
+            // (viscous heating is E3); reuses `v_ij`/`grad_avg` already
+            // computed for the accel sum, so accel's ops/order are untouched.
+            let one = |i: usize| -> (DVec3, f64) {
                 let xi = pos[i];
                 let term_i = cs2 / rho[i]; // P_i/ρ_i² for the isothermal EOS
                 let ngb = grid.neighbours_within(pos, xi, SUPPORT * h_max);
                 let mut a = DVec3::ZERO;
+                let mut dudt_i = 0.0;
                 for &j in &ngb {
                     if j == i {
                         continue;
@@ -225,14 +230,15 @@ fn hydro_impl(
                     // the exact negation of particle j's (coeff bit-identical by
                     // commutativity, grad_avg exactly negated).
                     a += grad_avg * (-mass[j] * coeff);
+                    dudt_i += mass[j] * term_i * v_ij.dot(grad_avg);
                 }
-                a
+                (a, dudt_i)
             };
 
             if parallel {
-                (0..n).into_par_iter().map(accel_one).collect()
+                (0..n).into_par_iter().map(one).unzip()
             } else {
-                (0..n).map(accel_one).collect()
+                (0..n).map(one).unzip()
             }
         }
         Eos::Adiabatic { gamma } => {
@@ -242,11 +248,12 @@ fn hydro_impl(
                 .map(|k| (gamma * (gamma - 1.0) * u[k]).sqrt())
                 .collect();
 
-            let accel_one = |i: usize| -> DVec3 {
+            let one = |i: usize| -> (DVec3, f64) {
                 let xi = pos[i];
                 let term_i = (gamma - 1.0) * u[i] / rho[i];
                 let ngb = grid.neighbours_within(pos, xi, SUPPORT * h_max);
                 let mut a = DVec3::ZERO;
+                let mut dudt_i = 0.0;
                 for &j in &ngb {
                     if j == i {
                         continue;
@@ -270,14 +277,15 @@ fn hydro_impl(
                     };
                     let coeff = term_i + term_j + visc;
                     a += grad_avg * (-mass[j] * coeff);
+                    dudt_i += mass[j] * term_i * v_ij.dot(grad_avg);
                 }
-                a
+                (a, dudt_i)
             };
 
             if parallel {
-                (0..n).into_par_iter().map(accel_one).collect()
+                (0..n).into_par_iter().map(one).unzip()
             } else {
-                (0..n).map(accel_one).collect()
+                (0..n).map(one).unzip()
             }
         }
     }

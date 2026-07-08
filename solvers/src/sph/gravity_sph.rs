@@ -15,7 +15,7 @@
 use galaxy_core::{DVec3, ForceSolver, Species, State};
 
 use super::density::{density_adaptive, DensityConfig};
-use super::forces::{hydro_accelerations, HydroParams};
+use super::forces::{hydro_accel_and_dudt, hydro_accelerations, HydroParams};
 
 /// Gravity + SPH composite solver. `G` is the wrapped gravity solver (any
 /// `ForceSolver`); `None` disables gravity for pure-hydro runs.
@@ -95,8 +95,42 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
     }
 
     fn accel_and_dudt(&mut self, state: &State, acc: &mut [DVec3], dudt: &mut [f64]) {
-        let _ = (state, acc, dudt);
-        todo!("E2a: GravitySph fused accel_and_dudt (gravity acc, fused hydro over gas subset, dudt=0 for non-gas)")
+        let n = state.len();
+        assert_eq!(acc.len(), n, "acc length must match particle count");
+        assert_eq!(dudt.len(), n, "dudt length must match particle count");
+
+        // Gravity over ALL particles, exactly as `accelerations` does.
+        match &mut self.gravity {
+            Some(g) => g.accelerations(state, acc),
+            None => acc.iter_mut().for_each(|a| *a = DVec3::ZERO),
+        }
+        dudt.iter_mut().for_each(|d| *d = 0.0);
+
+        // Fused hydro over the gas subset only: recompute ρ/h internally, same
+        // warm-start discipline as `accelerations`.
+        let gas: Vec<usize> = (0..n).filter(|&i| state.kind[i] == Species::Gas).collect();
+        if gas.is_empty() {
+            self.h_hint = None;
+            return;
+        }
+        let gpos: Vec<DVec3> = gas.iter().map(|&i| state.pos[i]).collect();
+        let gvel: Vec<DVec3> = gas.iter().map(|&i| state.vel[i]).collect();
+        let gmass: Vec<f64> = gas.iter().map(|&i| state.mass[i]).collect();
+        let gu: Vec<f64> = gas.iter().map(|&i| state.u[i]).collect();
+
+        let hint = self
+            .h_hint
+            .as_ref()
+            .filter(|hh| hh.len() == gas.len())
+            .map(Vec::as_slice);
+        let dens = density_adaptive(&gpos, &gmass, &self.density_cfg, hint);
+        let (a_hydro, dudt_hydro) =
+            hydro_accel_and_dudt(&gpos, &gvel, &gmass, &dens.rho, &dens.h, &gu, &self.params);
+        for (k, &i) in gas.iter().enumerate() {
+            acc[i] += a_hydro[k];
+            dudt[i] = dudt_hydro[k];
+        }
+        self.h_hint = Some(dens.h);
     }
 
     fn potential_energy(&self, state: &State) -> f64 {

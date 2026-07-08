@@ -644,8 +644,7 @@ fn dudt_parallel_equals_serial_bit_exact() {
     };
 
     let (par_acc, par_dudt) = hydro_accel_and_dudt(&pos, &vel, &mass, &rho, &h, &u, &params);
-    let (ser_acc, ser_dudt) =
-        hydro_accel_and_dudt_serial(&pos, &vel, &mass, &rho, &h, &u, &params);
+    let (ser_acc, ser_dudt) = hydro_accel_and_dudt_serial(&pos, &vel, &mass, &rho, &h, &u, &params);
     assert_eq!(
         par_acc, ser_acc,
         "rayon and serial fused accel must be bit-identical"

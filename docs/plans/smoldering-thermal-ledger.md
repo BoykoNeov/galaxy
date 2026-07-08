@@ -184,44 +184,84 @@ Workspace must `cargo build` at red ([[red-commit-must-compile-workspace]]).
 Split into two sub-milestones (mirrors the E1a/E1b data-layer /
 physics-layer split) so each lands as its own red/green TDD cycle:
 
-#### E2a — fused `accel_and_dudt` pass (plumbing; no integrator, no multi-step gate)
+#### E2a — fused `accel_and_dudt` pass (plumbing; no integrator, no multi-step gate) — DONE (2026-07-08)
+Red (`370d196`) + green. Advisor-vetted (see below): "`du/dt` using `term_i`
+alone is the *exact* energy-conserving partner of the symmetric momentum
+force — not an approximation" (worked the conservation: the residual `dE/dt`
+sum is pairwise-antisymmetric under i↔j and vanishes exactly, mod viscosity +
+time-integration error). Implemented as designed, no deviations:
 - `ForceSolver::accel_and_dudt` default method (`core/src/traits.rs`); default
   impl calls `accelerations` and zero-fills `dudt` (isothermal/gravity-only
   solvers get `du/dt≡0` for free).
-- Refactor `hydro_impl` (`solvers/src/sph/forces.rs`) to compute accel AND
-  `du_i/dt` in the same neighbor loop:
-  `du_i/dt = term_i · Σ_j m_j (v_ij·grad_avg)` — **PdV term only**, using
-  `term_i` alone (not `term_i+term_j+visc`); viscous heating is E3.
-  `hydro_accelerations`/`_serial` become thin wrappers over the fused function
-  dropping `dudt`, so accel output stays byte-identical (structural, not
-  incidental — same pattern as the E1b isothermal-verbatim guard).
+- Refactored `hydro_impl` → `hydro_accel_and_dudt_impl`
+  (`solvers/src/sph/forces.rs`) to compute accel AND `du_i/dt` in the same
+  neighbor loop: `du_i/dt = term_i · Σ_j m_j (v_ij·grad_avg)` — **PdV term
+  only**, using `term_i` alone (not `term_i+term_j+visc`); viscous heating is
+  E3. `hydro_accelerations`/`_serial` are now thin wrappers over the fused
+  function dropping `dudt`, so accel output stays byte-identical (structural,
+  not incidental — same pattern as the E1b isothermal-verbatim guard; the
+  `isothermal_regression_pins_pre_e1b_bits` frozen-bits gate confirms it).
 - New public `hydro_accel_and_dudt` / `hydro_accel_and_dudt_serial`.
 - `GravitySph::accel_and_dudt` override: fused hydro over the gas subset,
-  `dudt[i]=0` for non-gas rows.
-- **Gates:** hand-computed 2–3-particle `dudt` oracle (single call, no
-  integration); parallel≡serial bit-exact for `dudt`; accel from the fused
-  path bit-identical to `hydro_accelerations`; existing isothermal
-  byte-identity regression untouched.
+  `dudt[i]=0` for non-gas rows. `GravitySph::accelerations` itself is
+  untouched (separate code path, not routed through the fused function) —
+  lower risk than sharing, at the cost of some duplication.
+- **Gates (all green):** hand-computed 2-particle `dudt` oracle, isothermal
+  AND adiabatic (`dudt_matches_the_hand_oracle_{isothermal,adiabatic}`);
+  parallel≡serial bit-exact for `dudt`; fused-path accel bit-identical to
+  `hydro_accelerations`; existing isothermal byte-identity regression
+  untouched; `GravitySph` routing (gas-only fused-hydro match, non-gas
+  `dudt≡0`, and `accel_and_dudt`'s accel bit-identical to `accelerations()`);
+  default-impl delegation gate on a toy `ForceSolver` (`core/tests/traits.rs`).
 
 #### E2b — thermal integrator + adiabatic-compression gate (the physics validation)
+Advisor-vetted (2026-07-08) before implementation:
+- **Gravity MUST be OFF in the compression test** — the plan below states
+  viscosity-off but was silent on gravity, and that's the one real gap. If
+  `GravitySph` runs gravity, interior particles feel central attraction, the
+  ballistic `s(t)=1-kt` homology breaks, and the analytic reference stops
+  being code-independent (it'd depend on the N-body force). Use the same
+  gravity-off/pure-hydro path (`GravitySph::hydro_only`) the isothermal shock
+  tube uses, and say so explicitly in the test.
+- **Size the interior exclusion margin by sound-crossing distance, not a
+  fixed multiple of `h`** — this resolves the plan's open sizing question
+  below. The contaminating signal is the rarefaction wave launched from the
+  lattice boundary, propagating inward at `c_s`. Checked interior particles
+  need to sit `≥ max(2·h_max, c_s·t_end)` from the boundary, using the
+  **peak** `c_s` over the run (since `u`, and so `c_s`, grows under
+  compression) — neither "initial `h`" nor "shrunk/final `h`" as originally
+  posed; it's the wave-crossing length.
+- The `u`-kick timing/ordering (interleaved with the `v` half-kicks, see
+  below) is the highest-risk implementation detail, and the total-energy
+  oscillation gate below is what actually validates it: a mismatch between
+  the force's and `du/dt`'s kernel-averaged `∇W̄`, or a sign/ordering bug,
+  shows up as energy drift, not as a failed accel bit-check. Verify the
+  scheme empirically (tune the gate tolerance above the O(dt) first-order
+  timing floor, tight enough to catch a real bug) — do not assert it.
+- Affirmed independently, not shortcuts: `du/dt` using `term_i` alone (E2a) is
+  the exact energy-conserving partner of the symmetric force (see E2a note
+  above); a separate `LeapfrogKdkThermal` over branching `LeapfrogKdk` is
+  right (byte-identity discipline, matches the adaptive-dt series); the
+  self-similar reference below (`s(t)=1-kt`, `ρ∝s⁻³`, `u∝s^{-3(γ-1)}`,
+  reducing to `PVᵞ=const`) is correct and genuinely code-independent.
+
+Design:
 - `LeapfrogKdkThermal` (`core/src/integrator.rs` + `lib.rs` export): mirrors
   `LeapfrogKdk` (KDK, caches `acc`/`dudt` between steps), calls
   `accel_and_dudt`, kicks `state.u` alongside `state.vel` at both half-kicks.
   `LeapfrogKdk` itself stays untouched.
 - Homologous-lattice adiabatic-compression test: uniform-ρ/uniform-`u`
-  lattice, imposed velocity field `v_i = -k·(pos_i − center)`, **viscosity
-  off** (`alpha=0, beta=0` — isolates pure PdV physics; E2's `du/dt` has no
-  term to absorb viscous dissipation, so leaving viscosity on would leak
-  energy the gate can't attribute). Self-similar scaling gives a closed-form,
-  code-independent reference: separations scale by `s(t)=1-kt`,
-  `ρ(t)=ρ0/s(t)³`, `u(t)=u0·s(t)^(-3(γ-1))` (integrated first law; reduces to
-  the standard adiabat `u∝ρ^(γ-1)`, i.e. `PV^γ=const`). Check interior
-  particles' `u(t)`/`ρ(t)` track this over several steps.
-  Open sizing questions to settle at implementation time: lattice
-  size/step count/compression amount (enough steps to see the adiabat, not so
+  lattice, imposed velocity field `v_i = -k·(pos_i − center)`, **gravity off**
+  (see above) and **viscosity off** (`alpha=0, beta=0` — isolates pure PdV
+  physics; E2's `du/dt` has no term to absorb viscous dissipation, so leaving
+  viscosity on would leak energy the gate can't attribute). Self-similar
+  scaling gives a closed-form, code-independent reference: separations scale
+  by `s(t)=1-kt`, `ρ(t)=ρ0/s(t)³`, `u(t)=u0·s(t)^(-3(γ-1))` (integrated first
+  law; reduces to the standard adiabat `u∝ρ^(γ-1)`, i.e. `PV^γ=const`). Check
+  interior particles' `u(t)`/`ρ(t)` track this over several steps. Lattice
+  size/step count/compression amount: enough steps to see the adiabat, not so
   much boundary/sound-crossing effects contaminate the checked interior
-  particles), and whether the interior margin is sized off initial or
-  shrunk/final `h`.
+  particles — margin sized per the sound-crossing rule above.
 - Total-energy oscillation-bounded (~%-level, not drift) gate over the run,
   reusing `diagnostics::total_energy` and the `physics.rs` `max_e_err`
   pattern.

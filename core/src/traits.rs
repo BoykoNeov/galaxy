@@ -16,8 +16,9 @@ pub trait ForceSolver {
     /// `GravitySph` overrides this with a single fused SPH neighbor pass
     /// (accel + PdV work share the same loop).
     /// Requires `acc.len() == dudt.len() == state.len()`.
-    fn accel_and_dudt(&mut self, _state: &State, _acc: &mut [DVec3], _dudt: &mut [f64]) {
-        todo!("E2a: default accel_and_dudt (delegate to accelerations, zero-fill dudt)")
+    fn accel_and_dudt(&mut self, state: &State, acc: &mut [DVec3], dudt: &mut [f64]) {
+        self.accelerations(state, acc);
+        dudt.fill(0.0);
     }
 
     /// Total gravitational potential energy, using the SAME softened kernel as

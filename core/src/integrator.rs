@@ -127,6 +127,45 @@ impl Integrator for LeapfrogKdkThermal {
         _bg: &dyn Background,
         dt: f64,
     ) {
-        todo!("E2b: fused-thermal KDK step")
+        let n = state.len();
+        if self.acc.len() != n {
+            self.acc.clear();
+            self.acc.resize(n, DVec3::ZERO);
+            self.dudt.clear();
+            self.dudt.resize(n, 0.0);
+            self.primed = false;
+        }
+        // Prime (acc, du/dt) at the current positions on the first step (or after
+        // a particle-count change); later steps reuse the values left by the
+        // previous step's closing kick — one fused force evaluation per step.
+        if !self.primed {
+            solver.accel_and_dudt(state, &mut self.acc, &mut self.dudt);
+            self.primed = true;
+        }
+
+        let half = 0.5 * dt;
+        // Kick (half): velocity with a(xₙ), internal energy with (du/dt)(xₙ). Both
+        // half-kicks straddle the drift symmetrically, so the u-integration is the
+        // same 2nd-order symplectic-style update as the velocity.
+        for (v, a) in state.vel.iter_mut().zip(&self.acc) {
+            *v += *a * half;
+        }
+        for (u, d) in state.u.iter_mut().zip(&self.dudt) {
+            *u += *d * half;
+        }
+        // Drift.
+        for (x, v) in state.pos.iter_mut().zip(&state.vel) {
+            *x += *v * dt;
+        }
+        // Recompute (a, du/dt)(xₙ₊₁), cached for the next step's opening kick.
+        solver.accel_and_dudt(state, &mut self.acc, &mut self.dudt);
+        // Kick (half) using the post-drift values.
+        for (v, a) in state.vel.iter_mut().zip(&self.acc) {
+            *v += *a * half;
+        }
+        for (u, d) in state.u.iter_mut().zip(&self.dudt) {
+            *u += *d * half;
+        }
+        state.time += dt;
     }
 }

@@ -140,10 +140,16 @@ fn adiabatic_compression_tracks_the_self_similar_solution() {
     let mut max_e_err = 0.0_f64;
     let checkpoints = [20usize, 40, 67];
     let mut cp_idx = 0;
-    // PLACEHOLDERS — calibrated empirically from the --nocapture run (see plan
-    // E2b). Set above the observed L1/oscillation floor once, then documented.
-    const TOL: f64 = 0.05;
-    const E_TOL: f64 = 0.05;
+    // Tolerances calibrated from the --release --ignored --nocapture run (see
+    // plan E2b), each set a few× above the observed floor so this stays a
+    // regression gate, not a gross-breakage-only check:
+    //   L1(u):   4.4e-4 → 1.3e-3 (grows with compression = integration error)
+    //   L1(rho): 4.0e-3 → 4.4e-3 (~flat = SPH density discretization floor)
+    //   energy:  max_e_err = 8.3e-4 (bounded oscillation, not drift — the
+    //            symplectic KDK trades KE↔thermal via PdV, total is conserved).
+    const U_TOL: f64 = 5e-3; // ~4× the 1.3e-3 u floor.
+    const RHO_TOL: f64 = 1e-2; // ~2× the 4.4e-3 rho floor (flat → can be tighter).
+    const E_TOL: f64 = 4e-3; // ~5× the 8.3e-4 energy-oscillation floor.
     for step in 1..=n_steps {
         integ.step(&mut state, &mut solver as &mut dyn ForceSolver, &bg, dt);
         let e = diagnostics::total_energy(&state, &solver);
@@ -168,15 +174,19 @@ fn adiabatic_compression_tracks_the_self_similar_solution() {
                 "step={step} t={t:.3} s={s_t:.4} L1(u)={u_err:.5} (ref {u_ref:.5}) \
                  L1(rho)={rho_err:.5} (ref {rho_ref:.5})"
             );
-            assert!(u_err < TOL, "L1(u) = {u_err} exceeds {TOL} at step {step}");
             assert!(
-                rho_err < TOL,
-                "L1(rho) = {rho_err} exceeds {TOL} at step {step}"
+                u_err < U_TOL,
+                "L1(u) = {u_err} exceeds {U_TOL} at step {step}"
+            );
+            assert!(
+                rho_err < RHO_TOL,
+                "L1(rho) = {rho_err} exceeds {RHO_TOL} at step {step}"
             );
             cp_idx += 1;
         }
     }
     assert_eq!(cp_idx, checkpoints.len(), "not all checkpoints reached");
+    println!("max_e_err={max_e_err:e}");
     assert!(
         max_e_err < E_TOL,
         "energy oscillation too large: {max_e_err:e}"

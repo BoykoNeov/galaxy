@@ -214,7 +214,17 @@ time-integration error). Implemented as designed, no deviations:
   `dudt≡0`, and `accel_and_dudt`'s accel bit-identical to `accelerations()`);
   default-impl delegation gate on a toy `ForceSolver` (`core/tests/traits.rs`).
 
-#### E2b — thermal integrator + adiabatic-compression gate (the physics validation)
+#### E2b — thermal integrator + adiabatic-compression gate (the physics validation) — DONE (2026-07-08)
+Red `b7aa609` + green `3ee4fc7`, full gate green (341.7s). `LeapfrogKdkThermal`
+kicks `u` alongside `v` at both half-kicks via `accel_and_dudt` (2nd half at
+post-drift positions with `v_{n+1/2}`). Homologous-lattice gate
+(`solvers/tests/sph_adiabatic_compression.rs`), gravity+viscosity OFF: interior
+particles track `u∝s^{-3(γ-1)}`, `ρ∝s⁻³` to L1(u)≤1.3e-3 / L1(ρ)≤4.4e-3;
+energy oscillation max 8.3e-4 (bounded, not drift). Tolerances U_TOL 5e-3 /
+RHO_TOL 1e-2 / E_TOL 4e-3 calibrated few× above those observed floors. Fast 5³
+smoke test in the normal gate; 11³/67-step convergence run is `#[ignore]`
+(manual `--release --ignored`). Original advisor deltas (kept for the record):
+
 Advisor-vetted (2026-07-08) before implementation:
 - **Gravity MUST be OFF in the compression test** — the plan below states
   viscosity-off but was silent on gravity, and that's the one real gap. If

@@ -180,12 +180,56 @@ pass, adiabatic tests panic (red). Green = implement the adiabatic branch.
 Workspace must `cargo build` at red ([[red-commit-must-compile-workspace]]).
 
 ### E2 — `du/dt` PdV work + thermal integrator (no shocks)
-- `accel_and_dudt` fused pass; PdV term only (viscous heating in E3).
-- Thermal integrator branch kicking `u`.
-- **Gates:** smooth adiabatic compression of a gas ball heats per `P V^γ =
-  const` (independent hand-derived expectation, not the code's own output);
-  total energy oscillation-bounded (~%-level) over the run; momentum tripwire
-  unchanged (force still exactly antisymmetric).
+
+Split into two sub-milestones (mirrors the E1a/E1b data-layer /
+physics-layer split) so each lands as its own red/green TDD cycle:
+
+#### E2a — fused `accel_and_dudt` pass (plumbing; no integrator, no multi-step gate)
+- `ForceSolver::accel_and_dudt` default method (`core/src/traits.rs`); default
+  impl calls `accelerations` and zero-fills `dudt` (isothermal/gravity-only
+  solvers get `du/dt≡0` for free).
+- Refactor `hydro_impl` (`solvers/src/sph/forces.rs`) to compute accel AND
+  `du_i/dt` in the same neighbor loop:
+  `du_i/dt = term_i · Σ_j m_j (v_ij·grad_avg)` — **PdV term only**, using
+  `term_i` alone (not `term_i+term_j+visc`); viscous heating is E3.
+  `hydro_accelerations`/`_serial` become thin wrappers over the fused function
+  dropping `dudt`, so accel output stays byte-identical (structural, not
+  incidental — same pattern as the E1b isothermal-verbatim guard).
+- New public `hydro_accel_and_dudt` / `hydro_accel_and_dudt_serial`.
+- `GravitySph::accel_and_dudt` override: fused hydro over the gas subset,
+  `dudt[i]=0` for non-gas rows.
+- **Gates:** hand-computed 2–3-particle `dudt` oracle (single call, no
+  integration); parallel≡serial bit-exact for `dudt`; accel from the fused
+  path bit-identical to `hydro_accelerations`; existing isothermal
+  byte-identity regression untouched.
+
+#### E2b — thermal integrator + adiabatic-compression gate (the physics validation)
+- `LeapfrogKdkThermal` (`core/src/integrator.rs` + `lib.rs` export): mirrors
+  `LeapfrogKdk` (KDK, caches `acc`/`dudt` between steps), calls
+  `accel_and_dudt`, kicks `state.u` alongside `state.vel` at both half-kicks.
+  `LeapfrogKdk` itself stays untouched.
+- Homologous-lattice adiabatic-compression test: uniform-ρ/uniform-`u`
+  lattice, imposed velocity field `v_i = -k·(pos_i − center)`, **viscosity
+  off** (`alpha=0, beta=0` — isolates pure PdV physics; E2's `du/dt` has no
+  term to absorb viscous dissipation, so leaving viscosity on would leak
+  energy the gate can't attribute). Self-similar scaling gives a closed-form,
+  code-independent reference: separations scale by `s(t)=1-kt`,
+  `ρ(t)=ρ0/s(t)³`, `u(t)=u0·s(t)^(-3(γ-1))` (integrated first law; reduces to
+  the standard adiabat `u∝ρ^(γ-1)`, i.e. `PV^γ=const`). Check interior
+  particles' `u(t)`/`ρ(t)` track this over several steps.
+  Open sizing questions to settle at implementation time: lattice
+  size/step count/compression amount (enough steps to see the adiabat, not so
+  much boundary/sound-crossing effects contaminate the checked interior
+  particles), and whether the interior margin is sized off initial or
+  shrunk/final `h`.
+- Total-energy oscillation-bounded (~%-level, not drift) gate over the run,
+  reusing `diagnostics::total_energy` and the `physics.rs` `max_e_err`
+  pattern.
+- Momentum tripwire (exact pairwise antisymmetry) confirmed unaffected by the
+  thermal integrator.
+- Dt is fixed/manual for this gate, not CFL-driven —
+  `HydroParams::sound_speed()` panics on `Adiabatic` (per-particle CFL is
+  E4).
 
 ### E3 — viscous/shock heating + adiabatic Sod shock tube
 - Add the viscous heating term to `du/dt`.

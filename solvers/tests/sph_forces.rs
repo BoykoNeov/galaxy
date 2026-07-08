@@ -46,6 +46,35 @@ fn grad_x(d: f64, h: f64) -> f64 {
     -(norm * dp / h)
 }
 
+/// Monaghan artificial viscosity `Π_ij`, hand-coded from the documented formula
+/// (`forces.rs`) — active only on approach (`vr<0`). `c_bar` is the pair-averaged
+/// sound speed (isothermal `c_s`; adiabatic `½(c_s,i+c_s,j)`). An independent
+/// re-derivation for the E3 viscous-heating `du/dt` oracles, never read back from
+/// the function under test.
+#[allow(clippy::too_many_arguments)]
+fn monaghan_visc(
+    r_ij: DVec3,
+    v_ij: DVec3,
+    h_i: f64,
+    h_j: f64,
+    rho_i: f64,
+    rho_j: f64,
+    c_bar: f64,
+    alpha: f64,
+    beta: f64,
+    eps2: f64,
+) -> f64 {
+    let vr = v_ij.dot(r_ij);
+    if vr >= 0.0 {
+        return 0.0;
+    }
+    let r = r_ij.length();
+    let h_bar = 0.5 * (h_i + h_j);
+    let rho_bar = 0.5 * (rho_i + rho_j);
+    let mu = h_bar * vr / (r * r + eps2 * h_bar * h_bar);
+    (-alpha * c_bar * mu + beta * mu * mu) / rho_bar
+}
+
 #[test]
 fn two_particle_force_matches_the_hand_oracle() {
     // Two gas particles at rest on the x-axis, UNEQUAL h so the kernel average
@@ -527,15 +556,16 @@ fn adiabatic_uniform_lattice_interior_has_near_zero_net_force() {
 
 #[test]
 fn dudt_matches_the_hand_oracle_isothermal() {
-    // PdV-only du_i/dt = term_i · Σ_j m_j (v_ij·∇_i W̄_ij), term_i = P_i/ρ_i²
-    // ALONE (not term_i+term_j+visc as the force uses — viscous heating is E3).
-    // Same geometry as `two_particle_force_matches_the_hand_oracle` (unequal h
-    // so the kernel average is genuinely exercised), but with nonzero velocity
-    // so du/dt is nonzero. Since the separation is purely along x, grad_avg has
-    // zero y/z components, so only v_ij.x contributes to the dot product — and
-    // that dot product is invariant under i<->j swap (v_ji=-v_ij and
-    // grad_avg_j=-grad_avg_i cancel), so only the term_i coefficient
-    // distinguishes dudt[0] from dudt[1].
+    // E3: du_i/dt = Σ_j m_j (term_i + ½·Π_ij)(v_ij·∇_i W̄_ij), term_i = P_i/ρ_i².
+    // The pair APPROACHES (v_ij·r_ij = 0.5·(−0.8) = −0.4 < 0, default α/β on), so
+    // the ½Π viscous-heating addend is live — this was PdV-only under E2a and is
+    // updated to the full form here. Same geometry as
+    // `two_particle_force_matches_the_hand_oracle` (unequal h so the kernel
+    // average is genuinely exercised). The separation is purely along x, so
+    // grad_avg has zero y/z components and only v_ij.x contributes to the dot
+    // product — that dot product AND Π_ij are both invariant under i<->j swap, so
+    // only the term_i coefficient distinguishes dudt[0] from dudt[1]; the heating
+    // addend ½·Π·m·dot is identical for both.
     let (h0, h1, d) = (1.0_f64, 1.4_f64, 0.8_f64);
     let m = 1.0_f64;
     let (rho0, rho1) = (2.0_f64, 3.0_f64);
@@ -556,8 +586,22 @@ fn dudt_matches_the_hand_oracle_isothermal() {
 
     let grad_avg_x = 0.5 * (grad_x(d, h0) + grad_x(d, h1));
     let dot = (vel[0].x - vel[1].x) * grad_avg_x;
-    let expect0 = (cs2 / rho0) * m * dot;
-    let expect1 = (cs2 / rho1) * m * dot;
+    // Isothermal c̄ = c_s. Heating addend ½·Π·m·dot is common to both particles.
+    let visc = monaghan_visc(
+        pos[0] - pos[1],
+        vel[0] - vel[1],
+        h0,
+        h1,
+        rho0,
+        rho1,
+        params.sound_speed(),
+        params.alpha,
+        params.beta,
+        params.visc_eps2,
+    );
+    let heat = 0.5 * visc * m * dot;
+    let expect0 = (cs2 / rho0) * m * dot + heat;
+    let expect1 = (cs2 / rho1) * m * dot + heat;
 
     let rel0 = (dudt[0] - expect0).abs() / expect0.abs();
     let rel1 = (dudt[1] - expect1).abs() / expect1.abs();
@@ -567,7 +611,9 @@ fn dudt_matches_the_hand_oracle_isothermal() {
 
 #[test]
 fn dudt_matches_the_hand_oracle_adiabatic() {
-    // Same layout as the isothermal oracle above, but term_i = (γ−1)u_i/ρ_i.
+    // Same layout as the isothermal oracle above, but term_i = (γ−1)u_i/ρ_i and
+    // the viscous c̄ = ½(c_s,i+c_s,j) with c_s,k = √(γ(γ−1)u_k). The pair
+    // approaches, so the E3 ½Π heating addend is live.
     let (h0, h1, d) = (1.0_f64, 1.4_f64, 0.8_f64);
     let m = 1.0_f64;
     let (rho0, rho1) = (2.0_f64, 3.0_f64);
@@ -589,13 +635,95 @@ fn dudt_matches_the_hand_oracle_adiabatic() {
 
     let grad_avg_x = 0.5 * (grad_x(d, h0) + grad_x(d, h1));
     let dot = (vel[0].x - vel[1].x) * grad_avg_x;
-    let expect0 = ((gamma - 1.0) * u0 / rho0) * m * dot;
-    let expect1 = ((gamma - 1.0) * u1 / rho1) * m * dot;
+    let cs0 = (gamma * (gamma - 1.0) * u0).sqrt();
+    let cs1 = (gamma * (gamma - 1.0) * u1).sqrt();
+    let c_bar = 0.5 * (cs0 + cs1);
+    let visc = monaghan_visc(
+        pos[0] - pos[1],
+        vel[0] - vel[1],
+        h0,
+        h1,
+        rho0,
+        rho1,
+        c_bar,
+        params.alpha,
+        params.beta,
+        params.visc_eps2,
+    );
+    let heat = 0.5 * visc * m * dot;
+    let expect0 = ((gamma - 1.0) * u0 / rho0) * m * dot + heat;
+    let expect1 = ((gamma - 1.0) * u1 / rho1) * m * dot + heat;
 
     let rel0 = (dudt[0] - expect0).abs() / expect0.abs();
     let rel1 = (dudt[1] - expect1).abs() / expect1.abs();
     assert!(rel0 < 1e-12, "dudt[0] = {} vs oracle {expect0}", dudt[0]);
     assert!(rel1 < 1e-12, "dudt[1] = {} vs oracle {expect1}", dudt[1]);
+}
+
+#[test]
+fn viscous_heating_gates_on_approach_and_is_dissipative() {
+    // E3: du/dt gains the viscous-heating partner ½·Σ_j m_j Π_ij (v_ij·∇_i W̄_ij).
+    // Π_ij is active only when the pair APPROACHES (vr<0), so a receding pair has
+    // PdV-only du/dt (heating absent); the mirror-image approaching pair has a
+    // strictly larger, POSITIVE (dissipative) heating addend. Along-x velocities
+    // keep the algebra one-dimensional; the receding case is an exact velocity
+    // reversal of the approaching one (same speed, opposite sign of vr).
+    let (h0, h1, d) = (1.0_f64, 1.2_f64, 0.9_f64);
+    let (m, rho0, rho1) = (1.0_f64, 2.0_f64, 3.0_f64);
+    let params = HydroParams {
+        eos: Eos::Isothermal { c_s: 1.0 },
+        ..HydroParams::default()
+    };
+    let cs2 = params.sound_speed() * params.sound_speed();
+    let pos = vec![DVec3::ZERO, DVec3::new(d, 0.0, 0.0)];
+    let mass = vec![m, m];
+    let rho = vec![rho0, rho1];
+    let h = vec![h0, h1];
+    let u = vec![0.0; 2];
+    let grad_avg_x = 0.5 * (grad_x(d, h0) + grad_x(d, h1));
+
+    // Approaching along x (v_ij·r_ij < 0) and its exact velocity reversal.
+    let vel_a = vec![DVec3::new(0.4, 0.0, 0.0), DVec3::new(-0.4, 0.0, 0.0)];
+    let vel_r = vec![DVec3::new(-0.4, 0.0, 0.0), DVec3::new(0.4, 0.0, 0.0)];
+    let (_, dudt_a) = hydro_accel_and_dudt(&pos, &vel_a, &mass, &rho, &h, &u, &params);
+    let (_, dudt_r) = hydro_accel_and_dudt(&pos, &vel_r, &mass, &rho, &h, &u, &params);
+
+    // Receding ⇒ Π=0 ⇒ PdV-only: dudt_i = term_i·m·(v_ij·grad_avg).
+    let dot_r = (vel_r[0].x - vel_r[1].x) * grad_avg_x;
+    for i in 0..2 {
+        let pdv = (cs2 / rho[i]) * m * dot_r;
+        assert!(
+            (dudt_r[i] - pdv).abs() / pdv.abs() < 1e-12,
+            "receding dudt[{i}] = {} must be PdV-only {pdv}",
+            dudt_r[i]
+        );
+    }
+
+    // Approaching ⇒ PdV + ½·Π·m·dot; the heating addend is common to both i and
+    // strictly positive (dissipative).
+    let dot_a = (vel_a[0].x - vel_a[1].x) * grad_avg_x;
+    let visc = monaghan_visc(
+        pos[0] - pos[1],
+        vel_a[0] - vel_a[1],
+        h0,
+        h1,
+        rho0,
+        rho1,
+        params.sound_speed(),
+        params.alpha,
+        params.beta,
+        params.visc_eps2,
+    );
+    let heat = 0.5 * visc * m * dot_a;
+    assert!(heat > 0.0, "viscous heating must be positive (dissipative): {heat}");
+    for i in 0..2 {
+        let expect = (cs2 / rho[i]) * m * dot_a + heat;
+        assert!(
+            (dudt_a[i] - expect).abs() / expect.abs() < 1e-12,
+            "approaching dudt[{i}] = {} vs PdV+heat {expect}",
+            dudt_a[i]
+        );
+    }
 }
 
 #[test]

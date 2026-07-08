@@ -365,13 +365,65 @@ Original plan (for reference):
   - Tolerances calibrated from a `--release --ignored` run (E2b discipline).
 
 ### E4 — per-particle CFL into the adaptive-dt path + negative-`u` floor
-- Wire per-particle `c_s,i` into `cfl.rs` / `max_stable_dt`; adaptive-dt path
-  consumes it.
-- Positive-`u` floor `u ← max(u, u_min)` with a logged, bounded
-  non-conservation accounting.
-- **Gates:** adaptive-dt adiabatic run holds the convergence + contraction-
-  staleness gates (as the isothermal adaptive path does); floor engages only
-  under genuine over-cooling and its energy leak is bounded/reported.
+
+Split into **E4a** (per-particle CFL) / **E4b** (`u`-floor), each its own
+red/green cycle. Advisor-vetted 2026-07-08 (deltas folded in below); "approach
+is sound — proceed", both halves correctly scoped, byte-identity instinct
+right.
+
+#### E4a — per-particle `c_s` into `cfl.rs` / `max_stable_dt`
+- Generalize `v_sig,i` to `max(2·c_s,i, max_j(c_s,i + c_s,j − 3·min(0,w_ij)))`
+  over neighbors in the coupling range (Gadget-2 / Springel 2005). Including the
+  pair term `c_s,i+c_s,j` for **non-approaching** neighbors is correct (a hot
+  neighbor's sound wave reaches a resting particle) and — the load-bearing part
+  — a **provable no-op for isothermal** (`pair = 2c_s = floor`), so the verbatim
+  isothermal arm stays bit-identical. The `2·c_s,i` floor is the self-pair,
+  consistent with the isothermal `two_cs`.
+- **Keep the isothermal arm textually verbatim** inside `match eos {…}` (E1b/
+  E2a/E3a discipline). `HydroParams::sound_speed()` **moves inside the isothermal
+  arm** — it panics on Adiabatic, so it cannot stay above the branch (was
+  `cfl.rs:62`). The adiabatic arm reads gas-subset `u` from `state.u` (no
+  signature change) and uses per-particle `c_s,i=√(γ(γ−1)u_i)`.
+- **Preserve the gather/coupling gate verbatim** in the adiabatic arm: same
+  `neighbours_within(SUPPORT·h_max)` and `r < SUPPORT·h[i].max(h[j])` gate — the
+  cross-support-approacher property (it has an isothermal gate); the EOS changes
+  only the `c_s` values, not which pairs couple.
+- Optional DRY: an `Eos::sound_speed_of(u)` helper so `√(γ(γ−1)u)` doesn't live
+  in both `forces.rs:256` and `cfl.rs`.
+- **Gates:** (1) **isothermal frozen-bits pin** on the bound (like E1b's
+  `isothermal_regression_pins_pre_e1b_bits`) — the isothermal CFL feeds the
+  shipped gasrich adaptive movie, an out-of-band A/B control (NOT a `cargo test`
+  assertion), so a 1-ULP slip there turns no existing gate red but silently
+  shifts the shipped trajectory; the `rel<1e-9` scaling test won't catch it. (2)
+  adiabatic hand-derived 2-particle bound (`rel<1e-12`). (3) variable-`c_s` /
+  cross-support adiabatic case (a hot neighbor raises `v_sig` even at rest).
+
+#### E4b — positive-`u` floor with bounded, reported non-conservation
+- `u ← max(u, u_min)` in `LeapfrogKdkThermal`, **after BOTH half-kicks** — the
+  post-drift `accel_and_dudt` reads `u` to build pressure, so a negative `u`
+  there is a NaN `c_s`; clamping after every kick keeps "u ≥ u_min after every
+  kick" clean and the leak accounting complete.
+- **Default `u_min = 0.0`** → the floor is **provably inert** on the existing
+  fixed-dt gates (`max(positive,0)=positive` bit-identically, empty leak sum) →
+  compression/Sod stay green with zero re-verification. Add `with_u_floor(u_min)`
+  for the adaptive-adiabatic gate; do **not** derive a silent nonzero `Default`.
+- Leak `= Σ mass_i·(u_min − u_raw)` over clamped particles (energy injected, ≥0)
+  → field + getter = the "bounded, reported non-conservation" the design
+  promises. Momentum tripwire is floor-independent (clamp touches only `u`).
+- **Gates:** floor engage + leak-accounting unit via a **mock `ForceSolver`
+  returning large negative `dudt`** (`core/tests/integrator.rs`) — isolates the
+  clamp+leak with no SPH, captures `u_raw` before the clamp for the
+  counterfactual (`u` *would* have gone negative), asserts held at `u_min` and
+  leak matches the hand sum; plus the adaptive-adiabatic run exercising it
+  end-to-end.
+- **TRAP — no energy gate on the adaptive-adiabatic run.** Adiabatic earns an
+  energy-oscillation gate on the **fixed-dt** path (E2b/E3); the adaptive path
+  forfeits it (variable dt not symplectic), exactly as isothermal adaptive does.
+  Its gates are convergence-to-fine-reference + D2b contraction-staleness
+  (mirror the existing `LeapfrogKdk` adaptive tests with `LeapfrogKdkThermal` +
+  `Eos::Adiabatic`). Adding an energy gate would fail for the right reason.
+
+GPU untouched throughout E4.
 
 **Out of arc (named, not built here):** temperature-dependent gas color is a
 *separate later Phase-2 visual session* — now unblocked, but it needs a

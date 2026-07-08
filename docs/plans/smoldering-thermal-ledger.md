@@ -371,7 +371,14 @@ red/green cycle. Advisor-vetted 2026-07-08 (deltas folded in below); "approach
 is sound — proceed", both halves correctly scoped, byte-identity instinct
 right.
 
-#### E4a — per-particle `c_s` into `cfl.rs` / `max_stable_dt`
+#### E4a — per-particle `c_s` into `cfl.rs` / `max_stable_dt` — DONE (2026-07-08)
+Red + green. Implemented as designed, no deviations. `Eos::sound_speed_of(u)`
+DRY helper added (shared by `forces.rs`/`cfl.rs`, bit-identical refactor —
+adiabatic force hand oracles + parallel≡serial still green). Isothermal
+frozen-bits pin (`isothermal_cfl_pins_pre_e4a_bits`, `0x3f80c12ff76329e9`)
+confirms the `match` refactor is bit-identical. Adiabatic gates green:
+uniform-`u` static bound `= C·h_min/(2c_s)`, and a resting hot neighbor
+tightening the bound via the non-approaching pair term.
 - Generalize `v_sig,i` to `max(2·c_s,i, max_j(c_s,i + c_s,j − 3·min(0,w_ij)))`
   over neighbors in the coupling range (Gadget-2 / Springel 2005). Including the
   pair term `c_s,i+c_s,j` for **non-approaching** neighbors is correct (a hot
@@ -398,7 +405,19 @@ right.
   adiabatic hand-derived 2-particle bound (`rel<1e-12`). (3) variable-`c_s` /
   cross-support adiabatic case (a hot neighbor raises `v_sig` even at rest).
 
-#### E4b — positive-`u` floor with bounded, reported non-conservation
+#### E4b — positive-`u` floor with bounded, reported non-conservation — DONE (2026-07-08)
+Red + green. Implemented as designed. `LeapfrogKdkThermal` gained `u_min` /
+`u_floor_energy` fields, `with_u_floor(u_min)` ctor, `u_floor_energy()` getter,
+and `apply_u_floor` (clamp after BOTH half-kicks). Default `u_min=0.0` keeps
+the floor inert on the E2b/E3b fixed-dt gates (`max(positive,0)` bit-identical,
+empty leak) — those stayed green with zero re-verification. Gates green:
+2-particle mass-weighted engage+leak hand oracle (leak=2.0), the counterfactual
+(floor disabled ⇒ `u`<0), and the adiabatic-adaptive convergence + D2b
+staleness runs (`LeapfrogKdkThermal`+`Eos::Adiabatic`, floor inert under
+compression, exercising the E4a per-particle CFL end-to-end). NO energy gate on
+the adaptive path (variable dt not symplectic), per the trap.
+
+**E4 CLOSES the energy-equation series (E1–E4 all green).**
 - `u ← max(u, u_min)` in `LeapfrogKdkThermal`, **after BOTH half-kicks** — the
   post-drift `accel_and_dudt` reads `u` to build pressure, so a negative `u`
   there is a NaN `c_s`; clamping after every kick keeps "u ≥ u_min after every

@@ -104,17 +104,26 @@ Two independent chains; interleave with Phase 2 as appetite dictates.
 
 **Chain A — gas physics depth** (strictly ordered):
 1. **GPU SPH** (if the Phase-1 gate didn't already pull it in).
-2. **Energy equation** — adiabatic EOS, entropy formulation
-   (Springel–Hernquist). Re-enables total energy as a conservation gate
-   (D4 disabled it for isothermal). Unblocks temperature-dependent color.
+2. **Energy equation** — **DONE** (series `smoldering-thermal-ledger.md`,
+   E1–E4). Adiabatic EOS via an evolved per-particle internal energy `u`
+   (the computationally-lighter variant, NOT the Springel–Hernquist entropy
+   formulation — that path stays open as a third `Eos` variant). Re-enables
+   total energy as an oscillation-bounded conservation gate on the adiabatic
+   *fixed-dt* path (D4 renegotiated below). E4 landed per-particle adiabatic
+   CFL (`v_sig,i` with `c_s,i=√(γ(γ−1)u_i)`) and the positive-`u` floor
+   (bounded, reported leak). Unblocks temperature-dependent color (a separate
+   later visual session — needs a frame-data payload decision). Deferred:
+   GPU adiabatic, grad-h `f_i` terms, Balsara switch.
 3. **Radiative cooling/heating.**
 4. **Star formation + feedback** — gas→collisionless conversion via the
    `Species` column; gas progenitor tags 4/5 were reserved for this.
    Retires the M6e density→blue proxy and lifts the Q_gas ≥ 1 fail-loud
    gate (fragmentation becomes physical).
 5. Accuracy riders, any time after M7b: grad-h terms, Balsara switch,
-   individual/adaptive timesteps (the named follow-up if the CFL sentinel
-   forces a painful global dt).
+   individual/adaptive timesteps. GLOBAL block-adaptive dt is **DONE**
+   (series `courant-quickening-cadence.md`, A1–A5) and E4 fed it the
+   per-particle adiabatic CFL; INDIVIDUAL (per-particle block) timesteps
+   remain the deferred follow-up. grad-h + Balsara still open.
 
 **Chain B — scale + cosmology** (independent of Chain A):
 1. **TreePM / ParticleMesh solvers** behind `ForceSolver` —
@@ -142,8 +151,15 @@ behind the `validation` feature.
   time (D9; same rule that deferred Doppler hue).
 - **Gas compositing is ordered, never additive-splat** — absorption does not
   commute (the CLAUDE.md gotcha).
-- **Total energy is not a gate for isothermal runs** — momentum + shock-tube
-  oracle until the energy equation lands (D4).
+- **Total energy gate is EOS-conditional (D4, renegotiated by the energy
+  equation series).** ISOTHERMAL runs remain an implicit heat bath with NO
+  energy gate (momentum + shock-tube oracle only). ADIABATIC runs on the
+  *fixed-dt* path DO gate total energy — oscillation-bounded at the ~%-level
+  (tolerance justified by the deferred grad-h `f_i` terms, not 1e-6). The
+  *adaptive-dt* path forfeits it on both EOS (variable dt isn't symplectic);
+  its gates are convergence-to-fine-reference + D2b contraction-staleness.
+  The negative-`u` floor is a known, documented, bounded/reported
+  non-conservation (`u ← max(u,u_min)`, energy injected is accumulated).
 - **10⁸ gas ≠ this SPH** — CPU SPH is explicitly not the 10⁸ path; scale
   comes from GPU SPH or a different hydro method.
 

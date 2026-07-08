@@ -220,13 +220,17 @@ fn u_floor_holds_u_at_u_min_and_accounts_the_injected_energy() {
     // Injected energy = Σ mᵢ·(u_min − u_raw) over every clamp. Hand sum:
     //   kick1: p0 0.5→0.0 (+2·0.1), p1 0.3→−0.2 (+1·0.3)
     //   kick2: p0 0.1→−0.4 (+2·0.5), p1 0.1→−0.4 (+1·0.5)
-    let leak_expect = m0 * (u_min - 0.0) + m1 * (u_min - (-0.2)) + m0 * (u_min - (-0.4)) + m1 * (u_min - (-0.4));
+    let leak_expect =
+        m0 * (u_min - 0.0) + m1 * (u_min - (-0.2)) + m0 * (u_min - (-0.4)) + m1 * (u_min - (-0.4));
     assert!(
         (integ.u_floor_energy() - leak_expect).abs() < 1e-14,
         "floor leak = {} vs hand oracle {leak_expect}",
         integ.u_floor_energy()
     );
-    assert!(leak_expect > 0.0, "sanity: the floor must inject energy here");
+    assert!(
+        leak_expect > 0.0,
+        "sanity: the floor must inject energy here"
+    );
 }
 
 #[test]

@@ -156,6 +156,21 @@ impl LeapfrogKdkThermal {
         solver.accel_and_dudt(state, &mut self.acc, &mut self.dudt);
         self.primed = true;
     }
+
+    /// Clamp every `u` to `max(u, u_min)`, accumulating the injected energy
+    /// `Σ mᵢ·(u_min − u_raw)` over the clamped particles. Called after each
+    /// half-kick so the post-drift force evaluation never builds pressure from a
+    /// negative `u` (a NaN sound speed). Provably inert when `u_min = 0.0` and
+    /// every `u ≥ 0`: the `< u_min` test is false for all particles, so no bits
+    /// change and the leak sum stays empty.
+    fn apply_u_floor(&mut self, state: &mut State) {
+        for (u, &m) in state.u.iter_mut().zip(&state.mass) {
+            if *u < self.u_min {
+                self.u_floor_energy += m * (self.u_min - *u);
+                *u = self.u_min;
+            }
+        }
+    }
 }
 
 impl Integrator for LeapfrogKdkThermal {
@@ -192,6 +207,9 @@ impl Integrator for LeapfrogKdkThermal {
         for (u, d) in state.u.iter_mut().zip(&self.dudt) {
             *u += *d * half;
         }
+        // Floor `u` before the drift's post-position force eval reads it (NaN c_s
+        // on a negative u). Inert on positive-u runs (u_min = 0.0 default).
+        self.apply_u_floor(state);
         // Drift.
         for (x, v) in state.pos.iter_mut().zip(&state.vel) {
             *x += *v * dt;
@@ -205,6 +223,9 @@ impl Integrator for LeapfrogKdkThermal {
         for (u, d) in state.u.iter_mut().zip(&self.dudt) {
             *u += *d * half;
         }
+        // Floor again after the closing kick, so `u ≥ u_min` holds at the step
+        // boundary and this step's next-step opening reuse starts clean.
+        self.apply_u_floor(state);
         state.time += dt;
     }
 }

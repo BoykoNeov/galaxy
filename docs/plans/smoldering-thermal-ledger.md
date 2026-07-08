@@ -313,7 +313,24 @@ physics-layer rhythm. Advisor-vetted 2026-07-08 (deltas folded in below).
   approaching ⇒ `dudt` strictly larger, heating `≥0` verified); parallel≡serial
   still bit-exact; accel byte-identity regression untouched.
 
-#### E3b — γ=1.4 Sod oracle + shock-tube dynamical gate
+#### E3b — γ=1.4 Sod oracle + shock-tube dynamical gate — DONE (2026-07-08)
+Test-only (no new production code — EOS/fused du/dt/thermal-integrator/heating
+all already green). Landed as `solvers/tests/sph_sod_shock_tube.rs`: exact Toro
+Riemann oracle + oracle self-check (four canonical star values +
+fan-tail-continuity + RH mass-flux jump), fast smoke twin, and the ignored
+dynamical gate. **Calibration run (`--release --ignored`, t≈1.0, ~2700 particles,
+50 steps):** L1(ρ)=0.130, L1(v)=0.113, L1(P)=0.200 over the resolved mask;
+max_e_err=3.9e-3 (energy oscillation); entropy monotonic held; s*_R/s_R=1.0555
+matched the predicted ~5.5% RH jump. **KEY RESOLUTION FINDING (advisor-predicted):**
+at 8:1 the shock's ±2h smearing footprint engulfs the WHOLE contact→shock star
+region, so NEITHER ρ* NOR p* forms a clean plateau (star_p read ~25% low — a
+resolution bias, not a bug; pressure-continuity does NOT save it because the smear
+is the shock RAMP, not just the contact). Dropped the star-plateau pin (pinning to
+the sim's own smeared value would violate "compare to independent expectations");
+p*/shock physics is instead validated by energy (½Π) + the 2nd-law entropy gate,
+exactly as the plan's gate list specifies. star_p and s*_R printed for diagnostics.
+
+Original plan (for reference):
 - **Exact adiabatic Riemann solver** (Toro): Newton/bisection on the star
   pressure `p*` from `f_L(p)+f_R(p)+(v_R−v_L)=0` (rarefaction/shock branch per
   side), then sample the 5 regions (L | rarefaction fan | contact | post-shock |

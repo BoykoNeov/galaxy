@@ -17,7 +17,7 @@
 use galaxy_core::{DVec3, Species, State};
 
 use super::density::{density_adaptive, DensityConfig};
-use super::forces::HydroParams;
+use super::forces::{Eos, HydroParams};
 use super::grid::HashGrid;
 use super::kernel::SUPPORT;
 
@@ -59,38 +59,49 @@ pub fn max_stable_dt(state: &State, params: &HydroParams, cfg: &DensityConfig, c
 
     let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
     let grid = HashGrid::build(&gpos, SUPPORT * h_max);
-    let two_cs = 2.0 * params.sound_speed();
 
-    let mut min_dt = f64::INFINITY;
-    for i in 0..gpos.len() {
-        // Gather at the GLOBAL max support and gate each pair on the real force
-        // coupling range r < 2·max(h_i,h_j): the averaged kernel W̄ is nonzero
-        // there, so a diffuse large-h_j neighbor drives particle i even when
-        // 2·h_i < r. Querying only within 2·h_i would miss that approacher and
-        // leave v_sig,i stuck at the 2c_s floor — overestimating the stable dt
-        // (the force law it must track gathers at this same global radius). This
-        // runs at snapshot cadence, not per step, so the wider gather is cheap.
-        let ngb = grid.neighbours_within(&gpos, gpos[i], SUPPORT * h_max);
-        // v_sig,i = max_j (2c_s − 3 w_ij) over APPROACHING neighbors
-        // (w_ij = v_ij·r̂_ij < 0), floored at 2c_s.
-        let mut v_sig = two_cs;
-        for &j in &ngb {
-            if j == i {
-                continue;
+    // EOS selects the sound speed feeding `v_sig`. The isothermal arm is kept
+    // TEXTUALLY VERBATIM against the pre-E4a implementation (`two_cs` outside the
+    // loop, per-pair `two_cs − 3w`) so the bound stays bit-identical — see
+    // `isothermal_cfl_pins_pre_e4a_bits`. The adiabatic arm generalizes to the
+    // per-particle `c_s,i = √(γ(γ−1)u_i)` (E4a).
+    match params.eos {
+        Eos::Isothermal { .. } => {
+            let two_cs = 2.0 * params.sound_speed();
+            let mut min_dt = f64::INFINITY;
+            for i in 0..gpos.len() {
+                // Gather at the GLOBAL max support and gate each pair on the real
+                // force coupling range r < 2·max(h_i,h_j): the averaged kernel W̄ is
+                // nonzero there, so a diffuse large-h_j neighbor drives particle i
+                // even when 2·h_i < r. Querying only within 2·h_i would miss that
+                // approacher and leave v_sig,i stuck at the 2c_s floor —
+                // overestimating the stable dt (the force law it must track gathers
+                // at this same global radius). This runs at snapshot cadence, not
+                // per step, so the wider gather is cheap.
+                let ngb = grid.neighbours_within(&gpos, gpos[i], SUPPORT * h_max);
+                // v_sig,i = max_j (2c_s − 3 w_ij) over APPROACHING neighbors
+                // (w_ij = v_ij·r̂_ij < 0), floored at 2c_s.
+                let mut v_sig = two_cs;
+                for &j in &ngb {
+                    if j == i {
+                        continue;
+                    }
+                    let r_ij = gpos[i] - gpos[j];
+                    let r = r_ij.length();
+                    if r == 0.0 || r >= SUPPORT * h[i].max(h[j]) {
+                        continue; // outside the pair's force coupling range ⇒ no drive
+                    }
+                    let w = (gvel[i] - gvel[j]).dot(r_ij) / r; // projected relative velocity
+                    if w < 0.0 {
+                        v_sig = v_sig.max(two_cs - 3.0 * w);
+                    }
+                }
+                min_dt = min_dt.min(c_cfl * h[i] / v_sig);
             }
-            let r_ij = gpos[i] - gpos[j];
-            let r = r_ij.length();
-            if r == 0.0 || r >= SUPPORT * h[i].max(h[j]) {
-                continue; // outside the pair's force coupling range ⇒ no drive
-            }
-            let w = (gvel[i] - gvel[j]).dot(r_ij) / r; // projected relative velocity
-            if w < 0.0 {
-                v_sig = v_sig.max(two_cs - 3.0 * w);
-            }
+            min_dt
         }
-        min_dt = min_dt.min(c_cfl * h[i] / v_sig);
+        Eos::Adiabatic { .. } => todo!("E4a: per-particle adiabatic CFL"),
     }
-    min_dt
 }
 
 /// Fail-loud check: `Ok(())` iff `dt ≤ max_stable_dt(...)`.

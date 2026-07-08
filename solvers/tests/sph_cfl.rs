@@ -168,6 +168,146 @@ fn cross_support_approacher_tightens_the_bound() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// E4a — per-particle adiabatic CFL. `v_sig,i = max(2·c_s,i, max_j(c_s,i+c_s,j
+// − 3·min(0,w_ij)))` with `c_s,i = √(γ(γ−1)u_i)`; the isothermal arm stays
+// bit-identical (pair term `c_s,i+c_s,j = 2c_s = floor` is a provable no-op).
+// ---------------------------------------------------------------------------
+
+/// Build a gas state with per-particle internal energy `u`.
+fn gas_state_u(pos: Vec<DVec3>, vel: Vec<DVec3>, u: Vec<f64>) -> State {
+    let n = pos.len();
+    let mut s = State::from_phase_space(pos, vel, vec![1.0; n]);
+    for k in s.kind.iter_mut() {
+        *k = Species::Gas;
+    }
+    s.u = u;
+    s
+}
+
+#[test]
+fn isothermal_cfl_pins_pre_e4a_bits() {
+    // Byte-identity guard: the isothermal CFL bound feeds the shipped gasrich
+    // adaptive movie, an out-of-band A/B control (NOT a `cargo test` assertion),
+    // so a 1-ULP slip from the E4a `match`/per-particle refactor turns no other
+    // gate red but silently shifts the shipped trajectory. Pin the exact f64
+    // bits of the current (pre-E4a) isothermal bound on a fixed moving cloud
+    // (the `−3w` branch is live). Captured against the pre-E4a code.
+    let pos = random_points(21, 600, 2.5);
+    let vel = random_points(22, 600, 1.5);
+    let state = gas_state(pos, vel);
+    let cfg = DensityConfig::default();
+    let params = HydroParams::default();
+
+    let got = max_stable_dt(&state, &params, &cfg, C_CFL);
+    let frozen = f64::from_bits(0x3f80c12ff76329e9);
+    assert_eq!(
+        got.to_bits(),
+        frozen.to_bits(),
+        "isothermal CFL bound must stay bit-identical across the E4a refactor: \
+         got {got:e} (0x{:016x}), want {frozen:e}",
+        got.to_bits()
+    );
+}
+
+#[test]
+fn adiabatic_static_bound_scales_like_h_over_2cs() {
+    // Adiabatic twin of `bound_is_positive_and_scales_like_h_over_signal_speed`:
+    // uniform-`u` gas at rest ⇒ c_s,i = √(γ(γ−1)u) uniform, every pair term is
+    // 2c_s (= floor), so v_sig = 2c_s everywhere and the bound is
+    // C_cfl · h_min / (2 c_s). Recompute h_min independently.
+    let gamma = 1.4_f64;
+    let u0 = 2.0_f64;
+    let c_s = (gamma * (gamma - 1.0) * u0).sqrt();
+
+    let pos = random_points(11, 800, 3.0);
+    let n = pos.len();
+    let state = gas_state_u(pos.clone(), vec![DVec3::ZERO; n], vec![u0; n]);
+    let cfg = DensityConfig::default();
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma },
+        ..HydroParams::default()
+    };
+
+    let dens = density_adaptive(&pos, &state.mass, &cfg, None);
+    let h_min = dens.h.iter().cloned().fold(f64::INFINITY, f64::min);
+    let expect = C_CFL * h_min / (2.0 * c_s);
+
+    let got = max_stable_dt(&state, &params, &cfg, C_CFL);
+    let rel = (got - expect).abs() / expect;
+    assert!(
+        rel < 1e-9,
+        "adiabatic max_stable_dt = {got}, want {expect} (uniform-u static ⇒ v_sig = 2c_s)"
+    );
+}
+
+#[test]
+fn adiabatic_hot_neighbor_raises_vsig_at_rest() {
+    // The per-particle pair term `c_s,i + c_s,j` must apply to NON-approaching
+    // neighbors too (a hot neighbor's sound wave reaches a resting cold
+    // particle). Same cold lattice at rest, twice: once uniformly cold, once
+    // with a hot slab welded onto one face. The cold particles bordering the
+    // hot slab get v_sig = c_s,cold + c_s,hot > 2c_s,cold, so the hot-neighbor
+    // bound must be STRICTLY smaller even though nothing moves (w ≡ 0).
+    let gamma = 1.4;
+    let u_cold = 1.0;
+    let u_hot = 25.0; // c_s,hot = 5× c_s,cold
+
+    // A cold cubic lattice spanning x∈[0,1].
+    let mut cold = Vec::new();
+    let m = 8;
+    for a in 0..m {
+        for b in 0..m {
+            for c in 0..m {
+                let s = 1.0 / m as f64;
+                cold.push(DVec3::new(a as f64 * s, b as f64 * s, c as f64 * s));
+            }
+        }
+    }
+    let n_cold = cold.len();
+
+    let cfg = DensityConfig::default();
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma },
+        ..HydroParams::default()
+    };
+
+    // All-cold reference.
+    let all_cold = gas_state_u(
+        cold.clone(),
+        vec![DVec3::ZERO; n_cold],
+        vec![u_cold; n_cold],
+    );
+    let cold_bound = max_stable_dt(&all_cold, &params, &cfg, C_CFL);
+
+    // Hot slab welded onto the +x face (x∈[1+s, 2]), so the x≈1 cold layer has
+    // hot neighbors within the coupling range. Everything at rest.
+    let mut pos = cold.clone();
+    let mut u = vec![u_cold; n_cold];
+    let s = 1.0 / m as f64;
+    for a in 0..m {
+        for b in 0..m {
+            for c in 0..m {
+                pos.push(DVec3::new(
+                    1.0 + s + a as f64 * s,
+                    b as f64 * s,
+                    c as f64 * s,
+                ));
+                u.push(u_hot);
+            }
+        }
+    }
+    let n = pos.len();
+    let hot_slab = gas_state_u(pos, vec![DVec3::ZERO; n], u);
+    let hot_bound = max_stable_dt(&hot_slab, &params, &cfg, C_CFL);
+
+    assert!(
+        hot_bound < cold_bound,
+        "a resting hot neighbor must raise v_sig via the pair term and shrink \
+         the bound: hot-slab {hot_bound} should be < all-cold {cold_bound}"
+    );
+}
+
 #[test]
 fn gas_free_state_has_no_hydro_cfl_constraint() {
     // Pure collisionless state ⇒ no SPH CFL bound (returns +∞, any dt validates).

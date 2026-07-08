@@ -83,11 +83,29 @@ impl Integrator for LeapfrogKdk {
 /// fused `(acc, du/dt)` output. A separate type (not a branch on
 /// `LeapfrogKdk`) so the gravity-only/isothermal path keeps its exact current
 /// bit-path untouched.
+///
+/// A positive internal-energy floor `u ← max(u, u_min)` (E4b) clamps `u` after
+/// every half-kick — the energy formulation's one wart: aggressive PdV cooling
+/// can drive `u` below zero (a NaN sound speed at the next force eval). The
+/// clamp's injected energy is accumulated in [`u_floor_energy`] as a bounded,
+/// reported non-conservation. The default `u_min = 0.0` makes the floor
+/// provably inert on any run whose `u` stays positive (`max(positive, 0)` is
+/// bit-identical, the leak sum empty); [`with_u_floor`] sets a small positive
+/// value on the adaptive-adiabatic path.
+///
+/// [`u_floor_energy`]: LeapfrogKdkThermal::u_floor_energy
+/// [`with_u_floor`]: LeapfrogKdkThermal::with_u_floor
 #[derive(Clone, Debug, Default)]
 pub struct LeapfrogKdkThermal {
     acc: Vec<DVec3>,
     dudt: Vec<f64>,
     primed: bool,
+    /// Positive-`u` floor: `u ← max(u, u_min)` after each half-kick. `0.0` by
+    /// default (inert on positive-`u` runs).
+    u_min: f64,
+    /// Accumulated energy injected by the floor: `Σ mᵢ·(u_min − u_raw)` over
+    /// every clamp (≥ 0). The bounded, reported non-conservation.
+    u_floor_energy: f64,
 }
 
 impl LeapfrogKdkThermal {
@@ -96,15 +114,36 @@ impl LeapfrogKdkThermal {
             acc: Vec::new(),
             dudt: Vec::new(),
             primed: false,
+            u_min: 0.0,
+            u_floor_energy: 0.0,
         }
+    }
+
+    /// Construct with a positive internal-energy floor `u_min`. `u` is clamped to
+    /// `max(u, u_min)` after each half-kick and the injected energy accumulated
+    /// (see [`u_floor_energy`](Self::u_floor_energy)).
+    pub fn with_u_floor(u_min: f64) -> Self {
+        Self {
+            u_min,
+            ..Self::new()
+        }
+    }
+
+    /// Total energy injected by the `u`-floor so far: `Σ mᵢ·(u_min − u_raw)` over
+    /// every clamped particle across every step (≥ 0, `0.0` if the floor never
+    /// engaged). Cleared by [`reset`](Self::reset).
+    pub fn u_floor_energy(&self) -> f64 {
+        self.u_floor_energy
     }
 
     /// Clear cached state so the next `step` re-primes from scratch. Call this
     /// before reusing one integrator on a different run / initial condition.
+    /// Also zeroes the accumulated `u`-floor leak (`u_min` is config, retained).
     pub fn reset(&mut self) {
         self.acc.clear();
         self.dudt.clear();
         self.primed = false;
+        self.u_floor_energy = 0.0;
     }
 
     /// Eagerly compute and cache `(acc, du/dt)` at the current state, so the

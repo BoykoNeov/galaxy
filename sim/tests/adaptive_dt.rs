@@ -21,7 +21,8 @@
 //!     construction for a global scheme, NOT billed as a correctness gate.
 
 use galaxy_core::{
-    diagnostics, DVec3, ForceSolver, Integrator, LeapfrogKdk, Species, State, StaticBackground,
+    diagnostics, DVec3, ForceSolver, Integrator, LeapfrogKdk, LeapfrogKdkThermal, Species, State,
+    StaticBackground,
 };
 use galaxy_io::Header;
 use galaxy_sim::{plan_block, run_adaptive, AdaptiveConfig, SimError, SnapshotSink};
@@ -74,6 +75,24 @@ fn converging_gas_blob(seed: u64, n: usize, radius: f64, k: f64) -> State {
 fn hydro_solver(c_s: f64) -> GravitySph<BarnesHut> {
     let params = HydroParams {
         eos: Eos::Isothermal { c_s },
+        ..HydroParams::default()
+    };
+    GravitySph::<BarnesHut>::hydro_only(params, DensityConfig::default())
+}
+
+/// Adiabatic twin of [`converging_gas_blob`] with uniform positive internal
+/// energy `u0` (adiabatic `c_s = √(γ(γ−1)u)` needs `u > 0` for a finite CFL
+/// bound). Compression grows `u`, so the CFL bound moves — the testbed the
+/// convergence + staleness gates require, now on the per-particle-`c_s` path.
+fn converging_adiabatic_blob(seed: u64, n: usize, radius: f64, k: f64, u0: f64) -> State {
+    let mut s = converging_gas_blob(seed, n, radius, k);
+    s.u = vec![u0; s.len()];
+    s
+}
+
+fn adiabatic_solver(gamma: f64) -> GravitySph<BarnesHut> {
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma },
         ..HydroParams::default()
     };
     GravitySph::<BarnesHut>::hydro_only(params, DensityConfig::default())
@@ -360,4 +379,107 @@ fn rejects_gas_free_state_and_invalid_schedule() {
         ),
         Err(SimError::Config(_))
     ));
+}
+
+// --------------------------------------------------------------------------
+// E4b — the adiabatic adaptive path: the per-particle-c_s CFL (E4a) + the
+// thermal integrator (LeapfrogKdkThermal) end-to-end, with the positive-u
+// floor engaged (inert under compression). Same convergence + staleness gates
+// as the isothermal path; NO energy gate (variable dt not symplectic).
+// --------------------------------------------------------------------------
+
+/// A tiny positive floor: keeps c_s > 0 without perturbing a compressing run
+/// (u grows, never approaches this).
+const U_FLOOR: f64 = 1e-8;
+
+#[test]
+fn adiabatic_adaptive_converges_to_fine_reference_as_courant_shrinks() {
+    let gamma = 1.4;
+    let ic = converging_adiabatic_blob(0xB10B, 350, 1.0, 0.6, 2.0);
+    let bg = StaticBackground;
+    let output_dt = 0.05;
+    let n_outputs = 8; // full horizon T = 0.4.
+
+    let run_at = |courant: f64| -> Vec<DVec3> {
+        let mut s = ic.clone();
+        let mut solver = adiabatic_solver(gamma);
+        let mut integ = LeapfrogKdkThermal::with_u_floor(U_FLOOR);
+        let mut sink = CollectingSink::default();
+        run_adaptive(
+            &mut s,
+            &mut solver,
+            &mut integ,
+            &bg,
+            &cfg(courant, 16, output_dt, n_outputs),
+            &mut sink,
+        )
+        .unwrap();
+        // Compression grows u; the floor must never engage on this testbed.
+        assert_eq!(
+            integ.u_floor_energy(),
+            0.0,
+            "the u-floor must stay inert under compression (leak should be 0)"
+        );
+        sink.snaps.last().unwrap().1.pos.clone()
+    };
+
+    let reference = run_at(0.02);
+    let err = |a: &[DVec3]| {
+        a.iter()
+            .zip(&reference)
+            .map(|(p, r)| (*p - *r).length())
+            .fold(0.0_f64, f64::max)
+    };
+
+    let e_coarse = err(&run_at(0.2));
+    let e_fine = err(&run_at(0.1));
+
+    assert!(
+        e_fine < e_coarse,
+        "halving courant must reduce the error toward the reference: \
+         err(0.1) = {e_fine:e} !< err(0.2) = {e_coarse:e}"
+    );
+    assert!(
+        e_coarse < 0.1,
+        "even the coarse adiabatic adaptive run must track the reference within a blob radius: \
+         err(0.2) = {e_coarse:e}"
+    );
+}
+
+#[test]
+fn adiabatic_block_dt_never_exceeds_end_of_block_cfl_limit_under_contraction() {
+    let mut s = converging_adiabatic_blob(0xC0117AC7, 400, 1.0, 1.0, 2.0); // strong compression
+    let mut solver = adiabatic_solver(1.4);
+    let mut integ = LeapfrogKdkThermal::with_u_floor(U_FLOOR);
+    let bg = StaticBackground;
+    let c = cfg(0.25, 16, 0.05, 1); // block_steps = 16 (shipped), courant = 0.25
+
+    let t_end = c.output_dt * c.n_outputs as f64;
+    let mut t = 0.0;
+    let mut prev_target = c.courant * solver.max_stable_dt(&s);
+    assert!(prev_target.is_finite() && prev_target > 0.0);
+
+    while t < t_end - 1e-12 * t_end.max(c.output_dt) {
+        let limit = solver.max_stable_dt(&s);
+        let plan = plan_block(limit, prev_target, t_end - t, &c);
+        for _ in 0..plan.n_steps {
+            integ.step(&mut s, &mut solver, &bg, plan.dt);
+        }
+        t += plan.dt * plan.n_steps as f64;
+        prev_target = plan.dt_target;
+
+        // The bound tightens WITHIN the block under compression (h shrinks, c_s
+        // and v_sig grow); the realized dt must still sit under the end-of-block
+        // per-particle CFL limit (the D2b staleness property, now on the adiabatic
+        // c_s path).
+        let limit_end = solver.max_stable_dt(&s);
+        assert!(
+            plan.dt <= limit_end * (1.0 + 1e-9),
+            "block dt {} exceeded the end-of-block adiabatic CFL limit {} — contraction staleness",
+            plan.dt,
+            limit_end
+        );
+    }
+    // The floor stays inert throughout a compressing run.
+    assert_eq!(integ.u_floor_energy(), 0.0);
 }

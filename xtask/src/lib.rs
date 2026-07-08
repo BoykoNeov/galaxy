@@ -455,6 +455,126 @@ pub fn per_frame_radii(frames: &[FrameData], percentile: f32) -> Vec<f32> {
         .collect()
 }
 
+/// The per-instant power-of-two rung distribution of a set of gas CFL timesteps
+/// — the I0 go/no-go measurement (docs/plans/laddered-ember-cadence.md). Each gas
+/// particle is binned onto a rung `r = ⌈log2(dt_base / dt_i)⌉` below the coarsest
+/// particle's step `dt_base = max_i dt_i`, so its individual step would be
+/// `dt_base / 2^r` (≤ its own CFL requirement — the `⌈⌉` rounds toward the finer,
+/// more-work side, so it *under*-states the win; the safe direction for a go/no-go).
+///
+/// [`RungSpread::speedup`] is the **ideal-ceiling** speedup of individual-timestep
+/// SPH stepping over the global-adaptive path, which steps *every* gas particle at
+/// the finest requirement. It counts particle-updates per base block only — it
+/// EXCLUDES the I7 grid-rebuild / neighbour-prediction overhead (that is I6's net
+/// number), and it is over GAS particles only (collisionless rows carry no hydro
+/// CFL constraint — `dt = +∞`, the coarsest rung — and must not pad `N`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RungSpread {
+    /// Gas particles binned — the speedup numerator `N` (NOT the whole-sim `N`).
+    pub n: usize,
+    /// Coarsest per-particle step `dt_base = max_i dt_i` (rung 0's step).
+    pub dt_base: f64,
+    /// Tightest per-particle step `min_i dt_i` (pins the finest rung `r_max`).
+    pub dt_min: f64,
+    /// Per-rung occupancy: `counts[r]` particles on rung `r` (step `dt_base/2^r`),
+    /// for `r = 0..=r_max` where `r_max = counts.len() - 1`.
+    pub counts: Vec<usize>,
+    /// Ideal-ceiling speedup `N·2^r_max / Σ_i 2^r_i` (= `N / Σ_i 2^(r_i − r_max)`),
+    /// individual vs global-adaptive. Excludes I7 overhead — an upper bound.
+    pub speedup: f64,
+}
+
+impl RungSpread {
+    /// The finest occupied rung `r_max` (steps `2^r_max` times per base block).
+    pub fn r_max(&self) -> usize {
+        self.counts.len().saturating_sub(1)
+    }
+
+    /// Fraction of gas particles on the finest rung — the minority that pins the
+    /// global bound. A large fraction ⇒ most of the box needs the tiny step ⇒ a
+    /// small win (the plan's "shocked region is a big fraction" stop case).
+    pub fn finest_fraction(&self) -> f64 {
+        match self.counts.last() {
+            Some(&c) if self.n > 0 => c as f64 / self.n as f64,
+            _ => 0.0,
+        }
+    }
+
+    /// The raw per-instant spatial dynamic range `dt_base / dt_min` — the spread
+    /// the rung scheme discretizes (the quantity individual timesteps exploit;
+    /// distinct from A5's *temporal* 34× already banked by global adaptive).
+    pub fn dynamic_range(&self) -> f64 {
+        if self.dt_min > 0.0 {
+            self.dt_base / self.dt_min
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    /// Ideal-ceiling speedup if the fine tail were resolved only down to rung `cap`
+    /// — particles needing finer are clamped there (a real scheme needs the I5
+    /// limiter to do this safely), and the global baseline steps everyone at `2^cap`.
+    /// A **sensitivity diagnostic**, not a second verdict: it exposes how much of the
+    /// win rides on the deepest (often smallest, least-resolved) rungs. `cap ≥ r_max`
+    /// reproduces [`speedup`](Self::speedup); `cap = 0` gives 1× (no subdivision).
+    pub fn speedup_at_cap(&self, cap: usize) -> f64 {
+        let work: f64 = self
+            .counts
+            .iter()
+            .enumerate()
+            .map(|(r, &c)| c as f64 * (r.min(cap) as f64 - cap as f64).exp2())
+            .sum();
+        self.n as f64 / work
+    }
+}
+
+/// Bin a slice of per-particle gas CFL timesteps into power-of-two rungs and
+/// compute the ideal-ceiling individual-timestep speedup (see [`RungSpread`]).
+/// Non-finite / non-positive entries are dropped (defensive — the caller passes
+/// finite gas `dt`s). Returns `None` if nothing finite-positive remains.
+pub fn rung_spread(dt: &[f64]) -> Option<RungSpread> {
+    let finite: Vec<f64> = dt
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .collect();
+    if finite.is_empty() {
+        return None;
+    }
+    let dt_base = finite.iter().copied().fold(f64::MIN_POSITIVE, f64::max);
+    let dt_min = finite.iter().copied().fold(f64::INFINITY, f64::min);
+
+    // r_i = ⌈log2(dt_base / dt_i)⌉, clamped ≥ 0 (dt_i ≤ dt_base ⇒ ratio ≥ 1 ⇒ r ≥ 0;
+    // the clamp only guards fp noise at the coarsest particle where the ratio is 1).
+    let rungs: Vec<usize> = finite
+        .iter()
+        .map(|&d| (dt_base / d).log2().ceil().max(0.0) as usize)
+        .collect();
+    let r_max = rungs.iter().copied().max().unwrap_or(0);
+
+    let mut counts = vec![0usize; r_max + 1];
+    for &r in &rungs {
+        counts[r] += 1;
+    }
+
+    // speedup = N / Σ_i 2^(r_i − r_max): the finest rung contributes 1 per particle,
+    // each coarser rung half as much. Formed this way (exponent ≤ 0) it needs no
+    // large 2^r_max intermediate, so it cannot overflow for any r_max.
+    let work: f64 = rungs
+        .iter()
+        .map(|&r| (r as f64 - r_max as f64).exp2())
+        .sum();
+    let speedup = finite.len() as f64 / work;
+
+    Some(RungSpread {
+        n: finite.len(),
+        dt_base,
+        dt_min,
+        counts,
+        speedup,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +656,78 @@ mod tests {
         let r = per_frame_radii(&[FrameData::default(), frame_at(&[[3.0, 0.0, 0.0]])], 0.9);
         assert_eq!(r, vec![0.0, 3.0]);
         assert!(per_frame_radii(&[], 0.9).is_empty());
+    }
+
+    // --- rung spread / ideal-ceiling speedup (I0 go/no-go) ---------------------
+
+    #[test]
+    fn rung_spread_of_a_uniform_field_is_one_rung_no_win() {
+        // Every particle needs the same dt ⇒ one rung, speedup exactly 1 (nothing
+        // to gain — the global step already fits everyone).
+        let s = rung_spread(&[0.01; 5]).unwrap();
+        assert_eq!(s.n, 5);
+        assert_eq!(s.counts, vec![5]);
+        assert_eq!(s.r_max(), 0);
+        assert_eq!(s.finest_fraction(), 1.0);
+        assert!((s.speedup - 1.0).abs() < 1e-12, "{}", s.speedup);
+        assert!((s.dynamic_range() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rung_spread_half_coarse_half_16x_finer_hits_the_hand_derived_ceiling() {
+        // Half at dt_base, half needing 1/16 of it → rungs 0 and 4. Work per base
+        // block = (n/2)·1 + (n/2)·16 = (n/2)·17 fine-steps vs the global N·16, so
+        // speedup = 16N / ((N/2)·17) = 32/17 ≈ 1.882. Hand-derived, not self-checked.
+        let mut dt = vec![1.0; 4];
+        dt.extend([1.0 / 16.0; 4]);
+        let s = rung_spread(&dt).unwrap();
+        assert_eq!(s.n, 8);
+        assert_eq!(s.counts, vec![4, 0, 0, 0, 4]);
+        assert_eq!(s.r_max(), 4);
+        assert!((s.finest_fraction() - 0.5).abs() < 1e-12);
+        assert!((s.dynamic_range() - 16.0).abs() < 1e-9);
+        assert!((s.speedup - 32.0 / 17.0).abs() < 1e-12, "{}", s.speedup);
+    }
+
+    #[test]
+    fn rung_binning_rounds_toward_the_finer_rung() {
+        // A 10× spread is not a power of two: ⌈log2 10⌉ = 4 (step dt_base/16 ≤
+        // dt_i), NOT 3 — the conservative side that under-states the win.
+        let s = rung_spread(&[1.0, 0.1]).unwrap();
+        assert_eq!(s.counts.len(), 5); // rungs 0..=4
+        assert_eq!(s.counts[0], 1);
+        assert_eq!(s.counts[4], 1);
+    }
+
+    #[test]
+    fn speedup_at_cap_brackets_the_full_tail() {
+        // Same half/half field: capping at r_max reproduces the full speedup; capping
+        // at rung 0 forbids all subdivision (1×); intermediate caps trade win for
+        // stability, monotone in the cap.
+        let mut dt = vec![1.0; 4];
+        dt.extend([1.0 / 16.0; 4]);
+        let s = rung_spread(&dt).unwrap();
+        assert!((s.speedup_at_cap(s.r_max()) - s.speedup).abs() < 1e-12);
+        assert!((s.speedup_at_cap(0) - 1.0).abs() < 1e-12);
+        // cap 3: fine half clamped to rung 3 → work (4·2^-3 + 4·1) = 4.5 → 8/4.5.
+        assert!(
+            (s.speedup_at_cap(3) - 8.0 / 4.5).abs() < 1e-12,
+            "{}",
+            s.speedup_at_cap(3)
+        );
+        // Monotone non-decreasing in the cap (more resolved tail ⇒ ≥ win).
+        assert!(s.speedup_at_cap(2) <= s.speedup_at_cap(3) + 1e-12);
+        assert!(s.speedup_at_cap(3) <= s.speedup_at_cap(4) + 1e-12);
+    }
+
+    #[test]
+    fn rung_spread_drops_infinite_and_empty_inputs() {
+        // Collisionless +∞ rows must not survive to pad N (the verdict-flipping trap).
+        let s = rung_spread(&[f64::INFINITY, 0.02, f64::INFINITY]).unwrap();
+        assert_eq!(s.n, 1);
+        assert_eq!(s.counts, vec![1]);
+        assert!(rung_spread(&[]).is_none());
+        assert!(rung_spread(&[f64::INFINITY, -1.0, 0.0]).is_none());
     }
 
     // --- regrade arg parsing (M6a) -------------------------------------------

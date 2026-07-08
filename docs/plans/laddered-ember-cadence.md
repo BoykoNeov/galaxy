@@ -47,6 +47,55 @@ first.
 
 ---
 
+## I0 RESULT (measured 2026-07-08) — INCONCLUSIVE at QUICK; FULL pending
+
+The xtask exists: `galaxy-xtask rung-spread <snapshots_dir | .snap>` (isothermal
+arm of `cfl.rs` copied verbatim, `min` removed; the copy's `min` is asserted
+**bit-for-bit equal** to the shipped `max_stable_dt` on every reported snapshot —
+the I1 invariant used as a runtime self-check, so the number rides a verified code
+path without touching the shipped bound). It scans a run for the pericenter (the
+tightest global bound), histograms the per-particle rungs there and at the early
+diffuse snapshot, and reports the ideal-ceiling speedup `N_gas·2^r_max / Σ_i 2^r_i`
+plus a tail-sensitivity sweep. Corrections folded in vs the sketch above:
+- **`N` is GAS-ONLY.** Collisionless rows have `dt = +∞` (coarsest rung); padding
+  `N` with them inflates the ratio ~3.4× and could flip the verdict. Speedup is of
+  the **SPH/hydro stepping**, not whole-sim (gravity-over-all is untouched by rungs).
+- **The plan's printed denominator `Σ_r n_r·2^(r_max−r)` has the exponent inverted**
+  (gives speedup <1). Correct: `speedup = N_gas·2^r_max / Σ_i 2^r_i ≡ N_gas / Σ_i
+  2^(r_i−r_max)`, matching the plan's own gloss "≈ N / effective short-rung count".
+  `⌈log2⌉` binning under-states the win (safe side). The ceiling **excludes** I7
+  overhead (that's I6's net number).
+- Speedup is **invariant to `dt_base`** (the diffuse end); it is governed entirely
+  by the fine tail `dt_min`.
+
+**Only QUICK snapshots are retained** (`m7f_gasdemo`, and the QUICK `a5_movie`
+render — both seed `0x00C0FFEE`, 2500 gas). The A5 **full-res** run's snapshots went
+to a test tempdir and were **not** retained; only its log survives. So the number
+below is QUICK — NOT the plan's decision regime.
+
+QUICK pericenter (t=10, snapshot 20/60): **3.90× ideal ceiling**, N_gas=2500,
+spatial dynamic range **537×** (vs the temporal 34× that global adaptive already
+banks). **VERDICT: INCONCLUSIVE.** The 3.90× straddles the ≥3× GO line and is
+**tail-fragile**: the finest rung r=10 is only **6 particles (0.2%)**; resolving one
+rung coarser (cap r=9) drops the ceiling to **1.96× (<2× STOP)**. The 6 are
+*physical* (v_sig ≈ 3.9, a real shock; h ≈ 0.035 vs median 0.089 — not an
+artifact-`h` outlier), so the win is genuine per the definition — but it is a
+small-number statistic at QUICK resolution.
+
+**QUICK cannot settle the go/no-go, and the QUICK→FULL direction is two-sided:**
+soft QUICK gas (large `h`) *narrows* the spread ⇒ FULL ≥ QUICK; but FULL has 2.8×
+more gas and a better-resolved shock could put a *larger fraction* on the fine rungs
+⇒ FULL < QUICK (the plan's own "<2×" stop case). These cancel — no extrapolation.
+
+**Next (pending user, resource call):** (1) cheap QUICK **seed sweep** (the shipped
+seed was chosen CFL-clean/mild — 3–4 other realizations bracket whether the
+6-particle tail is this-seed noise); (2) **FULL-res regen** (~48 min adaptive sim,
+or truncate `n_steps` to ~t=12 past pericenter) — the plan's primary regime, the
+real number. The tool takes any snapshot dir, so FULL is zero rework. **Do NOT start
+I1 until FULL clears ≥3× robustly (tail-fragility resolved).**
+
+---
+
 ## What it buys — and what it does NOT
 
 - **Buys (primary, IF I0 clears): wall-clock speedup** from the per-instant
@@ -194,10 +243,13 @@ against, exactly as the LBVH/G-series lineage did.
 
 ## Milestones (TDD: red test committed separately, then green)
 
-- **I0 — measurement / go-no-go (xtask, NOT a red/green milestone).** Histogram
-  per-particle `h_i/v_sig,i` at a pericenter (and diffuse) `gasrich` snapshot,
-  min removed; report rung distribution + projected speedup; write it into this
-  doc. **Gate the rest of the plan on ≥ ~3× at pericenter.**
+- **I0 — measurement / go-no-go (xtask, NOT a red/green milestone). DONE (tool);
+  INCONCLUSIVE at QUICK — see "I0 RESULT" above.** `galaxy-xtask rung-spread <dir>`
+  histograms per-particle `h_i/v_sig,i` at pericenter + diffuse, min removed, with a
+  bit-exact self-check vs `max_stable_dt`. QUICK = 3.90× but tail-fragile (STOP if
+  the 6-particle 0.2% shock tail drops one rung); FULL-res (the decision regime) not
+  retained → pending a regen. **Gate the rest of the plan on ≥ ~3× at pericenter that
+  survives the tail-fragility test, measured at FULL res.**
 - **I1 — per-particle CFL vector.** Red: the vector's `min` equals the existing
   scalar `max_stable_dt` bit-for-bit on a fixed state (the vector is a strict
   generalization); collisionless rows are `+∞`. (I1)

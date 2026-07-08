@@ -62,7 +62,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use galaxy_core::State;
+use galaxy_core::{DVec3, Species, State};
 use galaxy_grade::{grade_file, BloomConfig, GradeConfig, ToneMap};
 use galaxy_render::camera::DEFAULT_MARGIN;
 use galaxy_render::{smooth_envelope, write_exr, Camera, CameraPath, RenderConfig, Renderer};
@@ -70,14 +70,17 @@ use galaxy_renderprep::{
     initial_radius_colors, knn_density, prepare, subframe, ColorMode, CompressionHue,
     DispersionColoring, FrameData, HermiteSpan, PrepConfig, RadialRamp,
 };
-use galaxy_solvers::sph::{density_adaptive, density_fixed, reference_density, DensityConfig};
+use galaxy_solvers::sph::{
+    density_adaptive, density_fixed, max_stable_dt, reference_density, DensityConfig, Eos,
+    HashGrid, HydroParams, SUPPORT,
+};
 use galaxy_xtask::simulate::simulate_snapshots;
 use galaxy_xtask::spec::{
     build_scenario, parse_scenario_toml, preset, Rig, Scenario, ScenarioSpec,
 };
 use galaxy_xtask::{
-    framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii, ColorModeArg,
-    ScenarioArg, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K,
+    framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii, rung_spread,
+    ColorModeArg, ScenarioArg, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K,
 };
 use glam::Vec3;
 
@@ -142,6 +145,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // per-star attenuation) on static synthetic data — no sim.
     if args.first().map(String::as_str) == Some("volume-demo") {
         return volume_demo(&args[1..]);
+    }
+
+    // `rung-spread` is the I0 go/no-go measurement (docs/plans/laddered-ember-
+    // cadence.md): histogram the per-instant per-particle gas CFL timesteps and
+    // report the ideal-ceiling individual-timestep speedup — no sim, no render.
+    if args.first().map(String::as_str) == Some("rung-spread") {
+        return rung_spread_cmd(&args[1..]);
     }
 
     let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
@@ -779,6 +789,385 @@ fn volume_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     emit("stars_only", None)?;
     println!("A/B pair: composite.png (attenuation ON) vs no_absorption.png (κ = 0)");
+    Ok(())
+}
+
+/// One gas particle's CFL data (I0): its stable step `dt = c_cfl·h/v_sig` and the
+/// two quantities that set it. `h`/`v_sig` are surfaced so the finest rung can be
+/// eyeballed — a "win" driven by one particle with an artifact-tiny `h` is measuring
+/// numerical noise, not a physical dense knot (the advisor's #7 sanity check).
+#[derive(Clone, Copy)]
+struct GasDt {
+    dt: f64,
+    h: f64,
+    v_sig: f64,
+}
+
+/// A faithful copy of the **isothermal arm** of [`galaxy_solvers::sph::max_stable_dt`]
+/// with the `min` fold removed — the per-particle `dt_i = c_cfl · h_i / v_sig,i` over
+/// the gas subset, in gas (ascending-index) order. Byte-for-byte the same arithmetic
+/// and gather order as the shipped scalar bound, so `min_i dt_i` equals
+/// `max_stable_dt(...)` exactly (asserted at runtime by the caller — the I1 invariant
+/// used here as a self-check).
+///
+/// Kept in the xtask, NOT the solver: I0 is a go/no-go measurement, so the shipped CFL
+/// path stays textually untouched (the E-series verbatim pin) and I0 stays reversible
+/// if the verdict is "stop". If it is "go", I1 lands the gated per-particle vector in
+/// `cfl.rs` and this copy retires.
+fn per_particle_gas_dt(state: &State, c_s: f64, cfg: &DensityConfig, c_cfl: f64) -> Vec<GasDt> {
+    let gas: Vec<usize> = (0..state.len())
+        .filter(|&i| state.kind[i] == Species::Gas)
+        .collect();
+    if gas.is_empty() {
+        return Vec::new();
+    }
+    let gpos: Vec<DVec3> = gas.iter().map(|&i| state.pos[i]).collect();
+    let gvel: Vec<DVec3> = gas.iter().map(|&i| state.vel[i]).collect();
+    let gmass: Vec<f64> = gas.iter().map(|&i| state.mass[i]).collect();
+    let dens = density_adaptive(&gpos, &gmass, cfg, None);
+    let h = &dens.h;
+
+    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+    let grid = HashGrid::build(&gpos, SUPPORT * h_max);
+    let two_cs = 2.0 * c_s;
+
+    let mut out = Vec::with_capacity(gpos.len());
+    for i in 0..gpos.len() {
+        let ngb = grid.neighbours_within(&gpos, gpos[i], SUPPORT * h_max);
+        let mut v_sig = two_cs;
+        for &j in &ngb {
+            if j == i {
+                continue;
+            }
+            let r_ij = gpos[i] - gpos[j];
+            let r = r_ij.length();
+            if r == 0.0 || r >= SUPPORT * h[i].max(h[j]) {
+                continue;
+            }
+            let w = (gvel[i] - gvel[j]).dot(r_ij) / r;
+            if w < 0.0 {
+                v_sig = v_sig.max(two_cs - 3.0 * w);
+            }
+        }
+        out.push(GasDt {
+            dt: c_cfl * h[i] / v_sig,
+            h: h[i],
+            v_sig,
+        });
+    }
+    out
+}
+
+/// The I0 go/no-go measurement (docs/plans/laddered-ember-cadence.md). Loads a
+/// `gasrich` snapshot (or a directory of them), computes the per-instant gas CFL
+/// timestep of every gas particle, and histograms the power-of-two rung
+/// distribution at the **pericenter** snapshot (the tightest global CFL bound,
+/// where individual timesteps help most) and, for contrast, the first (early
+/// diffuse) snapshot. Reports the ideal-ceiling individual-timestep speedup and
+/// the go/no-go verdict against the plan's ≥3× / <2× thresholds.
+///
+/// The number this produces is the SPATIAL spread of `h_i/v_sig,i` across particles
+/// at one instant — NOT the A5 headline 34× (that is the *temporal* range of the
+/// global bound, already banked by global block-adaptive). See the plan's opening.
+///
+/// Usage: `rung-spread <snapshots_dir | snapshot.snap> [--c-s C] [--c-cfl C]`.
+fn rung_spread_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    const USAGE: &str = "usage: rung-spread <snapshots_dir | snapshot.snap> [--c-s C] [--c-cfl C]";
+    let mut path: Option<PathBuf> = None;
+    // gasrich isothermal sound speed; the pipeline's C_CFL cancels in the rung
+    // ratios, so c_cfl only scales the printed dt — default 1.0 so the global-min-dt
+    // curve reconciles directly with the A5 run log (min 3.42e-3 @ c_cfl=1).
+    let mut c_s = 0.1_f64;
+    let mut c_cfl = 1.0_f64;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut num = |flag: &str| -> Result<f64, String> {
+            it.next()
+                .ok_or(format!("{flag} needs a value"))?
+                .parse()
+                .map_err(|_| format!("{flag} must be a number"))
+        };
+        match a.as_str() {
+            "--c-s" => c_s = num("--c-s")?,
+            "--c-cfl" => c_cfl = num("--c-cfl")?,
+            other if path.is_none() => path = Some(PathBuf::from(other)),
+            other => return Err(format!("unexpected argument `{other}`\n{USAGE}").into()),
+        }
+    }
+    let path = path.ok_or_else(|| format!("no snapshot given\n{USAGE}"))?;
+    if !(c_s.is_finite() && c_s > 0.0 && c_cfl.is_finite() && c_cfl > 0.0) {
+        return Err(
+            format!("--c-s and --c-cfl must be positive (got c_s={c_s}, c_cfl={c_cfl})").into(),
+        );
+    }
+
+    // A directory ⇒ the full run (scan for the pericenter); a single file ⇒ just it.
+    let files: Vec<PathBuf> = if path.is_dir() {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(&path)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "snap"))
+            .collect();
+        v.sort(); // snapshot_<step:08>.snap → lexicographic == time order
+        if v.is_empty() {
+            return Err(format!("no .snap files under {}", path.display()).into());
+        }
+        v
+    } else {
+        vec![path.clone()]
+    };
+
+    let cfg = DensityConfig::default();
+    println!(
+        "I0 rung-spread — the go/no-go for individual (per-particle) timesteps\n\
+         source     {}\n\
+         params     isothermal c_s = {c_s}, c_cfl = {c_cfl}, N_ngb = {}\n\
+         measuring  the per-instant SPATIAL spread of gas dt_i = c_cfl·h_i/v_sig,i\n\
+         (NOT the A5 34× — that is the TEMPORAL range, already banked by global adaptive)\n",
+        path.display(),
+        cfg.n_ngb,
+    );
+
+    // Pass 1: the global-min-dt curve over every snapshot (the pericenter dip). Uses
+    // the copy's own min (self-checked against the shipped scalar on the reported
+    // snapshots below), so the whole curve rides one verified code path.
+    struct Row {
+        file: PathBuf,
+        time: f64,
+        scalar: f64,
+        n_gas: usize,
+    }
+    let mut rows: Vec<Row> = Vec::with_capacity(files.len());
+    for f in &files {
+        let (_hdr, state) = galaxy_io::read_file(f)?;
+        let v = per_particle_gas_dt(&state, c_s, &cfg, c_cfl);
+        if v.is_empty() {
+            return Err(format!("{}: snapshot has no gas particles", f.display()).into());
+        }
+        let scalar = v.iter().map(|g| g.dt).fold(f64::INFINITY, f64::min);
+        rows.push(Row {
+            file: f.clone(),
+            time: state.time,
+            scalar,
+            n_gas: v.len(),
+        });
+    }
+
+    // Pericenter = tightest global bound; early-diffuse = first snapshot.
+    let peri = rows
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.scalar.total_cmp(&b.scalar))
+        .map(|(i, _)| i)
+        .expect("rows non-empty");
+    let loosest = rows.iter().map(|r| r.scalar).fold(0.0_f64, f64::max);
+
+    if files.len() > 1 {
+        println!("--- global min dt over the run (the pericenter dip) ---");
+        println!("     snapshot                 t        min_i dt_i   N_gas");
+        for (i, r) in rows.iter().enumerate() {
+            let name = r.file.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+            let mark = if i == peri { "  <- PERICENTER" } else { "" };
+            println!(
+                "  {name:<28} {:>6.2}   {:>10.4e}   {:>5}{mark}",
+                r.time, r.scalar, r.n_gas
+            );
+        }
+        println!(
+            "  span: tightest {:.4e} (pericenter) .. loosest {:.4e}  (temporal range {:.1}×)\n",
+            rows[peri].scalar,
+            loosest,
+            loosest / rows[peri].scalar,
+        );
+    }
+
+    // Report the two snapshots. Pericenter carries the decision; the first snapshot
+    // is within-run contrast (early, diffuse — before the encounter compresses the gas).
+    let hydro = HydroParams {
+        eos: Eos::Isothermal { c_s },
+        ..HydroParams::default()
+    };
+    if files.len() > 1 {
+        report_snapshot(
+            "EARLY DIFFUSE (first snapshot — contrast only)",
+            &rows[0].file,
+            c_s,
+            c_cfl,
+            &cfg,
+            &hydro,
+            false,
+        )?;
+    }
+    let peri_label = if files.len() > 1 {
+        "PERICENTER (tightest global bound — the decision snapshot)"
+    } else {
+        "SNAPSHOT"
+    };
+    report_snapshot(peri_label, &rows[peri].file, c_s, c_cfl, &cfg, &hydro, true)?;
+
+    println!(
+        "\nNote: the speedup is an IDEAL CEILING — particle-updates per base block only.\n\
+         It EXCLUDES the I7 grid-rebuild / neighbour-prediction overhead (I6's net number)\n\
+         and is over GAS particles only (collisionless rows carry no hydro CFL, dt = +∞).\n\
+         Formula: speedup = N_gas·2^r_max / Σ_i 2^r_i (the plan's printed 2^(r_max−r)\n\
+         exponent is inverted; this matches its gloss ≈ N / effective short-rung count)."
+    );
+    Ok(())
+}
+
+/// Compute + print one snapshot's rung histogram and (if `decide`) the go/no-go
+/// verdict. Asserts the copied per-particle vector's `min` equals the shipped
+/// scalar `max_stable_dt` bit-for-bit — the correctness anchor that lets a parallel
+/// copy stand in for the shipped bound without refactoring it.
+fn report_snapshot(
+    label: &str,
+    file: &Path,
+    c_s: f64,
+    c_cfl: f64,
+    cfg: &DensityConfig,
+    hydro: &HydroParams,
+    decide: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_hdr, state) = galaxy_io::read_file(file)?;
+    let gas = per_particle_gas_dt(&state, c_s, cfg, c_cfl);
+    let dts: Vec<f64> = gas.iter().map(|g| g.dt).collect();
+    let vec_min = dts.iter().copied().fold(f64::INFINITY, f64::min);
+
+    // The I1 invariant as a runtime self-check: the copy must reproduce the shipped
+    // bound to the bit, else the whole measurement is measuring the wrong physics.
+    let scalar = max_stable_dt(&state, hydro, cfg, c_cfl);
+    if vec_min.to_bits() != scalar.to_bits() {
+        return Err(format!(
+            "I0 self-check FAILED on {}: copied vector min {vec_min:.17e} != shipped \
+             max_stable_dt {scalar:.17e} — the CFL copy diverged from the solver",
+            file.display()
+        )
+        .into());
+    }
+
+    let spread = rung_spread(&dts).ok_or("no finite gas dt in snapshot")?;
+    let (dt_lo, dt_med, dt_hi) = min_median_max(&dts);
+    let name = file.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+
+    let n_collisionless = state.len() - spread.n;
+    println!("=== {label} ===");
+    println!("  {name}  (t = {:.2})", state.time);
+    println!(
+        "  N_gas {} of {} total ({n_collisionless} collisionless — no hydro CFL, \
+         dt = +∞, excluded from N)",
+        spread.n,
+        state.len(),
+    );
+    println!(
+        "  dt: min {dt_lo:.4e}  median {dt_med:.4e}  max {dt_hi:.4e}  \
+         (spatial dynamic range {:.1}×)",
+        spread.dynamic_range(),
+    );
+    println!("  self-check: min_i dt_i == max_stable_dt = {scalar:.6e}  [bit-exact OK]");
+
+    // The rung histogram: rung 0 is the coarsest (step dt_base), r_max the finest.
+    let dt_base = spread.dt_base;
+    let r_max = spread.r_max();
+    let n = spread.n as f64;
+    println!("  rung   step (dt_base/2^r)   count    frac   |");
+    for (r, &cnt) in spread.counts.iter().enumerate() {
+        let frac = cnt as f64 / n;
+        let bar = "#".repeat((frac * 40.0).round() as usize);
+        let tag = if r == r_max { " (finest)" } else { "" };
+        println!(
+            "  {r:>3}    {:>16.4e}   {cnt:>6}   {:>5.1}%  | {bar}{tag}",
+            dt_base / 2f64.powi(r as i32),
+            frac * 100.0,
+        );
+    }
+
+    // Eyeball the finest rung (advisor #7): is it a physical knot (many particles)
+    // or 1–2 outliers with an anomalous h? Compare their h to the overall gas h.
+    let all_h: Vec<f64> = gas.iter().map(|g| g.h).collect();
+    let (_, h_med, _) = min_median_max(&all_h);
+    let finest: Vec<&GasDt> = gas
+        .iter()
+        .filter(|g| ((dt_base / g.dt).log2().ceil().max(0.0) as usize) == r_max)
+        .collect();
+    let finest_h: Vec<f64> = finest.iter().map(|g| g.h).collect();
+    let finest_vsig: Vec<f64> = finest.iter().map(|g| g.v_sig).collect();
+    let (fh_lo, _, fh_hi) = min_median_max(&finest_h);
+    let (fv_lo, _, fv_hi) = min_median_max(&finest_vsig);
+    println!(
+        "  finest rung r={r_max}: {} particle(s) ({:.1}% of gas); h ∈ [{fh_lo:.3e}, {fh_hi:.3e}] \
+         (overall median h {h_med:.3e}); v_sig ∈ [{fv_lo:.3e}, {fv_hi:.3e}]",
+        finest.len(),
+        spread.finest_fraction() * 100.0,
+    );
+    if finest.len() <= 2 && fh_hi < 0.25 * h_med {
+        println!(
+            "  ⚠ finest rung is 1–2 particles with h well below the median — likely a \
+             numerical-h outlier, not a physical knot; discount its contribution."
+        );
+    }
+
+    // Sensitivity to the resolved-tail depth (advisor): the speedup is invariant to
+    // dt_base (the diffuse end) and governed by the finest rungs, so show how the
+    // ceiling collapses if the tail is only resolved to rung c. A DIAGNOSTIC — a real
+    // cap needs the I5 timestep limiter — not a second verdict.
+    if r_max >= 1 {
+        let caps: Vec<usize> = (r_max.saturating_sub(3)..=r_max)
+            .filter(|&c| c >= 1)
+            .collect();
+        let cells: Vec<String> = caps
+            .iter()
+            .map(|&c| {
+                let tag = if c == r_max { " (full tail)" } else { "" };
+                format!("cap r={c} → {:.2}×{tag}", spread.speedup_at_cap(c))
+            })
+            .collect();
+        println!(
+            "  tail sensitivity (resolve fine rungs only to c):  {}",
+            cells.join("   ")
+        );
+    }
+    println!(
+        "  IDEAL-CEILING SPEEDUP (individual vs global-adaptive): {:.2}×",
+        spread.speedup
+    );
+    if decide {
+        // Tail-fragility test: if dropping the single finest rung collapses the
+        // ceiling below the STOP line, the "win" rides an under-resolved tail (a
+        // small-number statistic at this resolution) and the number cannot settle
+        // the go/no-go on its own — it needs the higher-resolution regime.
+        let robust = spread.speedup_at_cap(r_max.saturating_sub(1));
+        let fragile = spread.speedup >= 3.0 && robust < 2.0;
+        let verdict = if fragile {
+            format!(
+                "INCONCLUSIVE — {:.2}× clears ≥3× but is TAIL-FRAGILE: resolving the \
+                 finest rung one step coarser drops it to {robust:.2}× (<2×). The win \
+                 rides a {}-particle ({:.1}%) tail — verify at full resolution before \
+                 committing (do NOT start I1 on this number).",
+                spread.speedup,
+                spread.counts.last().copied().unwrap_or(0),
+                spread.finest_fraction() * 100.0,
+            )
+        } else if spread.speedup >= 3.0 {
+            format!(
+                "GO — {:.2}× ideal ceiling and robust to the finest rung ({robust:.2}× \
+                 without it); build individual timesteps.",
+                spread.speedup
+            )
+        } else if spread.speedup < 2.0 {
+            format!(
+                "STOP — {:.2}× (<2× ideal ceiling). Global block-adaptive is enough; \
+                 record the finding, the integrator rewrite is not worth it.",
+                spread.speedup
+            )
+        } else {
+            format!(
+                "MARGINAL — {:.2}× (2–3× ideal ceiling); the I7 grid-rebuild/prediction \
+                 overhead likely eats it. Distribution + user decide.",
+                spread.speedup
+            )
+        };
+        println!("  VERDICT: {verdict}");
+    }
+    println!();
     Ok(())
 }
 

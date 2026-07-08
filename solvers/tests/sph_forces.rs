@@ -132,9 +132,8 @@ fn uniform_lattice_interior_has_near_zero_net_force() {
     let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &vec![h; n], &u, &params);
 
     // Reference single-pair force scale: m·(2c_s²/ρ)·|grad_w| at one spacing.
-    let ref_scale = mass[0]
-        * (2.0 * params.sound_speed() * params.sound_speed() / rho[0])
-        * grad_x(s, h).abs();
+    let ref_scale =
+        mass[0] * (2.0 * params.sound_speed() * params.sound_speed() / rho[0]) * grad_x(s, h).abs();
     let margin = 2.0 * h; // support radius: interior = farther than 2h from every face
     let hi = (nx - 1) as f64 * s;
     let mut checked = 0;

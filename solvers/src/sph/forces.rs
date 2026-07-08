@@ -74,7 +74,9 @@ impl HydroParams {
         match self.eos {
             Eos::Isothermal { c_s } => c_s,
             Eos::Adiabatic { .. } => {
-                panic!("HydroParams::sound_speed() called on Adiabatic EOS — per-particle c_s is E4")
+                panic!(
+                    "HydroParams::sound_speed() called on Adiabatic EOS — per-particle c_s is E4"
+                )
             }
         }
     }
@@ -198,8 +200,49 @@ fn hydro_impl(
             }
         }
         Eos::Adiabatic { gamma } => {
-            let _ = (u, gamma);
-            todo!("E1b adiabatic hydro force: P=(γ−1)ρu, c_s=√(γ(γ−1)u)")
+            // Per-particle P_i=(γ−1)ρ_i u_i ⇒ term_i = P_i/ρ_i² = (γ−1)u_i/ρ_i.
+            // Precomputed once (not per neighbor) since both i and j read it.
+            let cs: Vec<f64> = (0..n)
+                .map(|k| (gamma * (gamma - 1.0) * u[k]).sqrt())
+                .collect();
+
+            let accel_one = |i: usize| -> DVec3 {
+                let xi = pos[i];
+                let term_i = (gamma - 1.0) * u[i] / rho[i];
+                let ngb = grid.neighbours_within(pos, xi, SUPPORT * h_max);
+                let mut a = DVec3::ZERO;
+                for &j in &ngb {
+                    if j == i {
+                        continue;
+                    }
+                    let r_ij = xi - pos[j];
+                    let r = r_ij.length();
+                    let grad_avg = (grad_w(r_ij, h[i]) + grad_w(r_ij, h[j])) * 0.5;
+                    let term_j = (gamma - 1.0) * u[j] / rho[j];
+                    let v_ij = vel[i] - vel[j];
+                    let vr = v_ij.dot(r_ij);
+                    let visc = if vr < 0.0 {
+                        let h_bar = 0.5 * (h[i] + h[j]);
+                        let rho_bar = 0.5 * (rho[i] + rho[j]);
+                        let mu = h_bar * vr / (r * r + params.visc_eps2 * h_bar * h_bar);
+                        // Adiabatic: c̄ = ½(c_s,i+c_s,j) (pair-averaged, unlike the
+                        // isothermal constant c_s).
+                        let c_bar = 0.5 * (cs[i] + cs[j]);
+                        (-params.alpha * c_bar * mu + params.beta * mu * mu) / rho_bar
+                    } else {
+                        0.0
+                    };
+                    let coeff = term_i + term_j + visc;
+                    a += grad_avg * (-mass[j] * coeff);
+                }
+                a
+            };
+
+            if parallel {
+                (0..n).into_par_iter().map(accel_one).collect()
+            } else {
+                (0..n).map(accel_one).collect()
+            }
         }
     }
 }

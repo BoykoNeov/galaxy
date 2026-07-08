@@ -715,7 +715,10 @@ fn viscous_heating_gates_on_approach_and_is_dissipative() {
         params.visc_eps2,
     );
     let heat = 0.5 * visc * m * dot_a;
-    assert!(heat > 0.0, "viscous heating must be positive (dissipative): {heat}");
+    assert!(
+        heat > 0.0,
+        "viscous heating must be positive (dissipative): {heat}"
+    );
     for i in 0..2 {
         let expect = (cs2 / rho[i]) * m * dot_a + heat;
         assert!(

@@ -112,13 +112,15 @@ pub fn hydro_accelerations_serial(
     hydro_accel_and_dudt_impl(pos, vel, mass, rho, h, u, params, false).0
 }
 
-/// Fused acceleration + `du/dt` pass (E2a): the PdV-work partner of
-/// [`hydro_accelerations`], computed in the SAME neighbor loop as the force.
-/// `du_i/dt = term_i · Σ_j m_j (v_ij·∇_i W̄_ij)` — `term_i` ALONE (not
-/// `term_i+term_j+visc` as the force uses), which is the exact
-/// energy-conserving partner of the symmetric `P/ρ²` momentum term. Viscous
-/// heating is deferred to E3. Returns `(acc, dudt)`; `hydro_accelerations`
-/// wraps this and drops `dudt`, so its output stays bit-identical.
+/// Fused acceleration + `du/dt` pass (E2a plumbing, E3 heating): the
+/// thermodynamic partner of [`hydro_accelerations`], computed in the SAME
+/// neighbor loop as the force.
+/// `du_i/dt = Σ_j m_j (term_i + ½·Π_ij)(v_ij·∇_i W̄_ij)` — the PdV work
+/// (`term_i` ALONE, the exact energy-conserving partner of the symmetric
+/// `P/ρ²` momentum term) plus the Monaghan viscous-heating term `½·Π_ij` (E3),
+/// the energy-conserving mate of the momentum viscosity and the entropy source.
+/// Returns `(acc, dudt)`; `hydro_accelerations` wraps this and drops `dudt`, so
+/// its acceleration output stays bit-identical.
 #[allow(clippy::too_many_arguments)]
 pub fn hydro_accel_and_dudt(
     pos: &[DVec3],
@@ -230,7 +232,13 @@ fn hydro_accel_and_dudt_impl(
                     // the exact negation of particle j's (coeff bit-identical by
                     // commutativity, grad_avg exactly negated).
                     a += grad_avg * (-mass[j] * coeff);
-                    dudt_i += mass[j] * term_i * v_ij.dot(grad_avg);
+                    // du_i/dt = Σ_j m_j (term_i + ½·Π_ij)(v_ij·∇W̄): PdV work +
+                    // the viscous-heating partner (E3). The ½ makes it the exact
+                    // energy-conserving mate of the momentum viscosity (pairwise
+                    // KE↔U cancellation, mod time integration) and it is ≥0 on
+                    // approach — the entropy source. Accel path above is untouched
+                    // (byte-identity of `hydro_accelerations` holds).
+                    dudt_i += mass[j] * (term_i + 0.5 * visc) * v_ij.dot(grad_avg);
                 }
                 (a, dudt_i)
             };
@@ -277,7 +285,9 @@ fn hydro_accel_and_dudt_impl(
                     };
                     let coeff = term_i + term_j + visc;
                     a += grad_avg * (-mass[j] * coeff);
-                    dudt_i += mass[j] * term_i * v_ij.dot(grad_avg);
+                    // du_i/dt = Σ_j m_j (term_i + ½·Π_ij)(v_ij·∇W̄) — see the
+                    // isothermal branch above; c̄=½(c_s,i+c_s,j) here.
+                    dudt_i += mass[j] * (term_i + 0.5 * visc) * v_ij.dot(grad_avg);
                 }
                 (a, dudt_i)
             };

@@ -76,3 +76,57 @@ impl Integrator for LeapfrogKdk {
         // the cosmology milestone.
     }
 }
+
+/// Kick-Drift-Kick leapfrog for the adiabatic thermal path (E2b): identical KDK
+/// structure to [`LeapfrogKdk`], but also kicks `state.u` alongside
+/// `state.vel` at both half-kicks, using [`ForceSolver::accel_and_dudt`]'s
+/// fused `(acc, du/dt)` output. A separate type (not a branch on
+/// `LeapfrogKdk`) so the gravity-only/isothermal path keeps its exact current
+/// bit-path untouched.
+#[derive(Clone, Debug, Default)]
+pub struct LeapfrogKdkThermal {
+    acc: Vec<DVec3>,
+    dudt: Vec<f64>,
+    primed: bool,
+}
+
+impl LeapfrogKdkThermal {
+    pub fn new() -> Self {
+        Self {
+            acc: Vec::new(),
+            dudt: Vec::new(),
+            primed: false,
+        }
+    }
+
+    /// Clear cached state so the next `step` re-primes from scratch. Call this
+    /// before reusing one integrator on a different run / initial condition.
+    pub fn reset(&mut self) {
+        self.acc.clear();
+        self.dudt.clear();
+        self.primed = false;
+    }
+
+    /// Eagerly compute and cache `(acc, du/dt)` at the current state, so the
+    /// next `step` opens with a fresh (not stale) half-kick.
+    pub fn prime(&mut self, state: &State, solver: &mut dyn ForceSolver) {
+        self.acc.clear();
+        self.acc.resize(state.len(), DVec3::ZERO);
+        self.dudt.clear();
+        self.dudt.resize(state.len(), 0.0);
+        solver.accel_and_dudt(state, &mut self.acc, &mut self.dudt);
+        self.primed = true;
+    }
+}
+
+impl Integrator for LeapfrogKdkThermal {
+    fn step(
+        &mut self,
+        state: &mut State,
+        solver: &mut dyn ForceSolver,
+        _bg: &dyn Background,
+        dt: f64,
+    ) {
+        todo!("E2b: fused-thermal KDK step")
+    }
+}

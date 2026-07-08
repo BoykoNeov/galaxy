@@ -8,6 +8,18 @@ pub trait ForceSolver {
     /// Requires `acc.len() == state.len()`.
     fn accelerations(&mut self, state: &State, acc: &mut [DVec3]);
 
+    /// Fused acceleration + thermal-derivative pass (E2a). Fills `acc` exactly
+    /// as `accelerations` would AND fills `dudt[i]` with `du_i/dt` (zero for
+    /// non-thermal particles/solvers). The default delegates to
+    /// `accelerations` and zero-fills `dudt`, so every existing solver (pure
+    /// gravity, GPU) gets `du/dt≡0` for free without touching its impl;
+    /// `GravitySph` overrides this with a single fused SPH neighbor pass
+    /// (accel + PdV work share the same loop).
+    /// Requires `acc.len() == dudt.len() == state.len()`.
+    fn accel_and_dudt(&mut self, _state: &State, _acc: &mut [DVec3], _dudt: &mut [f64]) {
+        todo!("E2a: default accel_and_dudt (delegate to accelerations, zero-fill dudt)")
+    }
+
     /// Total gravitational potential energy, using the SAME softened kernel as
     /// `accelerations` so energy diagnostics stay consistent with the forces.
     fn potential_energy(&self, state: &State) -> f64;

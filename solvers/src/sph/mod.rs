@@ -24,7 +24,10 @@ pub use cfl::{max_stable_dt, validate_dt, CflViolation};
 pub use density::{
     density_adaptive, density_adaptive_serial, density_fixed, DensityConfig, DensityResult,
 };
-pub use forces::{hydro_accelerations, hydro_accelerations_serial, Eos, HydroParams};
+pub use forces::{
+    hydro_accel_and_dudt, hydro_accel_and_dudt_serial, hydro_accelerations,
+    hydro_accelerations_serial, Eos, HydroParams,
+};
 pub use gravity_sph::GravitySph;
 pub use grid::HashGrid;
 pub use kernel::{grad_w, w, SUPPORT};

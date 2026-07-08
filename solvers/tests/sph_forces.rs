@@ -7,8 +7,8 @@
 
 use galaxy_core::{DVec3, ForceSolver, Species, State};
 use galaxy_solvers::sph::{
-    density_adaptive, hydro_accelerations, hydro_accelerations_serial, DensityConfig, Eos,
-    GravitySph, HydroParams,
+    density_adaptive, hydro_accel_and_dudt, hydro_accel_and_dudt_serial, hydro_accelerations,
+    hydro_accelerations_serial, DensityConfig, Eos, GravitySph, HydroParams,
 };
 use galaxy_solvers::DirectSum;
 use proptest::prelude::*;
@@ -521,4 +521,241 @@ fn adiabatic_uniform_lattice_interior_has_near_zero_net_force() {
         }
     }
     assert!(checked > 0, "lattice too small: no interior particles");
+}
+
+// --- E2a: fused accel_and_dudt (plumbing; du/dt is PdV-only, no viscous heat) ---
+
+#[test]
+fn dudt_matches_the_hand_oracle_isothermal() {
+    // PdV-only du_i/dt = term_i · Σ_j m_j (v_ij·∇_i W̄_ij), term_i = P_i/ρ_i²
+    // ALONE (not term_i+term_j+visc as the force uses — viscous heating is E3).
+    // Same geometry as `two_particle_force_matches_the_hand_oracle` (unequal h
+    // so the kernel average is genuinely exercised), but with nonzero velocity
+    // so du/dt is nonzero. Since the separation is purely along x, grad_avg has
+    // zero y/z components, so only v_ij.x contributes to the dot product — and
+    // that dot product is invariant under i<->j swap (v_ji=-v_ij and
+    // grad_avg_j=-grad_avg_i cancel), so only the term_i coefficient
+    // distinguishes dudt[0] from dudt[1].
+    let (h0, h1, d) = (1.0_f64, 1.4_f64, 0.8_f64);
+    let m = 1.0_f64;
+    let (rho0, rho1) = (2.0_f64, 3.0_f64);
+    let params = HydroParams {
+        eos: Eos::Isothermal { c_s: 1.3 },
+        ..HydroParams::default()
+    };
+    let cs2 = params.sound_speed() * params.sound_speed();
+
+    let pos = vec![DVec3::ZERO, DVec3::new(d, 0.0, 0.0)];
+    let vel = vec![DVec3::new(0.2, 0.05, -0.1), DVec3::new(-0.3, 0.1, 0.05)];
+    let mass = vec![m, m];
+    let rho = vec![rho0, rho1];
+    let h = vec![h0, h1];
+    let u = vec![0.0; 2];
+
+    let (_, dudt) = hydro_accel_and_dudt(&pos, &vel, &mass, &rho, &h, &u, &params);
+
+    let grad_avg_x = 0.5 * (grad_x(d, h0) + grad_x(d, h1));
+    let dot = (vel[0].x - vel[1].x) * grad_avg_x;
+    let expect0 = (cs2 / rho0) * m * dot;
+    let expect1 = (cs2 / rho1) * m * dot;
+
+    let rel0 = (dudt[0] - expect0).abs() / expect0.abs();
+    let rel1 = (dudt[1] - expect1).abs() / expect1.abs();
+    assert!(rel0 < 1e-12, "dudt[0] = {} vs oracle {expect0}", dudt[0]);
+    assert!(rel1 < 1e-12, "dudt[1] = {} vs oracle {expect1}", dudt[1]);
+}
+
+#[test]
+fn dudt_matches_the_hand_oracle_adiabatic() {
+    // Same layout as the isothermal oracle above, but term_i = (γ−1)u_i/ρ_i.
+    let (h0, h1, d) = (1.0_f64, 1.4_f64, 0.8_f64);
+    let m = 1.0_f64;
+    let (rho0, rho1) = (2.0_f64, 3.0_f64);
+    let (u0, u1) = (0.5_f64, 0.8_f64);
+    let gamma = 5.0 / 3.0;
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma },
+        ..HydroParams::default()
+    };
+
+    let pos = vec![DVec3::ZERO, DVec3::new(d, 0.0, 0.0)];
+    let vel = vec![DVec3::new(0.2, 0.05, -0.1), DVec3::new(-0.3, 0.1, 0.05)];
+    let mass = vec![m, m];
+    let rho = vec![rho0, rho1];
+    let h = vec![h0, h1];
+    let u = vec![u0, u1];
+
+    let (_, dudt) = hydro_accel_and_dudt(&pos, &vel, &mass, &rho, &h, &u, &params);
+
+    let grad_avg_x = 0.5 * (grad_x(d, h0) + grad_x(d, h1));
+    let dot = (vel[0].x - vel[1].x) * grad_avg_x;
+    let expect0 = ((gamma - 1.0) * u0 / rho0) * m * dot;
+    let expect1 = ((gamma - 1.0) * u1 / rho1) * m * dot;
+
+    let rel0 = (dudt[0] - expect0).abs() / expect0.abs();
+    let rel1 = (dudt[1] - expect1).abs() / expect1.abs();
+    assert!(rel0 < 1e-12, "dudt[0] = {} vs oracle {expect0}", dudt[0]);
+    assert!(rel1 < 1e-12, "dudt[1] = {} vs oracle {expect1}", dudt[1]);
+}
+
+#[test]
+fn fused_accel_matches_hydro_accelerations() {
+    // The fused pass's acceleration output must be bit-identical to the
+    // standalone hydro_accelerations (E2a: hydro_accelerations becomes a thin
+    // wrapper over the fused function, dropping dudt) — same code path, not
+    // merely numerically close.
+    let n = 300usize;
+    let pos = random_points(11, n, 5.0);
+    let vel = random_points(12, n, 1.5);
+    let mass: Vec<f64> = (0..n).map(|i| 1.0 + (i % 3) as f64 * 0.2).collect();
+    let rho: Vec<f64> = (0..n).map(|i| 0.6 + (i % 4) as f64 * 0.15).collect();
+    let h: Vec<f64> = (0..n).map(|i| 0.85 + (i % 5) as f64 * 0.1).collect();
+    let u: Vec<f64> = (0..n).map(|i| 0.3 + (i % 6) as f64 * 0.1).collect();
+
+    for eos in [
+        Eos::Isothermal { c_s: 1.1 },
+        Eos::Adiabatic { gamma: 5.0 / 3.0 },
+    ] {
+        let params = HydroParams {
+            eos,
+            ..HydroParams::default()
+        };
+        let (fused_acc, _) = hydro_accel_and_dudt(&pos, &vel, &mass, &rho, &h, &u, &params);
+        let plain_acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &u, &params);
+        assert_eq!(
+            fused_acc, plain_acc,
+            "fused accel must be bit-identical to hydro_accelerations for {eos:?}"
+        );
+    }
+}
+
+#[test]
+fn dudt_parallel_equals_serial_bit_exact() {
+    let n = 500usize;
+    let pos = random_points(21, n, 5.0);
+    let vel = random_points(22, n, 1.5);
+    let mass: Vec<f64> = (0..n).map(|i| 1.0 + (i % 4) as f64 * 0.3).collect();
+    let rho: Vec<f64> = (0..n).map(|i| 0.7 + (i % 5) as f64 * 0.2).collect();
+    let h: Vec<f64> = (0..n).map(|i| 0.9 + (i % 3) as f64 * 0.15).collect();
+    let u: Vec<f64> = (0..n).map(|i| 0.4 + (i % 7) as f64 * 0.05).collect();
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma: 1.4 },
+        ..HydroParams::default()
+    };
+
+    let (par_acc, par_dudt) = hydro_accel_and_dudt(&pos, &vel, &mass, &rho, &h, &u, &params);
+    let (ser_acc, ser_dudt) =
+        hydro_accel_and_dudt_serial(&pos, &vel, &mass, &rho, &h, &u, &params);
+    assert_eq!(
+        par_acc, ser_acc,
+        "rayon and serial fused accel must be bit-identical"
+    );
+    assert_eq!(
+        par_dudt, ser_dudt,
+        "rayon and serial dudt must be bit-identical"
+    );
+}
+
+#[test]
+fn gravity_sph_accel_and_dudt_gas_only_matches_fused_hydro() {
+    // hydro_only ⇒ accel_and_dudt's gas output equals the standalone fused
+    // hydro path, bit-exact — mirrors `gravity_off_runs_the_identical_hydro_path`.
+    let n = 150usize;
+    let pos = random_points(31, n, 4.0);
+    let vel = random_points(32, n, 1.0);
+    let mut state = gas_state(pos.clone(), vel.clone(), 1.0);
+    for i in 0..n {
+        state.u[i] = 0.3 + (i % 5) as f64 * 0.1;
+    }
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma: 5.0 / 3.0 },
+        ..HydroParams::default()
+    };
+    let cfg = DensityConfig::default();
+
+    let mut solver = GravitySph::<DirectSum>::hydro_only(params, cfg.clone());
+    let mut acc = vec![DVec3::ZERO; n];
+    let mut dudt = vec![0.0; n];
+    solver.accel_and_dudt(&state, &mut acc, &mut dudt);
+
+    let dens = density_adaptive(&pos, &state.mass, &cfg, None);
+    let (expect_acc, expect_dudt) = hydro_accel_and_dudt(
+        &pos,
+        &vel,
+        &state.mass,
+        &dens.rho,
+        &dens.h,
+        &state.u,
+        &params,
+    );
+    assert_eq!(
+        acc, expect_acc,
+        "gravity-off accel_and_dudt's acc must equal the fused hydro path"
+    );
+    assert_eq!(
+        dudt, expect_dudt,
+        "gravity-off accel_and_dudt's dudt must equal the fused hydro path"
+    );
+}
+
+#[test]
+fn gravity_sph_accel_and_dudt_mixed_species_zero_dudt_for_non_gas() {
+    // Collisionless particles feel gravity only and must have dudt≡0; gas dudt
+    // must equal the fused hydro path on the gas subset. accel_and_dudt's acc
+    // must also be bit-identical to accelerations() (structural consistency).
+    let g = DirectSum::new(1.0, 0.05);
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma: 1.4 },
+        ..HydroParams::default()
+    };
+    let cfg = DensityConfig::default();
+
+    let gas_pos = random_points(41, 100, 4.0);
+    let gas_vel = random_points(42, 100, 1.0);
+    let star_pos: Vec<DVec3> = random_points(43, 30, 6.0);
+    let mut pos = gas_pos.clone();
+    pos.extend_from_slice(&star_pos);
+    let mut vel = gas_vel.clone();
+    vel.extend(std::iter::repeat_n(DVec3::ZERO, 30));
+    let mut state = State::from_phase_space(pos.clone(), vel.clone(), vec![1.0; 130]);
+    for i in 0..100 {
+        state.kind[i] = Species::Gas;
+        state.u[i] = 0.3 + (i % 5) as f64 * 0.1;
+    }
+
+    let mut solver = GravitySph::new(g, params, cfg.clone());
+    let mut acc = vec![DVec3::ZERO; 130];
+    let mut dudt = vec![0.0; 130];
+    solver.accel_and_dudt(&state, &mut acc, &mut dudt);
+
+    for &d in dudt.iter().take(130).skip(100) {
+        assert_eq!(d, 0.0, "non-gas particle must have dudt≡0");
+    }
+
+    let gas_u: Vec<f64> = state.u[..100].to_vec();
+    let dens = density_adaptive(&gas_pos, &[1.0; 100], &cfg, None);
+    let (_, expect_dudt) = hydro_accel_and_dudt(
+        &gas_pos,
+        &gas_vel,
+        &[1.0; 100],
+        &dens.rho,
+        &dens.h,
+        &gas_u,
+        &params,
+    );
+    assert_eq!(
+        dudt[..100],
+        expect_dudt[..],
+        "gas dudt must equal the fused hydro path"
+    );
+
+    // accel_and_dudt's acc must be bit-identical to accelerations() (same
+    // gravity + hydro accel math, computed via the fused entry point).
+    let mut acc_ref = vec![DVec3::ZERO; 130];
+    let mut solver2 = GravitySph::new(g, params, cfg);
+    solver2.accelerations(&state, &mut acc_ref);
+    assert_eq!(
+        acc, acc_ref,
+        "accel_and_dudt's acc must be bit-identical to accelerations()"
+    );
 }

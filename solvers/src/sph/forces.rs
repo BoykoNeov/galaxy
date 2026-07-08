@@ -110,6 +110,42 @@ pub fn hydro_accelerations_serial(
     hydro_impl(pos, vel, mass, rho, h, u, params, false)
 }
 
+/// Fused acceleration + `du/dt` pass (E2a): the PdV-work partner of
+/// [`hydro_accelerations`], computed in the SAME neighbor loop as the force.
+/// `du_i/dt = term_i · Σ_j m_j (v_ij·∇_i W̄_ij)` — `term_i` ALONE (not
+/// `term_i+term_j+visc` as the force uses), which is the exact
+/// energy-conserving partner of the symmetric `P/ρ²` momentum term. Viscous
+/// heating is deferred to E3. Returns `(acc, dudt)`; `hydro_accelerations`
+/// wraps this and drops `dudt`, so its output stays bit-identical.
+#[allow(clippy::too_many_arguments)]
+pub fn hydro_accel_and_dudt(
+    pos: &[DVec3],
+    vel: &[DVec3],
+    mass: &[f64],
+    rho: &[f64],
+    h: &[f64],
+    u: &[f64],
+    params: &HydroParams,
+) -> (Vec<DVec3>, Vec<f64>) {
+    let _ = (pos, vel, mass, rho, h, u, params);
+    todo!("E2a: fused accel_and_dudt (parallel)")
+}
+
+/// Serial twin of [`hydro_accel_and_dudt`] for the parallel ≡ serial gate.
+#[allow(clippy::too_many_arguments)]
+pub fn hydro_accel_and_dudt_serial(
+    pos: &[DVec3],
+    vel: &[DVec3],
+    mass: &[f64],
+    rho: &[f64],
+    h: &[f64],
+    u: &[f64],
+    params: &HydroParams,
+) -> (Vec<DVec3>, Vec<f64>) {
+    let _ = (pos, vel, mass, rho, h, u, params);
+    todo!("E2a: fused accel_and_dudt (serial)")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn hydro_impl(
     pos: &[DVec3],

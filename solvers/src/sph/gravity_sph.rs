@@ -94,6 +94,11 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
         self.h_hint = Some(dens.h);
     }
 
+    fn accel_and_dudt(&mut self, state: &State, acc: &mut [DVec3], dudt: &mut [f64]) {
+        let _ = (state, acc, dudt);
+        todo!("E2a: GravitySph fused accel_and_dudt (gravity acc, fused hydro over gas subset, dudt=0 for non-gas)")
+    }
+
     fn potential_energy(&self, state: &State) -> f64 {
         match &self.gravity {
             Some(g) => g.potential_energy(state),

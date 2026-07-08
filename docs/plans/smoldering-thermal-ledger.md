@@ -128,8 +128,10 @@ No integrator change yet — the most contained slice. Split into two commits:
 - Gates green: hand-derived `U_thermal`, isothermal `u≡0` invariant,
   `FORMAT_VERSION==3`, bit-exact `u` round-trip, v1/v2 forward-compat reads.
 
-**E1b — EOS enum + per-particle pressure/`c_s` — TODO (next). Design locked
-(advisor-vetted 2026-07-08), not yet implemented.**
+**E1b — EOS enum + per-particle pressure/`c_s` — DONE (2026-07-08).** Red
+(`1f4dc53`) + green (`57161d0`), gate green (fmt/clippy/full test suite).
+Design locked advisor-vetted below; implemented as designed with no
+deviations. E2 (PdV work + thermal integrator) next.
 
 *API shape:*
 - `Eos::Isothermal { c_s } | Eos::Adiabatic { gamma }`, **replacing** the

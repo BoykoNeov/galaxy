@@ -8,11 +8,15 @@
 //! ```
 //!
 //! over the gas particles, with the Gadget-style projected signal velocity
-//! `v_sig,i = max_j (2 c_s − 3 w_ij)` over approaching neighbors
-//! (`w_ij = v_ij·r̂_ij < 0`), floored at `2 c_s` when nothing approaches. `h_i`
-//! is the adaptive smoothing length (recomputed here, same routine the force
-//! path uses). A pure-collisionless (no gas) state has no hydro CFL constraint,
-//! so the bound is `+∞`.
+//! `v_sig,i = max(2 c_s,i, max_j (c_s,i + c_s,j − 3 w_ij))` over neighbors
+//! (`w_ij = v_ij·r̂_ij`; the `−3w` term contributes only on approach, `w<0`),
+//! floored at the self-pair `2 c_s,i`. On the isothermal EOS `c_s,i ≡ c_s`, so
+//! this collapses to `max_j (2 c_s − 3 w_ij)` floored at `2 c_s` — bit-identical
+//! to the pre-E4a path (`isothermal_cfl_pins_pre_e4a_bits`). On the adiabatic
+//! EOS `c_s,i = √(γ(γ−1)u_i)` is per-particle (E4a). `h_i` is the adaptive
+//! smoothing length (recomputed here, same routine the force path uses). A
+//! pure-collisionless (no gas) state has no hydro CFL constraint, so the bound
+//! is `+∞`.
 
 use galaxy_core::{DVec3, Species, State};
 
@@ -100,7 +104,42 @@ pub fn max_stable_dt(state: &State, params: &HydroParams, cfg: &DensityConfig, c
             }
             min_dt
         }
-        Eos::Adiabatic { .. } => todo!("E4a: per-particle adiabatic CFL"),
+        Eos::Adiabatic { .. } => {
+            // Per-particle c_s,i = √(γ(γ−1)u_i) via the shared EOS helper.
+            // v_sig,i = max(2·c_s,i, max_j(c_s,i + c_s,j − 3·min(0,w_ij))): the
+            // Gadget-2 signal velocity. The pair term c_s,i+c_s,j is taken over
+            // ALL neighbors, not just approaching ones — a hot neighbor's sound
+            // wave reaches a resting particle, so it must tighten dt even at
+            // w=0. (For the isothermal arm above this generalization is a
+            // provable no-op: c_s,i+c_s,j = 2c_s = the floor.) The 2·c_s,i floor
+            // is the self-pair, matching the isothermal `two_cs`.
+            let cs: Vec<f64> = gas
+                .iter()
+                .map(|&i| params.eos.sound_speed_of(state.u[i]))
+                .collect();
+            let mut min_dt = f64::INFINITY;
+            for i in 0..gpos.len() {
+                // Same global-support gather + real-coupling-range gate as the
+                // isothermal arm and the force law (cross-support approacher).
+                let ngb = grid.neighbours_within(&gpos, gpos[i], SUPPORT * h_max);
+                let mut v_sig = 2.0 * cs[i];
+                for &j in &ngb {
+                    if j == i {
+                        continue;
+                    }
+                    let r_ij = gpos[i] - gpos[j];
+                    let r = r_ij.length();
+                    if r == 0.0 || r >= SUPPORT * h[i].max(h[j]) {
+                        continue; // outside the pair's force coupling range ⇒ no drive
+                    }
+                    let w = (gvel[i] - gvel[j]).dot(r_ij) / r; // projected relative velocity
+                    let approach = if w < 0.0 { -3.0 * w } else { 0.0 };
+                    v_sig = v_sig.max(cs[i] + cs[j] + approach);
+                }
+                min_dt = min_dt.min(c_cfl * h[i] / v_sig);
+            }
+            min_dt
+        }
     }
 }
 

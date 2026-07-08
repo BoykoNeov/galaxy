@@ -42,6 +42,20 @@ pub enum Eos {
     },
 }
 
+impl Eos {
+    /// Per-particle sound speed for internal energy `u`. Isothermal ignores `u`
+    /// (constant `c_s`); adiabatic is `√(γ(γ−1)u)`. Single source of the
+    /// adiabatic `c_s` formula shared by the force loop (`forces.rs`) and the
+    /// CFL path (`cfl.rs`) so the two cannot drift.
+    #[inline]
+    pub fn sound_speed_of(&self, u: f64) -> f64 {
+        match *self {
+            Eos::Isothermal { c_s } => c_s,
+            Eos::Adiabatic { gamma } => (gamma * (gamma - 1.0) * u).sqrt(),
+        }
+    }
+}
+
 /// SPH force parameters.
 #[derive(Clone, Copy, Debug)]
 pub struct HydroParams {
@@ -252,9 +266,9 @@ fn hydro_accel_and_dudt_impl(
         Eos::Adiabatic { gamma } => {
             // Per-particle P_i=(γ−1)ρ_i u_i ⇒ term_i = P_i/ρ_i² = (γ−1)u_i/ρ_i.
             // Precomputed once (not per neighbor) since both i and j read it.
-            let cs: Vec<f64> = (0..n)
-                .map(|k| (gamma * (gamma - 1.0) * u[k]).sqrt())
-                .collect();
+            // `sound_speed_of` is the shared adiabatic c_s formula (also used by
+            // cfl.rs) — bit-identical to the inlined `√(γ(γ−1)u)` it replaced.
+            let cs: Vec<f64> = (0..n).map(|k| params.eos.sound_speed_of(u[k])).collect();
 
             let one = |i: usize| -> (DVec3, f64) {
                 let xi = pos[i];

@@ -4,7 +4,7 @@
 
 use galaxy_core::{DVec3, Species, State};
 use galaxy_solvers::sph::{
-    density_adaptive, max_stable_dt, validate_dt, DensityConfig, HydroParams,
+    density_adaptive, max_stable_dt, validate_dt, DensityConfig, Eos, HydroParams,
 };
 
 fn random_points(seed: u64, n: usize, scale: f64) -> Vec<DVec3> {
@@ -40,13 +40,13 @@ fn bound_is_positive_and_scales_like_h_over_signal_speed() {
     let state = gas_state(pos.clone(), vec![DVec3::ZERO; pos.len()]);
     let cfg = DensityConfig::default();
     let params = HydroParams {
-        sound_speed: 2.0,
+        eos: Eos::Isothermal { c_s: 2.0 },
         ..HydroParams::default()
     };
 
     let dens = density_adaptive(&pos, &state.mass, &cfg, None);
     let h_min = dens.h.iter().cloned().fold(f64::INFINITY, f64::min);
-    let expect = C_CFL * h_min / (2.0 * params.sound_speed);
+    let expect = C_CFL * h_min / (2.0 * params.sound_speed());
 
     let got = max_stable_dt(&state, &params, &cfg, C_CFL);
     let rel = (got - expect).abs() / expect;
@@ -130,7 +130,7 @@ fn cross_support_approacher_tightens_the_bound() {
     let state = gas_state(pos.clone(), vel);
     let cfg = DensityConfig::default();
     let params = HydroParams {
-        sound_speed: c_s,
+        eos: Eos::Isothermal { c_s },
         ..HydroParams::default()
     };
 

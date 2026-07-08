@@ -22,7 +22,7 @@
 
 use galaxy_core::{DVec3, Integrator, LeapfrogKdk, Species, State, StaticBackground};
 use galaxy_ic::{ExponentialDisk, Plummer};
-use galaxy_solvers::sph::{validate_dt, DensityConfig, GravitySph, HydroParams};
+use galaxy_solvers::sph::{validate_dt, DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
 const TAU: f64 = std::f64::consts::TAU;
@@ -39,7 +39,9 @@ fn fiducial_gas() -> ExponentialDisk {
 fn solver(d: &ExponentialDisk) -> GravitySph<BarnesHut> {
     let grav = BarnesHut::new(d.g, 0.05 * d.halo.scale_radius, 0.5);
     let params = HydroParams {
-        sound_speed: d.sound_speed().expect("gas-rich disk has a sound speed"),
+        eos: Eos::Isothermal {
+            c_s: d.sound_speed().expect("gas-rich disk has a sound speed"),
+        },
         ..HydroParams::default()
     };
     GravitySph::new(grav, params, DensityConfig::default())
@@ -97,7 +99,9 @@ fn gas_rich_disk_holds_equilibrium_over_an_orbit() {
         validate_dt(
             &s0,
             &HydroParams {
-                sound_speed: d.sound_speed().unwrap(),
+                eos: Eos::Isothermal {
+                    c_s: d.sound_speed().unwrap(),
+                },
                 ..HydroParams::default()
             },
             &DensityConfig::default(),

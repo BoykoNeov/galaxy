@@ -36,7 +36,7 @@
 use galaxy_core::{DVec3, Species, State};
 use galaxy_gpu::GpuCfl;
 use galaxy_solvers::sph::{
-    density_adaptive, max_stable_dt, DensityConfig, HashGrid, HydroParams, SUPPORT,
+    density_adaptive, max_stable_dt, DensityConfig, Eos, HashGrid, HydroParams, SUPPORT,
 };
 
 const C_CFL: f64 = 0.25; // ≠ 1 so a "forgot to multiply by C_cfl" bug can't hide (it
@@ -189,7 +189,7 @@ fn gpu_cfl_v_sig_above_floor_exercised() {
     let pos = concentrated_cloud(0xC0FFEE, 3000, 5.0);
     let vel = random_velocities(0x5EED, pos.len(), 1.0);
     let mass = vec![1.0; pos.len()];
-    let cs = HydroParams::default().sound_speed;
+    let cs = HydroParams::default().sound_speed();
     let dens = density_adaptive(&pos, &mass, &cfg, None);
 
     let two_cs = 2.0 * cs;
@@ -244,7 +244,7 @@ fn gpu_cfl_matches_cpu_per_target() {
          per-target-h_i gather bug is observable in the vector gate"
     );
 
-    let cpu = cpu_per_target_dt(&pos, &vel, &dens.h, params.sound_speed, C_CFL);
+    let cpu = cpu_per_target_dt(&pos, &vel, &dens.h, params.sound_speed(), C_CFL);
     let gpu = cfl().per_target_dt(&pos, &vel, &dens.h, &params, C_CFL);
 
     assert_eq!(gpu.len(), cpu.len());
@@ -323,7 +323,7 @@ fn gpu_cfl_matches_oracle_cross_support() {
 
     let cfg = DensityConfig::default();
     let params = HydroParams {
-        sound_speed: c_s,
+        eos: Eos::Isothermal { c_s },
         ..HydroParams::default()
     };
     let state = gas_state(pos.clone(), vel.clone());
@@ -404,12 +404,12 @@ fn gpu_cfl_single_particle_floor() {
     let vel = [DVec3::new(0.1, 0.2, -0.3)];
     let h = [0.3];
     let params = HydroParams {
-        sound_speed: 1.5,
+        eos: Eos::Isothermal { c_s: 1.5 },
         ..HydroParams::default()
     };
     let mut g = cfl();
     let dt = g.per_target_dt(&pos, &vel, &h, &params, C_CFL);
-    let expect = C_CFL * h[0] / (2.0 * params.sound_speed);
+    let expect = C_CFL * h[0] / (2.0 * params.sound_speed());
     assert_eq!(dt.len(), 1);
     assert!(
         (dt[0] - expect).abs() / expect < 1.0e-6,

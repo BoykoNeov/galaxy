@@ -14,7 +14,7 @@ use std::rc::Rc;
 use galaxy_core::State;
 use galaxy_io::Header;
 use galaxy_sim::{SimError, SnapshotSink};
-use galaxy_solvers::sph::{DensityConfig, HydroParams};
+use galaxy_solvers::sph::{DensityConfig, Eos, HydroParams};
 use galaxy_xtask::cfl_guard::{CflGuard, C_CFL};
 
 use galaxy_ic::{ExponentialDisk, Plummer};
@@ -29,7 +29,7 @@ fn gas_state() -> State {
 
 fn hydro() -> HydroParams {
     HydroParams {
-        sound_speed: 0.1,
+        eos: Eos::Isothermal { c_s: 0.1 },
         ..HydroParams::default()
     }
 }

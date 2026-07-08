@@ -298,7 +298,7 @@ impl GpuCfl {
         assert_eq!(vel.len(), n, "vel length mismatch");
         assert_eq!(h.len(), n, "h length mismatch");
         assert!(
-            params.sound_speed > 0.0,
+            params.sound_speed() > 0.0,
             "GPU CFL needs a positive sound speed (keeps dt_i finite)"
         );
         if n == 0 {
@@ -322,7 +322,7 @@ impl GpuCfl {
             table_mask: table_size - 1,
             cell: cell as f32,
             radius: radius as f32,
-            sound_speed: params.sound_speed as f32,
+            sound_speed: params.sound_speed() as f32,
             c_cfl: c_cfl as f32,
             _pad0: 0.0,
             _pad1: 0.0,

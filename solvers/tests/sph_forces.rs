@@ -7,8 +7,8 @@
 
 use galaxy_core::{DVec3, ForceSolver, Species, State};
 use galaxy_solvers::sph::{
-    density_adaptive, hydro_accelerations, hydro_accelerations_serial, DensityConfig, GravitySph,
-    HydroParams,
+    density_adaptive, hydro_accelerations, hydro_accelerations_serial, DensityConfig, Eos,
+    GravitySph, HydroParams,
 };
 use galaxy_solvers::DirectSum;
 use proptest::prelude::*;
@@ -56,17 +56,18 @@ fn two_particle_force_matches_the_hand_oracle() {
     let m = 1.0_f64;
     let (rho0, rho1) = (2.0_f64, 3.0_f64);
     let params = HydroParams {
-        sound_speed: 1.3,
+        eos: Eos::Isothermal { c_s: 1.3 },
         ..HydroParams::default()
     };
-    let cs2 = params.sound_speed * params.sound_speed;
+    let cs2 = params.sound_speed() * params.sound_speed();
 
     let pos = vec![DVec3::ZERO, DVec3::new(d, 0.0, 0.0)];
     let vel = vec![DVec3::ZERO, DVec3::ZERO];
     let mass = vec![m, m];
     let rho = vec![rho0, rho1];
     let h = vec![h0, h1];
-    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &params);
+    let u = vec![0.0; 2];
+    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &u, &params);
 
     let grad_avg_x = 0.5 * (grad_x(d, h0) + grad_x(d, h1));
     let coeff = cs2 / rho0 + cs2 / rho1;
@@ -99,7 +100,8 @@ fn pairwise_force_is_exactly_antisymmetric() {
     let mass = vec![0.75, 0.75];
     let rho = vec![1.7, 2.6];
     let h = vec![0.9, 1.25];
-    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &params);
+    let u = vec![0.0; 2];
+    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &u, &params);
     assert_eq!(
         acc[0], -acc[1],
         "equal-mass pair not bit-exactly antisymmetric"
@@ -126,11 +128,13 @@ fn uniform_lattice_interior_has_near_zero_net_force() {
     let mass = vec![1.0; n];
     let rho = vec![1.0 / (s * s * s); n]; // uniform density m/s³
     let vel = vec![DVec3::ZERO; n];
-    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &vec![h; n], &params);
+    let u = vec![0.0; n];
+    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &vec![h; n], &u, &params);
 
     // Reference single-pair force scale: m·(2c_s²/ρ)·|grad_w| at one spacing.
-    let ref_scale =
-        mass[0] * (2.0 * params.sound_speed * params.sound_speed / rho[0]) * grad_x(s, h).abs();
+    let ref_scale = mass[0]
+        * (2.0 * params.sound_speed() * params.sound_speed() / rho[0])
+        * grad_x(s, h).abs();
     let margin = 2.0 * h; // support radius: interior = farther than 2h from every face
     let hi = (nx - 1) as f64 * s;
     let mut checked = 0;
@@ -160,14 +164,15 @@ fn viscosity_activates_only_on_approach() {
     let mass = vec![1.0, 1.0];
     let rho = vec![1.5, 1.5];
     let h = vec![0.9, 0.9];
+    let u = vec![0.0; 2];
 
-    let rest = hydro_accelerations(&pos, &[DVec3::ZERO; 2], &mass, &rho, &h, &params);
+    let rest = hydro_accelerations(&pos, &[DVec3::ZERO; 2], &mass, &rho, &h, &u, &params);
     // Approaching: particle 0 moves +x (toward 1), particle 1 moves −x.
     let v_app = vec![DVec3::new(0.5, 0.0, 0.0), DVec3::new(-0.5, 0.0, 0.0)];
-    let approach = hydro_accelerations(&pos, &v_app, &mass, &rho, &h, &params);
+    let approach = hydro_accelerations(&pos, &v_app, &mass, &rho, &h, &u, &params);
     // Receding: reverse the velocities.
     let v_rec = vec![DVec3::new(-0.5, 0.0, 0.0), DVec3::new(0.5, 0.0, 0.0)];
-    let recede = hydro_accelerations(&pos, &v_rec, &mass, &rho, &h, &params);
+    let recede = hydro_accelerations(&pos, &v_rec, &mass, &rho, &h, &u, &params);
 
     assert_eq!(recede, rest, "receding pair must have Π = 0 (≡ rest)");
     assert!(
@@ -198,8 +203,9 @@ proptest! {
         let mass: Vec<f64> = (0..n).map(|_| 0.5 + nf()).collect();
         let rho: Vec<f64> = (0..n).map(|_| 0.5 + nf()).collect();
         let h: Vec<f64> = (0..n).map(|_| 0.8 + 0.6 * nf()).collect();
+        let u = vec![0.0; n];
         let params = HydroParams::default();
-        let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &params);
+        let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &u, &params);
 
         let mut p = DVec3::ZERO;      // Σ m_i a_i
         let mut l = DVec3::ZERO;      // Σ m_i x_i × a_i
@@ -226,16 +232,17 @@ fn parallel_equals_serial_bit_exact() {
     let mass: Vec<f64> = (0..n).map(|i| 1.0 + (i % 4) as f64 * 0.3).collect();
     let rho: Vec<f64> = (0..n).map(|i| 0.7 + (i % 5) as f64 * 0.2).collect();
     let h: Vec<f64> = (0..n).map(|i| 0.9 + (i % 3) as f64 * 0.15).collect();
+    let u = vec![0.0; n];
     let params = HydroParams::default();
-    let par = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &params);
-    let ser = hydro_accelerations_serial(&pos, &vel, &mass, &rho, &h, &params);
+    let par = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &u, &params);
+    let ser = hydro_accelerations_serial(&pos, &vel, &mass, &rho, &h, &u, &params);
     assert_eq!(par, ser, "rayon and serial hydro must be bit-identical");
 }
 
 #[test]
 fn empty_input_yields_empty_output() {
     let params = HydroParams::default();
-    assert!(hydro_accelerations(&[], &[], &[], &[], &[], &params).is_empty());
+    assert!(hydro_accelerations(&[], &[], &[], &[], &[], &[], &params).is_empty());
 }
 
 // --- GravitySph composite routing -----------------------------------------
@@ -266,7 +273,15 @@ fn gravity_off_runs_the_identical_hydro_path() {
     solver.accelerations(&state, &mut acc);
 
     let dens = density_adaptive(&pos, &state.mass, &cfg, None);
-    let expect = hydro_accelerations(&pos, &vel, &state.mass, &dens.rho, &dens.h, &params);
+    let expect = hydro_accelerations(
+        &pos,
+        &vel,
+        &state.mass,
+        &dens.rho,
+        &dens.h,
+        &state.u,
+        &params,
+    );
     assert_eq!(
         acc, expect,
         "gravity-off must equal the standalone hydro path"
@@ -303,7 +318,15 @@ fn mixed_species_routing_adds_hydro_to_gas_only() {
     let mut grav_acc = vec![DVec3::ZERO; 160];
     grav.accelerations(&state, &mut grav_acc);
     let dens = density_adaptive(&gas_pos, &[1.0; 120], &cfg, None);
-    let hydro = hydro_accelerations(&gas_pos, &gas_vel, &[1.0; 120], &dens.rho, &dens.h, &params);
+    let hydro = hydro_accelerations(
+        &gas_pos,
+        &gas_vel,
+        &[1.0; 120],
+        &dens.rho,
+        &dens.h,
+        &[0.0; 120],
+        &params,
+    );
 
     for i in 120..160 {
         assert_eq!(
@@ -334,4 +357,169 @@ fn potential_energy_delegates_to_gravity() {
     assert_eq!(with_g.potential_energy(&state), g.potential_energy(&state));
     let no_g = GravitySph::<DirectSum>::hydro_only(params, cfg);
     assert_eq!(no_g.potential_energy(&state), 0.0);
+}
+
+// --- E1b: Eos enum (adiabatic P=(γ−1)ρu, c_s=√(γ(γ−1)u)) -------------------
+
+#[test]
+fn isothermal_regression_pins_pre_e1b_bits() {
+    // Frozen exact bits of the pre-E1b isothermal `hydro_accelerations` output
+    // on a fixed compact cloud, captured from the tree at commit 8bb41af
+    // (before the `Eos`-enum refactor touched this function) via a throwaway
+    // example. This is the load-bearing proof that the isothermal arm is
+    // byte-identical post-refactor, not merely close — a rel<1e-12 oracle
+    // would not catch a reassociated sum.
+    let n = 8usize;
+    let pos = random_points(42, n, 3.0);
+    let vel = random_points(43, n, 1.0);
+    let mass: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.1).collect();
+    let rho: Vec<f64> = (0..n).map(|i| 0.8 + i as f64 * 0.05).collect();
+    let h: Vec<f64> = (0..n).map(|i| 0.9 + i as f64 * 0.03).collect();
+    let u = vec![0.0; n];
+    let params = HydroParams {
+        eos: Eos::Isothermal { c_s: 1.3 },
+        ..HydroParams::default()
+    };
+    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &u, &params);
+
+    let expect = [
+        DVec3::new(
+            f64::from_bits(0x3ffb000c60498f4d),
+            f64::from_bits(0x3ffcebe3468f9cc8),
+            f64::from_bits(0xc00ae4038bc07f66),
+        ),
+        DVec3::new(
+            f64::from_bits(0xbfe1eb72602f88f9),
+            f64::from_bits(0xbfcf426665a874be),
+            f64::from_bits(0x3fff556580604af5),
+        ),
+        DVec3::new(
+            f64::from_bits(0xbfde5f6826aa7860),
+            f64::from_bits(0x3fd7ad25d2ee425f),
+            f64::from_bits(0x3fccc24680c4ddd2),
+        ),
+        DVec3::new(
+            f64::from_bits(0xbff3dfc4b5d3695e),
+            f64::from_bits(0xbff3375dcde4d4e1),
+            f64::from_bits(0x400088a77c9f9288),
+        ),
+        DVec3::new(
+            f64::from_bits(0xbfe102196bcad9df),
+            f64::from_bits(0xbfa1cefbf2685586),
+            f64::from_bits(0xbfee86062fc3a7ce),
+        ),
+        DVec3::new(
+            f64::from_bits(0x3ffa158e8696c441),
+            f64::from_bits(0x4001f3be7ae52d19),
+            f64::from_bits(0x3ffbcdf8b32787b8),
+        ),
+        DVec3::new(
+            f64::from_bits(0xbfd879af6a15832c),
+            f64::from_bits(0xbff7a260e81bf62a),
+            f64::from_bits(0xbfee3d8301c60856),
+        ),
+        DVec3::new(
+            f64::from_bits(0x3f8c1c5fb42e09b8),
+            f64::from_bits(0xbfe9e41d227a33be),
+            f64::from_bits(0xbfec65098be90198),
+        ),
+    ];
+    for i in 0..n {
+        assert_eq!(
+            acc[i], expect[i],
+            "isothermal byte-identity regression broke at particle {i}"
+        );
+    }
+}
+
+#[test]
+fn adiabatic_pressure_matches_the_hand_oracle() {
+    // Two gas particles at rest, UNEQUAL h AND u so the kernel average and the
+    // per-particle P=(γ−1)ρu are both genuinely exercised. At rest the
+    // viscosity is off, so a_0 = −m·(term_0+term_1)·∇_0 W̄_01 with
+    // term_i = (γ−1)u_i/ρ_i (the adiabatic P_i/ρ_i²).
+    let (h0, h1, d) = (1.0_f64, 1.4_f64, 0.8_f64);
+    let m = 1.0_f64;
+    let (rho0, rho1) = (2.0_f64, 3.0_f64);
+    let (u0, u1) = (0.5_f64, 0.8_f64);
+    let gamma = 5.0 / 3.0;
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma },
+        ..HydroParams::default()
+    };
+
+    let pos = vec![DVec3::ZERO, DVec3::new(d, 0.0, 0.0)];
+    let vel = vec![DVec3::ZERO, DVec3::ZERO];
+    let mass = vec![m, m];
+    let rho = vec![rho0, rho1];
+    let h = vec![h0, h1];
+    let u = vec![u0, u1];
+    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &h, &u, &params);
+
+    let term0 = (gamma - 1.0) * u0 / rho0;
+    let term1 = (gamma - 1.0) * u1 / rho1;
+    let grad_avg_x = 0.5 * (grad_x(d, h0) + grad_x(d, h1));
+    let expect0_x = -m * (term0 + term1) * grad_avg_x;
+
+    assert!(
+        expect0_x < 0.0,
+        "hand oracle sign wrong: expected repulsion"
+    );
+    let rel = (acc[0].x - expect0_x).abs() / expect0_x.abs();
+    assert!(rel < 1e-12, "a_0.x = {} vs oracle {expect0_x}", acc[0].x);
+    assert!(acc[0].y.abs() < 1e-14 && acc[0].z.abs() < 1e-14);
+    assert_eq!(
+        acc[1], -acc[0],
+        "equal-mass pair must be exactly antisymmetric"
+    );
+}
+
+#[test]
+fn adiabatic_uniform_lattice_interior_has_near_zero_net_force() {
+    // Uniform ρ AND uniform u (⇒ uniform P) with v=0 ⇒ ∇P=0: the adiabatic
+    // twin of `uniform_lattice_interior_has_near_zero_net_force`. Single force
+    // evaluation, no integration.
+    let (nx, s) = (9usize, 1.0f64);
+    let mut pos = Vec::new();
+    for x in 0..nx {
+        for y in 0..nx {
+            for z in 0..nx {
+                pos.push(DVec3::new(x as f64, y as f64, z as f64) * s);
+            }
+        }
+    }
+    let n = pos.len();
+    let h = 1.3 * s;
+    let gamma = 1.4;
+    let params = HydroParams {
+        eos: Eos::Adiabatic { gamma },
+        ..HydroParams::default()
+    };
+    let mass = vec![1.0; n];
+    let rho = vec![1.0 / (s * s * s); n];
+    let u = vec![0.6; n];
+    let vel = vec![DVec3::ZERO; n];
+    let acc = hydro_accelerations(&pos, &vel, &mass, &rho, &vec![h; n], &u, &params);
+
+    // Reference single-pair force scale: m·(2·term)·|grad_w| at one spacing,
+    // term = (γ−1)u/ρ (the adiabatic P/ρ²).
+    let term = (gamma - 1.0) * u[0] / rho[0];
+    let ref_scale = mass[0] * 2.0 * term * grad_x(s, h).abs();
+    let margin = 2.0 * h;
+    let hi = (nx - 1) as f64 * s;
+    let mut checked = 0;
+    for (i, p) in pos.iter().enumerate() {
+        let interior = [p.x, p.y, p.z]
+            .iter()
+            .all(|&c| c > margin && c < hi - margin);
+        if interior {
+            assert!(
+                acc[i].length() < 1e-10 * ref_scale,
+                "interior net force {} not ~0 (ref {ref_scale})",
+                acc[i].length()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "lattice too small: no interior particles");
 }

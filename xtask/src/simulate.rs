@@ -22,7 +22,7 @@ use galaxy_sim::{
     plan_block, run, run_adaptive, AdaptiveConfig, DirectorySink, RunSummary, SimConfig,
     SnapshotSink,
 };
-use galaxy_solvers::sph::{DensityConfig, GravitySph, HydroParams};
+use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
 use crate::cfl_guard::{CflGuard, C_CFL};
@@ -81,7 +81,7 @@ pub fn simulate_snapshots(
         // or the GPU-resident stepper (G6).
         Some(sound_speed) => {
             let hydro = HydroParams {
-                sound_speed,
+                eos: Eos::Isothermal { c_s: sound_speed },
                 ..HydroParams::default()
             };
             let density_cfg = DensityConfig::default();

@@ -358,7 +358,7 @@ impl GpuHydro {
             table_mask: table_size - 1,
             cell: cell as f32,
             radius: radius as f32,
-            sound_speed: params.sound_speed as f32,
+            sound_speed: params.sound_speed() as f32,
             alpha: params.alpha as f32,
             beta: params.beta as f32,
             visc_eps2: params.visc_eps2 as f32,

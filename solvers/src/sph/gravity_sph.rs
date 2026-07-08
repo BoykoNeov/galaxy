@@ -76,6 +76,7 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
         let gpos: Vec<DVec3> = gas.iter().map(|&i| state.pos[i]).collect();
         let gvel: Vec<DVec3> = gas.iter().map(|&i| state.vel[i]).collect();
         let gmass: Vec<f64> = gas.iter().map(|&i| state.mass[i]).collect();
+        let gu: Vec<f64> = gas.iter().map(|&i| state.u[i]).collect();
 
         // Warm-start hint is a bracket seed only (the converged h is
         // position-determined); drop it if the gas count changed.
@@ -85,7 +86,8 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
             .filter(|hh| hh.len() == gas.len())
             .map(Vec::as_slice);
         let dens = density_adaptive(&gpos, &gmass, &self.density_cfg, hint);
-        let a_hydro = hydro_accelerations(&gpos, &gvel, &gmass, &dens.rho, &dens.h, &self.params);
+        let a_hydro =
+            hydro_accelerations(&gpos, &gvel, &gmass, &dens.rho, &dens.h, &gu, &self.params);
         for (k, &i) in gas.iter().enumerate() {
             acc[i] += a_hydro[k];
         }

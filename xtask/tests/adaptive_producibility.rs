@@ -23,7 +23,7 @@
 //!     (the "size the win" number, measured not estimated; calibrates courant/block/growth).
 
 use galaxy_io::read_file;
-use galaxy_solvers::sph::{max_stable_dt, DensityConfig, HydroParams};
+use galaxy_solvers::sph::{max_stable_dt, DensityConfig, Eos, HydroParams};
 use galaxy_xtask::simulate::{simulate_snapshots, Backend};
 use galaxy_xtask::spec::{build_scenario, parse_scenario_toml, preset, Scenario};
 
@@ -124,7 +124,9 @@ fn full_res_gasrich_adaptive_completes_and_converges() {
     // (3) Realized dynamic range of the CFL bound across the run: post-hoc, no loop
     // instrumentation — recompute the c_cfl=1 limit at each emitted snapshot.
     let params = HydroParams {
-        sound_speed: full.sound_speed.unwrap(),
+        eos: Eos::Isothermal {
+            c_s: full.sound_speed.unwrap(),
+        },
         ..HydroParams::default()
     };
     let cfg = DensityConfig::default();

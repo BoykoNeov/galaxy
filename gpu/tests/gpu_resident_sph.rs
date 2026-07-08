@@ -418,7 +418,8 @@ fn resident_hydro_accel_matches_cpu_oracle() {
     // byte-identical to the standalone G3, whose `gpu_hydro_viscosity_is_exercised` asserts it.
     let rho: Vec<f64> = gd.rho.iter().map(|&x| x as f64).collect();
     let h: Vec<f64> = gd.h.iter().map(|&x| x as f64).collect();
-    let cpu = hydro_accelerations(&gpos, &gvel, &gmass, &rho, &h, &params);
+    let u = vec![0.0; gpos.len()];
+    let cpu = hydro_accelerations(&gpos, &gvel, &gmass, &rho, &h, &u, &params);
 
     assert_eq!(gpu_acc.len(), cpu.len());
     for (i, a) in gpu_acc.iter().enumerate() {
@@ -579,7 +580,8 @@ fn resident_hydro_matches_cpu_over_stepped_run() {
     // CPU hydro (inviscid) fed the GPU (ρ, h): isolates the frozen HYDRO-grid staleness.
     let rho: Vec<f64> = gd.rho.iter().map(|&x| x as f64).collect();
     let h: Vec<f64> = gd.h.iter().map(|&x| x as f64).collect();
-    let cpu_acc = hydro_accelerations(&gpos, &gvel, &gmass, &rho, &h, &inviscid);
+    let u = vec![0.0; gpos.len()];
+    let cpu_acc = hydro_accelerations(&gpos, &gvel, &gmass, &rho, &h, &u, &inviscid);
     let rms = rms_rel_err(&gpu_acc, &cpu_acc);
     // Measured 3.2e-7 (pure pressure ⇒ position + GPU-(ρ,h) determined): the frozen hydro grid
     // (cell = radius = SUPPORT·h_max at upload) stays accurate under contraction. Bound 1e-4
@@ -726,7 +728,7 @@ fn resident_min_stable_dt_matches_cpu_oracle() {
     let (_gas_idx, gpos, gmass) = gas_subset(&state);
     let gvel: Vec<DVec3> = _gas_idx.iter().map(|&i| state.vel[i]).collect();
     let dens = density_adaptive(&gpos, &gmass, &dcfg, None);
-    let cs = params.sound_speed;
+    let cs = params.sound_speed();
     let v_sig = per_target_v_sig(&gpos, &gvel, &dens.h, cs);
     let dt = cpu_per_target_dt(&gpos, &gvel, &dens.h, cs, C_CFL);
     let argmin = (0..dt.len())
@@ -794,7 +796,7 @@ fn resident_gas_dt_matches_cpu_per_target() {
         "cloud/field must contain asymmetric-coupling APPROACHING pairs (got {asym})"
     );
 
-    let cpu = cpu_per_target_dt(&gpos, &gvel, &h, params.sound_speed, C_CFL);
+    let cpu = cpu_per_target_dt(&gpos, &gvel, &h, params.sound_speed(), C_CFL);
     for (i, &d) in gc.dt.iter().enumerate() {
         assert!(
             d.is_finite() && d > 0.0,

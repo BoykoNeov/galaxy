@@ -12,7 +12,7 @@
 //! the merger will use, no periodic-BC machinery.
 
 use galaxy_core::{DVec3, ForceSolver, Integrator, LeapfrogKdk, Species, State, StaticBackground};
-use galaxy_solvers::sph::{density_adaptive, DensityConfig, GravitySph, HydroParams};
+use galaxy_solvers::sph::{density_adaptive, DensityConfig, Eos, GravitySph, HydroParams};
 
 const CS: f64 = 1.0;
 const RHO_L: f64 = 4.0;
@@ -121,7 +121,7 @@ fn isothermal_riemann_oracle_matches_hand_values() {
 fn sph_shock_tube_matches_the_isothermal_riemann_solution() {
     let mut state = shock_tube_ic();
     let params = HydroParams {
-        sound_speed: CS,
+        eos: Eos::Isothermal { c_s: CS },
         ..HydroParams::default()
     };
     let cfg = DensityConfig::default();

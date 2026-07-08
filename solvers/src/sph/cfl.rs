@@ -59,7 +59,7 @@ pub fn max_stable_dt(state: &State, params: &HydroParams, cfg: &DensityConfig, c
 
     let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
     let grid = HashGrid::build(&gpos, SUPPORT * h_max);
-    let two_cs = 2.0 * params.sound_speed;
+    let two_cs = 2.0 * params.sound_speed();
 
     let mut min_dt = f64::INFINITY;
     for i in 0..gpos.len() {

@@ -10,7 +10,7 @@
 use std::io::Write;
 
 use galaxy_core::{DVec3, ForceSolver, Integrator, LeapfrogKdk, Species, State, StaticBackground};
-use galaxy_solvers::sph::{density_adaptive, DensityConfig, GravitySph, HydroParams};
+use galaxy_solvers::sph::{density_adaptive, DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::DirectSum;
 
 const CS: f64 = 1.0;
@@ -75,7 +75,7 @@ fn main() {
 
     let mut state = shock_tube_ic();
     let params = HydroParams {
-        sound_speed: CS,
+        eos: Eos::Isothermal { c_s: CS },
         ..HydroParams::default()
     };
     let cfg = DensityConfig::default();

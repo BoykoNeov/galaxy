@@ -205,8 +205,9 @@ fn gpu_hydro_viscosity_is_exercised() {
         beta: 0.0,
         ..HydroParams::default()
     };
-    let a_visc = hydro_accelerations(&pos, &vel, &mass, &dens.rho, &dens.h, &visc);
-    let a_inv = hydro_accelerations(&pos, &vel, &mass, &dens.rho, &dens.h, &inviscid);
+    let u = vec![0.0; pos.len()];
+    let a_visc = hydro_accelerations(&pos, &vel, &mass, &dens.rho, &dens.h, &u, &visc);
+    let a_inv = hydro_accelerations(&pos, &vel, &mass, &dens.rho, &dens.h, &u, &inviscid);
     let rel = rms_rel_err(&a_inv, &a_visc); // ‖Δ‖_rms / rms(a_visc)
     assert!(
         rel > 0.05,
@@ -231,7 +232,8 @@ fn gpu_hydro_matches_cpu() {
     let params = HydroParams::default();
     let dens = density_adaptive(&pos, &mass, &cfg, None);
 
-    let cpu = hydro_accelerations(&pos, &vel, &mass, &dens.rho, &dens.h, &params);
+    let u = vec![0.0; pos.len()];
+    let cpu = hydro_accelerations(&pos, &vel, &mass, &dens.rho, &dens.h, &u, &params);
     let gpu = hydro().accelerations(&pos, &vel, &mass, &dens.rho, &dens.h, &params);
 
     assert_eq!(gpu.len(), cpu.len());

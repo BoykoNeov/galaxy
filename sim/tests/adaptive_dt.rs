@@ -25,7 +25,7 @@ use galaxy_core::{
 };
 use galaxy_io::Header;
 use galaxy_sim::{plan_block, run_adaptive, AdaptiveConfig, SimError, SnapshotSink};
-use galaxy_solvers::sph::{DensityConfig, GravitySph, HydroParams};
+use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
 /// In-memory sink keeping a full f64 copy of every snapshot (conservation is judged
@@ -73,7 +73,7 @@ fn converging_gas_blob(seed: u64, n: usize, radius: f64, k: f64) -> State {
 
 fn hydro_solver(c_s: f64) -> GravitySph<BarnesHut> {
     let params = HydroParams {
-        sound_speed: c_s,
+        eos: Eos::Isothermal { c_s },
         ..HydroParams::default()
     };
     GravitySph::<BarnesHut>::hydro_only(params, DensityConfig::default())

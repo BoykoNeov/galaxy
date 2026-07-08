@@ -22,7 +22,7 @@
 use galaxy_core::{DVec3, Species, State};
 use galaxy_io::read_file;
 use galaxy_sim::AdaptiveConfig;
-use galaxy_solvers::sph::{DensityConfig, HydroParams};
+use galaxy_solvers::sph::{DensityConfig, Eos, HydroParams};
 use galaxy_xtask::simulate::simulate_gas_gpu_adaptive;
 
 fn lcg(seed: u64) -> impl FnMut() -> f64 {
@@ -110,7 +110,7 @@ fn gpu_adaptive_converges_to_finer_courant_reference() {
             &ic,
             &adaptive_cfg(courant, output_dt, n_outputs),
             HydroParams {
-                sound_speed: 1.0,
+                eos: Eos::Isothermal { c_s: 1.0 },
                 ..HydroParams::default()
             },
             DensityConfig::default(),
@@ -154,7 +154,7 @@ fn gpu_adaptive_snapshots_land_on_the_output_time_grid() {
         &ic,
         &c,
         HydroParams {
-            sound_speed: 1.0,
+            eos: Eos::Isothermal { c_s: 1.0 },
             ..HydroParams::default()
         },
         DensityConfig::default(),

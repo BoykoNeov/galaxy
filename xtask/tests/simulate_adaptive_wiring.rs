@@ -8,7 +8,7 @@
 //! exists to fix. Plus: the shipped `gasrich` preset now enables adaptive, gas-free
 //! keeps its fixed-dt byte-identity, and the adaptive output lands on the same time grid.
 
-use galaxy_solvers::sph::{max_stable_dt, DensityConfig, HydroParams};
+use galaxy_solvers::sph::{max_stable_dt, DensityConfig, Eos, HydroParams};
 use galaxy_xtask::simulate::{simulate_snapshots, Backend};
 use galaxy_xtask::spec::{build_scenario, parse_scenario_toml, preset, AdaptiveSpec, Scenario};
 
@@ -187,7 +187,7 @@ fn adaptive_gas_completes_where_fixed_dt_aborts() {
     let mut s = gas_scenario();
     let c_s = s.sound_speed.expect("gas scenario has c_s");
     let params = HydroParams {
-        sound_speed: c_s,
+        eos: Eos::Isothermal { c_s },
         ..HydroParams::default()
     };
     // Pick a dt comfortably ABOVE the CFL sentinel's threshold (C_cfl = 0.25) so the

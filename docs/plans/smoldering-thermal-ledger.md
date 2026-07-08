@@ -282,13 +282,70 @@ Design:
   E4).
 
 ### E3 — viscous/shock heating + adiabatic Sod shock tube
-- Add the viscous heating term to `du/dt`.
-- New **γ=1.4 Sod oracle** (classic Riemann; the isothermal oracle cannot
-  validate it).
-- **Gates:** Sod matches the analytic Riemann solution (density/velocity/
-  pressure profiles within method-order tolerance); energy conserved across the
-  shock; entropy **increases** through the shock (Rankine–Hugoniot — the
-  second-law check the isothermal path could never make).
+
+Split into **E3a** (viscous heating term + unit gates) / **E3b** (γ=1.4 Sod
+oracle + shock-tube dynamical gate), mirroring the E1/E2 data-layer /
+physics-layer rhythm. Advisor-vetted 2026-07-08 (deltas folded in below).
+
+#### E3a — viscous heating term in `du/dt` (code + unit gates)
+- Add the Monaghan viscous-heating partner to the fused `du/dt` in `forces.rs`,
+  **both** EOS branches:
+  `du_i/dt = Σ_j m_j (term_i + ½·Π_ij)(v_ij·∇_i W̄_ij)`.
+  The `½` and `+` sign are **load-bearing**: `d(KE)/dt|visc + d(U)/dt|visc = 0`
+  **pairwise** (Π_ij symmetric, ∇W̄ antisymmetric → the ½ cancels them
+  term-by-term, mod time integration — the same exact-cancellation structure as
+  the E2a PdV proof). Provably `≥ 0` (`vr<0 ⇒ Π>0`, `v_ij·∇W̄>0` since
+  `dW/dr<0`) → this is the **entropy source**.
+- `Π_ij` is the SAME viscosity already computed for the accel `coeff` — reuse it
+  (isothermal `c̄=c_s`, adiabatic `c̄=½(c_s,i+c_s,j)`). **Accel path UNTOUCHED**
+  → no byte-identity risk; `isothermal_regression_pins_pre_e1b_bits` pins accel
+  only. Isothermal `dudt` is dead output (`LeapfrogKdk` drops it) but heating
+  goes in both branches for symmetry.
+- **The existing E2a `dudt` oracles are APPROACHING** (`dudt_matches_the_hand_
+  oracle_{isothermal,adiabatic}`: `v_ij·r_ij = −0.4 < 0`, default α/β on), so
+  their PdV-only expectation is now wrong. Update both to the full
+  `term_i + ½Π_ij` form in the **red** commit (deliberate spec change,
+  advisor-endorsed). The heating addend is identical for `dudt[0]`/`dudt[1]`
+  (`Π_ij` and `v_ij·∇W̄` are both swap-invariant), so `term_i` still
+  distinguishes them.
+- **Gates:** updated 2-particle oracles (iso + adiabatic, `rel<1e-12`); a new
+  approaching-vs-receding heating gate (receding ⇒ Π=0 ⇒ `dudt` unchanged;
+  approaching ⇒ `dudt` strictly larger, heating `≥0` verified); parallel≡serial
+  still bit-exact; accel byte-identity regression untouched.
+
+#### E3b — γ=1.4 Sod oracle + shock-tube dynamical gate
+- **Exact adiabatic Riemann solver** (Toro): Newton/bisection on the star
+  pressure `p*` from `f_L(p)+f_R(p)+(v_R−v_L)=0` (rarefaction/shock branch per
+  side), then sample the 5 regions (L | rarefaction fan | contact | post-shock |
+  R) at `ξ=x/t`. **Spot-check vs canonical Sod** (`ρ_L=1,P_L=1 / ρ_R=0.125,
+  P_R=0.1`, γ=1.4, `v=0`): `p*≈0.30313`, `v*≈0.92745`, `ρ*_L≈0.42632` (post-
+  rarefaction), `ρ*_R≈0.26557` (post-shock) — hand-value gate BEFORE trusting
+  any profile failure (isothermal-oracle discipline, lines 104–117). Verify the
+  four numbers against a published Sod table, not advisor recall alone.
+- **Sod IC:** two glued equal-mass lattice blocks (ρ jump via spacing, as the
+  isothermal tube), per-particle `u` set for the pressure jump:
+  `u_i = P/((γ−1)ρ)` ⇒ `u_L=2.5`, `u_R=2.0`. Gravity OFF (`hydro_only`),
+  **viscosity ON** (defaults) — heating now closes the budget.
+- **dt FIXED/unguarded** (no adiabatic CFL until E4 — `sound_speed()` panics on
+  Adiabatic, so an unstable dt yields garbage, not a guard trip): pick a
+  conservative Courant from `c_L=√(γP_L/ρ_L)≈1.18` and the finer (left)
+  spacing; mirror the isothermal `dt≈0.02` start, validate stability
+  empirically.
+- **Gates** (dynamical `#[ignore]` run + fast smoke twin, like E2b):
+  - ρ, v **and P** profiles match the exact solution to a method-order L1 (P via
+    `u` is the new independent physics — validating it is the point). A narrow
+    contact-blip band (8:1 density ⇒ 2:1 spacing h-mismatch, worse than the
+    isothermal 1.59:1) may be excluded from the tight L1 while shock + rarefaction
+    stay in-window.
+  - **Total energy oscillation-bounded (viscosity ON)** — the SHARP validator of
+    the E3a ½Π heating term (a wrong factor/sign drifts energy, not the profile).
+  - **Entropy 2nd law:** total `Σ mᵢsᵢ` (`sᵢ=(γ−1)uᵢ/ρᵢ^{γ−1}`) monotonically
+    **non-decreasing** over the run (the clean statement the isothermal path
+    could never make; viscous heating `≥0 ⇒ ↑`, rarefaction isentropic ⇒ ~0).
+    Secondary spot check `s*_R > s_R` (~5.5% jump, contact-blip-muddied → kept
+    secondary).
+  - Momentum tripwire unaffected.
+  - Tolerances calibrated from a `--release --ignored` run (E2b discipline).
 
 ### E4 — per-particle CFL into the adaptive-dt path + negative-`u` floor
 - Wire per-particle `c_s,i` into `cfl.rs` / `max_stable_dt`; adaptive-dt path

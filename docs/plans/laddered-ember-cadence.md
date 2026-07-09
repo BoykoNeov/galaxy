@@ -47,7 +47,7 @@ first.
 
 ---
 
-## I0 RESULT (measured 2026-07-08) — INCONCLUSIVE at QUICK; FULL pending
+## I0 RESULT (measured 2026-07-08; seed sweep 2026-07-09) — INCONCLUSIVE at QUICK; FULL pending
 
 The xtask exists: `galaxy-xtask rung-spread <snapshots_dir | .snap>` (isothermal
 arm of `cfl.rs` copied verbatim, `min` removed; the copy's `min` is asserted
@@ -87,12 +87,59 @@ soft QUICK gas (large `h`) *narrows* the spread ⇒ FULL ≥ QUICK; but FULL has
 more gas and a better-resolved shock could put a *larger fraction* on the fine rungs
 ⇒ FULL < QUICK (the plan's own "<2×" stop case). These cancel — no extrapolation.
 
-**Next (pending user, resource call):** (1) cheap QUICK **seed sweep** (the shipped
-seed was chosen CFL-clean/mild — 3–4 other realizations bracket whether the
-6-particle tail is this-seed noise); (2) **FULL-res regen** (~48 min adaptive sim,
-or truncate `n_steps` to ~t=12 past pericenter) — the plan's primary regime, the
-real number. The tool takes any snapshot dir, so FULL is zero rework. **Do NOT start
-I1 until FULL clears ≥3× robustly (tail-fragility resolved).**
+### SEED SWEEP (2026-07-09) — the tail-fragility is STRUCTURAL, not seed-noise
+
+Four fresh QUICK realizations (seeds `0x1234`, `0xDEADBEEF`, `0xCAFEBABE`,
+`0x5EED`; distinct t=0 gas fingerprints ⇒ genuinely different ICs), each stepped
+on the CPU adaptive path and passed through `rung-spread`. Each seed's
+auto-selected tightest-bound snapshot (full-tail ideal ceiling → **drop-finest**
+= cap one rung above the finest, the "is the tail load-bearing" test):
+
+| seed | tightest | full | drop-finest | finest rung | count @ finest | haircut |
+|---|---|---|---|---|---|---|
+| `0x00C0FFEE` (shipped) | t=10 | 3.90× | **1.96×** | r=10 | 6 (0.2%) | −50% |
+| `0x00C0FFEE` t=30 (same run) | t=30 | 3.44× | **1.84×** | r=12 | 98 (3.9%) | −46% |
+| `0x1234` | t=30 | 2.91× | **1.88×** | r=13 | 383 (15.3%) | −35% |
+| `0xDEADBEEF` | t=29.5 | 5.10× | 2.95× | r=16 | 132 (5.3%) | −42% |
+| `0xCAFEBABE` | t=30 | 7.37× | 4.03× | r=15 | 58 (2.3%) | −45% |
+| `0x5EED` | t=30 | 4.62× | 2.90× | r=16 | 219 (8.8%) | −37% |
+
+**Three findings, in priority order:**
+
+1. **The finest-rung haircut is 35–50% in EVERY realization.** ~40% of the ideal
+   ceiling rides on the single finest rung *everywhere* — the sweep **validates**
+   the plan's tail-fragility worry rather than dispelling it. It is a **structural**
+   feature of the CFL distribution at a shocked pericenter, not a shipped-seed
+   artifact.
+2. **Tail *population* is NOT the robustness signal — magnitude is.** `0x1234` has
+   the *most*-populated finest rung of any seed (383 particles, 15.3%) yet is the
+   *most* fragile fresh seed (drop-finest **1.88×**, below 2×): it fails by fine-end
+   **bunching** (rungs 11–13 hold 60.7% of gas ⇒ distribution not spread ⇒ low
+   speedup), a different mechanism from the shipped seed's lonely 6-particle spike
+   but the same bottom line. So "populated tail ⇒ robust" is **wrong**; the honest
+   discriminator is the base-speedup magnitude, which is **realization-dependent**
+   (full-tail 2.9–7.4×, median ~4.9×; drop-finest 1.9–4.0×, **median ~2.9×**).
+3. **The shipped seed IS genuinely gentle** (confound-checked): its *own* t=30
+   snapshot has min dt 1.5e-2 vs the fresh seeds' ~1e-3 (10× looser), and the tool
+   picked its t=10 (min dt 3.4e-3) as tighter still — it was selected CFL-clean, so
+   it is the mildest realization. But per finding (1) that gentleness does not make
+   the *fragility* seed-specific.
+
+**Verdict unchanged: INCONCLUSIVE — the sweep does NOT flip it to GO** (and does
+not kill it). "Robustly ≥3×" is **not met at QUICK**: drop-finest median ~2.9× sits
+below the 3× bar, and 3 of 6 measurements (incl. one fresh seed) fall below 2×. The
+screen is **weakly encouraging on raw magnitude** (full-tail 2.9–7.4×) but
+**confirms tail-fragility is structural**. Whether that universal ~40% tail actually
+*pays* is exactly the I7 grid-rebuild/prediction-overhead question — and QUICK
+cannot answer it.
+
+**Next (pending user, resource call): FULL-res regen** (~48 min adaptive sim, or
+truncate `n_steps` to ~t=12 past pericenter) — the plan's primary regime, the real
+number. The tool takes any snapshot dir, so FULL is zero rework. The sweep sharpens
+what FULL must report: **drop-finest is a co-headline, not a footnote**, paired with
+a real **I7 overhead** number (grid-rebuild + neighbour-prediction cost vs the
+gathered force) — because the ~40% tail's payoff hinges on that overhead. **Do NOT
+start I1 until FULL clears ≥3× robustly (drop-finest, not just full-tail).**
 
 ---
 
@@ -246,10 +293,12 @@ against, exactly as the LBVH/G-series lineage did.
 - **I0 — measurement / go-no-go (xtask, NOT a red/green milestone). DONE (tool);
   INCONCLUSIVE at QUICK — see "I0 RESULT" above.** `galaxy-xtask rung-spread <dir>`
   histograms per-particle `h_i/v_sig,i` at pericenter + diffuse, min removed, with a
-  bit-exact self-check vs `max_stable_dt`. QUICK = 3.90× but tail-fragile (STOP if
-  the 6-particle 0.2% shock tail drops one rung); FULL-res (the decision regime) not
-  retained → pending a regen. **Gate the rest of the plan on ≥ ~3× at pericenter that
-  survives the tail-fragility test, measured at FULL res.**
+  bit-exact self-check vs `max_stable_dt`. QUICK = 3.90× but tail-fragile; the
+  2026-07-09 seed sweep (4 fresh seeds) confirms the ~40% finest-rung haircut is
+  **structural** (drop-finest median ~2.9×, below 3×) not seed-noise — INCONCLUSIVE
+  stands. FULL-res (the decision regime) not retained → pending a regen. **Gate the
+  rest of the plan on ≥ ~3× at pericenter that survives the drop-finest test,
+  measured at FULL res.**
 - **I1 — per-particle CFL vector.** Red: the vector's `min` equals the existing
   scalar `max_stable_dt` bit-for-bit on a fixed state (the vector is a strict
   generalization); collisionless rows are `+∞`. (I1)

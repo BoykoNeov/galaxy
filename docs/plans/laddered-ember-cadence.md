@@ -47,7 +47,19 @@ first.
 
 ---
 
-## I0 RESULT (measured 2026-07-08; seed sweep 2026-07-09) — INCONCLUSIVE at QUICK; FULL pending
+## I0 RESULT (measured 2026-07-08; seed sweep + Amdahl split 2026-07-09) — go/no-go pivots to a SCOPE call, not FULL regen
+
+> **TL;DR (2026-07-09, revised):** the hydro rung ceiling (I0) is tail-fragile
+> (drop-finest median ~2.9×), but the binding question is the Amdahl fraction — which
+> path rungs actually accelerate. There are **TWO reducibility levers**, not one:
+> **(a) per-active-particle dt recompute** (the CFL solve, 17 % of cost) comes *free*
+> with hydro-only rungs — you cannot assign gas rungs without per-particle `dt`, and it
+> reduces to the active subset and fuses with the hydro density solve; **(b) the gravity
+> tree WALK** (build:walk = 0.68 ⇒ walk is the majority) reduces only if scope EXPANDS
+> to subcycle gravity on a stale tree. So: **hydro-only rungs ≈ 1.68× (drop-finest) /
+> ~2.0× (median) — clears the user's 30 % bar on lever (a) alone**; **+ gravity
+> subcycling ≈ 2.24× / 3.06×**. The decision is a **scope call** (how far to push, not
+> whether it pays), NOT a FULL regen. See the "AMDAHL SPLIT" subsection below.
 
 The xtask exists: `galaxy-xtask rung-spread <snapshots_dir | .snap>` (isothermal
 arm of `cfl.rs` copied verbatim, `min` removed; the copy's `min` is asserted
@@ -140,6 +152,100 @@ what FULL must report: **drop-finest is a co-headline, not a footnote**, paired 
 a real **I7 overhead** number (grid-rebuild + neighbour-prediction cost vs the
 gathered force) — because the ~40% tail's payoff hinges on that overhead. **Do NOT
 start I1 until FULL clears ≥3× robustly (drop-finest, not just full-tail).**
+
+### AMDAHL SPLIT (2026-07-09) — the rung ceiling is NOT the binding number; the gravity-cadence scope is
+
+The seed sweep left "FULL regen" as the next step, but the user pushed back: a FULL
+run at *today's* N is one more point on the weak (scaling) axis, and "even 30 % off a
+2-day production bake is significant." That reframed the go/no-go, and the advisor
+named the number both were circling: **the rung ceiling only accelerates the gas
+(hydro) stepping — the whole-sim win is capped by the Amdahl fraction of that path,**
+which comes from timing an *existing* snapshot (no regen). Measured on the shipped
+pericenter (`a5_movie/snapshot_00000020`, N=7500 = 2500 gas + 5000 stars), per force
+eval:
+
+Measured at **one gentle snapshot** (the shipped seed's pericenter, already shown to be
+the mildest realization in the seed sweep) — timings are structural (set by N, gas
+fraction, tree depth) so more transferable than the rung spread, but the build:walk
+ratio specifically is clustering-sensitive (walk rises at a tighter pericenter), so read
+the split with a ± and re-measure if the scope call goes forward.
+
+| term | cost/block | reducible under rungs? |
+|---|---|---|
+| gravity build (Barnes-Hut, O(N)) | 120 ms | **no** — fixed floor, rebuilt at most once/block |
+| gravity walk (O(active·log N)) | 176 ms | **only via lever (b)** — stale-tree subcycle |
+| density + hydro (gas subset) | 347 ms | **yes** — active-subset, the core rung win |
+| CFL / per-particle `dt` | 134 ms | **yes via lever (a)** — see below |
+| **total** | **777 ms** | |
+
+(Per force eval: gravity 18.5 ms = build 7.5 : walk 11.0 = **0.68**; density+hydro
+21.7 ms; ×16 steps/block. CFL is once/block.)
+
+**The key correction (advisor, 2026-07-09): CFL is a reducibility LEVER, not a fixed
+cost — and it comes FREE with hydro-only rungs.** You cannot put gas on individual rungs
+without a per-particle `dt_i = c·h_i/v_sig,i`; a particle's rung IS that number. Under
+rungs you recompute `dt_i` only when a particle *wakes* (active subset), and the density
++ v_sig it needs is the *same* solve the hydro force already does at that tick — so the
+134 ms/block is the **non-rung** "compute all gas dt once per block" baseline, and under
+rungs it reduces to the active subset and fuses with the force eval. Charging it as
+"fixed" (my first pass) understated the hydro-only win. So there are **two levers:**
+
+- **Lever (a) — per-active-particle dt recompute (CFL).** Free with hydro-only rungs;
+  turns the 134 ms/block from fixed into active-subset-reducible.
+- **Lever (b) — gravity WALK on a stale tree.** The O(N) build (120 ms/block) can't be
+  cut, but the walk (176 ms/block, the majority since build:walk = 0.68) reduces to the
+  active subset IF the tree is reused stale across the base block (2^r_max ≫ 1 fine
+  ticks) + inactive neighbours are predicted — the I7 "safe over-gather on a stale
+  spatial structure" argument applied to gravity. Rebuild-every-tick would be
+  build × 2^r_max (catastrophic), so stale reuse is mandatory, and build:walk = 0.68 +
+  a ≫1-tick block make it strongly favoured. **But this is a SCOPE EXPANSION** (gravity
+  prediction + a gravitational-dt floor for the now-subcycled stars), beyond the plan's
+  current "hydro-only rungs, gravity untouched."
+
+**Whole-sim speedup (Amdahl, using the drop-finest rung 2.9× as the conservative/robust
+factor, median 2.9× / ideal ∞ in parentheses):**
+
+| scope | f_accel | drop-finest 2.9× | median-tail 4.9× | ideal |
+|---|---|---|---|---|
+| both fixed (my first-pass strawman) | 0.45 | 1.41× | 1.55× | 1.81× |
+| **hydro-only rungs — lever (a) only** | **0.62** | **1.68×** | **1.97×** | 2.62× |
+| **+ gravity subcycling — levers (a)+(b)** | **0.85** | **2.24×** | **3.06×** | 6.44× |
+
+**So the conclusion flips vs my first pass: hydro-only rungs clear the user's 30 % bar
+on lever (a) alone (~1.68× drop-finest, ~2.0× median) — they do NOT "lean STOP."** The
+"hydro accelerates only ~54 %" framing was wrong: it silently parked the CFL solve in
+the fixed bucket when it is inherently part of the rung machinery. **I3's "kick only the
+active subset each fine tick"** already implies both the hydro reduction and (with stale
+reuse) the gravity-walk reduction — the plan's own integrator is model-(a)+(b)-shaped.
+
+**The go/no-go is therefore a SCOPE call — how FAR to push, not whether it pays:**
+- **Hydro-only rungs (as scoped):** ~1.68× drop-finest / ~2.0× median before I7
+  overhead. Clears 30 %. Simpler; still carries the variable-dt integration risk (breaks
+  symplectic leapfrog — a permanent maintenance surface on an opt-in feature), so the
+  honest bar is net-of-I7-overhead AND risk-discounted, but the headroom above 1.3× is
+  now real, not marginal.
+- **+ gravity subcycling (scope expansion):** ~2.24× / ~3.06×, but a bigger design
+  (gravity prediction + stale-tree gather + a gravitational-dt floor for subcycled
+  stars).
+
+**Answering the user's two questions directly:** (1) *"how valid at 10–100× more?"* —
+the accelerable fraction erodes at scale, but only **logarithmically**, not off a cliff:
+at fixed gas fraction gravity ~ N log N and hydro ~ N_gas ~ fN, so gravity/hydro ~ log N
+— a gentle slope. "More stars" inflates the O(N) build floor (over ALL N incl. stars),
+which is the term lever (b) can't cut, so scale specifically favours *doing* the gravity
+subcycling (lever b) rather than hydro-only — but hydro-only's lever (a) win survives the
+log-N dilution comfortably at any realistic N. (2) *"30 % of a 2-day bake matters"* —
+agreed, the bar is ~1.3×, and hydro-only rungs (~1.68×) clear it before the bigger
+gravity design is even considered.
+
+**FULL regen is now LOW value** for this decision: a same-N run resolves neither the
+build:walk-at-scale trend nor the gravity-scope call, and the seed sweep already showed
+the hydro ceiling is structurally tail-fragile. The next decision is a **scope call by
+the user**, not a compute run. (Throwaway harness `xtask/examples/amdahl_split.rs`
+measured this via `FlatTree::build` for the build floor + `GravitySph::accel_and_dudt`
+minus `BarnesHut::accelerations` for the hydro/gravity split; deleted after — the
+numbers are the deliverable, reconstructable, and if the plan proceeds it should be
+promoted to a TDD'd `galaxy-xtask amdahl-split` subcommand beside `rung-spread`.)
 
 ---
 
@@ -295,10 +401,17 @@ against, exactly as the LBVH/G-series lineage did.
   histograms per-particle `h_i/v_sig,i` at pericenter + diffuse, min removed, with a
   bit-exact self-check vs `max_stable_dt`. QUICK = 3.90× but tail-fragile; the
   2026-07-09 seed sweep (4 fresh seeds) confirms the ~40% finest-rung haircut is
-  **structural** (drop-finest median ~2.9×, below 3×) not seed-noise — INCONCLUSIVE
-  stands. FULL-res (the decision regime) not retained → pending a regen. **Gate the
-  rest of the plan on ≥ ~3× at pericenter that survives the drop-finest test,
-  measured at FULL res.**
+  **structural** (drop-finest median ~2.9×, below 3×) not seed-noise. The 2026-07-09
+  **Amdahl split** (revised) reframed the binding question as *which path rungs
+  accelerate*: TWO reducibility levers — (a) per-active-particle dt recompute (the CFL
+  solve, free with hydro-only rungs since a rung IS the per-particle dt) and (b) the
+  gravity walk on a stale tree (needs scope expansion; build:walk=0.68). Whole-sim win:
+  **hydro-only rungs ~1.68× drop-finest / ~2.0× median — clears the 30% bar on lever
+  (a) alone**; +gravity subcycling ~2.24×/~3.06×. **The gate is no longer "≥3× at
+  FULL"; it is a SCOPE call — how FAR to push (hydro-only vs +gravity), not whether it
+  pays. Hydro-only already clears the bar.** FULL regen is low value for this decision
+  (same-N, resolves neither the log-N scaling trend nor the scope call). See "AMDAHL
+  SPLIT".
 - **I1 — per-particle CFL vector.** Red: the vector's `min` equals the existing
   scalar `max_stable_dt` bit-for-bit on a fixed state (the vector is a strict
   generalization); collisionless rows are `+∞`. (I1)

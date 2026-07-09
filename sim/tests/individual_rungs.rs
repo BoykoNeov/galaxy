@@ -6,7 +6,7 @@
 //! float `log2` rounding at power-of-two boundaries). Collisionless `dt = +∞` →
 //! the coarsest rung 0. All rungs synchronize at each `dt_base` boundary.
 
-use galaxy_sim::individual::{assign_rungs, base_dt, rung_step};
+use galaxy_sim::individual::{assign_rungs, base_dt, limit_rungs, rung_step};
 
 const COURANT: f64 = 0.25;
 
@@ -119,6 +119,96 @@ fn every_finite_rung_fits_and_is_tight() {
             );
         }
     }
+}
+
+// --------------------------------------------------------------------------
+// I4b — the Saitoh–Makino rung limiter (pure fixpoint, no stepping). After CFL
+// assignment, no coupled pair may differ by more than `n_limit` rungs; the coarser
+// particle is refined (raised). Monotone (never coarsens) ⇒ the fixpoint converges.
+// --------------------------------------------------------------------------
+
+#[test]
+fn non_binding_n_limit_leaves_rungs_untouched() {
+    // A wide spread with n_limit ≥ the spread: every pair already satisfies the
+    // constraint ⇒ no particle is refined (the I4a / fixed-dt-disguise setting).
+    let mut rungs = vec![0, 2, 4, 7];
+    let pairs = [(0, 1), (1, 2), (2, 3), (0, 3)];
+    let before = rungs.clone();
+    limit_rungs(&mut rungs, &pairs, 7);
+    assert_eq!(rungs, before, "n_limit ≥ spread must be a no-op");
+}
+
+#[test]
+fn one_hop_refines_the_coarse_neighbour() {
+    // A lone coarse particle (rung 0) coupled to a fine one (rung 5), n_limit = 1 ⇒
+    // the coarse is raised to within 1 rung (4); the fine is never coarsened.
+    let mut rungs = vec![0, 5];
+    limit_rungs(&mut rungs, &[(0, 1)], 1);
+    assert_eq!(
+        rungs,
+        vec![4, 5],
+        "coarse neighbour must wake to r_max−n_limit"
+    );
+}
+
+#[test]
+fn refinement_propagates_along_a_chain_to_a_fixpoint() {
+    // The load-bearing multi-hop case: a fine spike at one end of a coupling chain
+    // must grade DOWN across the whole chain (each hop at most n_limit apart), which
+    // only a fixpoint (not a single pass) achieves. Chain 0-1-2-3, rung 5 at node 3,
+    // n_limit = 1 ⇒ [2,3,4,5] (hand-derived: r_i ≥ 5 − (3−i)).
+    let mut rungs = vec![0, 0, 0, 5];
+    let pairs = [(0, 1), (1, 2), (2, 3)];
+    limit_rungs(&mut rungs, &pairs, 1);
+    assert_eq!(
+        rungs,
+        vec![2, 3, 4, 5],
+        "fineness must grade along the chain"
+    );
+}
+
+#[test]
+fn limiter_only_ever_refines_never_coarsens() {
+    // Every output rung is ≥ its input (the monotonicity that guarantees convergence
+    // and means the limiter can only make steps SAFER, never coarser).
+    let input = vec![3, 1, 6, 0, 2, 5];
+    let pairs = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)];
+    let mut rungs = input.clone();
+    limit_rungs(&mut rungs, &pairs, 1);
+    for (i, (&out, &inp)) in rungs.iter().zip(&input).enumerate() {
+        assert!(out >= inp, "i={i}: limiter coarsened {inp}→{out}");
+    }
+    // And the constraint now holds on every pair.
+    for &(i, j) in &pairs {
+        let d = rungs[i].abs_diff(rungs[j]);
+        assert!(d <= 1, "pair ({i},{j}) still violates n_limit=1: |Δ|={d}");
+    }
+}
+
+#[test]
+fn pair_order_is_symmetric() {
+    // (i,j) and (j,i) impose the same constraint — the result must not depend on
+    // which way a coupled pair is listed.
+    let mut a = vec![0, 5];
+    let mut b = vec![0, 5];
+    limit_rungs(&mut a, &[(0, 1)], 1);
+    limit_rungs(&mut b, &[(1, 0)], 1);
+    assert_eq!(a, b, "limiter must be symmetric in pair order");
+}
+
+#[test]
+fn n_limit_zero_forces_a_connected_component_to_one_rung() {
+    // n_limit = 0 ⇒ coupled particles must share a rung; a connected component
+    // collapses to its MAX (raise-only). Two disjoint components stay independent.
+    let mut rungs = vec![0, 3, 0, /* isolated */ 1, 7];
+    // Component A: 0-1-2 (max 3). Component B: 3-4 (max 7).
+    let pairs = [(0, 1), (1, 2), (3, 4)];
+    limit_rungs(&mut rungs, &pairs, 0);
+    assert_eq!(
+        rungs,
+        vec![3, 3, 3, 7, 7],
+        "n_limit=0 ⇒ component → its max"
+    );
 }
 
 #[test]

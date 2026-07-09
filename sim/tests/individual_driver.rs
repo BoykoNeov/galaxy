@@ -108,6 +108,7 @@ fn cfg(courant: f64, output_dt: f64, n_outputs: u64) -> IndividualConfig {
         courant,
         dt_base_cap: f64::INFINITY,
         r_max: 10,
+        n_limit: 10, // == r_max ⇒ limiter non-binding (I4a is pure CFL rungs)
         output_dt,
         n_outputs,
         softening: 0.05,

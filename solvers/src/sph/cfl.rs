@@ -233,6 +233,17 @@ pub fn max_stable_dt_per_particle(
     out
 }
 
+/// Gas neighbour pairs coupled by the force law (I4b): unordered gas pairs
+/// `(gas[a], gas[b])` in GLOBAL indices, `gas[a] < gas[b]`, gated at
+/// `r < SUPPORT·max(h_a, h_b)` — the SAME coupling range the force (`forces.rs`)
+/// and CFL (`max_stable_dt_per_particle` above) paths use, so the individual-
+/// timestep limiter constrains exactly the pairs the force couples. `h` is the
+/// adaptive smoothing length (recomputed here, same routine the CFL/force paths
+/// use). A gas-free state returns no pairs (the limiter is a no-op).
+pub fn coupled_pairs(_state: &State, _cfg: &DensityConfig) -> Vec<(usize, usize)> {
+    todo!("I4b GREEN: grid gather with the r < SUPPORT·max(h_i,h_j) coupling gate")
+}
+
 /// Fail-loud check: `Ok(())` iff `dt ≤ max_stable_dt(...)`.
 pub fn validate_dt(
     state: &State,

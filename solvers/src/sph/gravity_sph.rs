@@ -155,4 +155,10 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
         // scalar — the rung policy sits in the individual-timestep loop.
         super::cfl::max_stable_dt_per_particle(state, &self.params, &self.density_cfg, 1.0)
     }
+
+    fn coupled_pairs(&self, state: &State) -> Vec<(usize, usize)> {
+        // The gas pairs the force law couples (r < SUPPORT·max(h_i,h_j)), for the
+        // I4b timestep limiter. Same density/grid machinery as the CFL vector.
+        super::cfl::coupled_pairs(state, &self.density_cfg)
+    }
 }

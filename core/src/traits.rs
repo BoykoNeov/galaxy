@@ -50,6 +50,20 @@ pub trait ForceSolver {
     fn max_stable_dt_per_particle(&self, state: &State) -> Vec<f64> {
         vec![f64::INFINITY; state.len()]
     }
+
+    /// Gas neighbour pairs coupled by the force law (I4b): unordered global-index
+    /// pairs `(i, j)` with `i < j` and `r_ij < SUPPORT·max(h_i, h_j)` — the SAME
+    /// coupling range the SPH force (`forces.rs`) and CFL (`cfl.rs`) paths gather
+    /// over, so the individual-timestep limiter constrains exactly the particles the
+    /// force actually couples. The Saitoh–Makino limiter consumes these to keep no
+    /// gas particle more than `n_limit` rungs coarser than a coupled neighbour (rung
+    /// POLICY lives in the loop; this reports only the *physics* adjacency).
+    ///
+    /// Default empty: a solver with no hydro coupling (pure gravity) constrains no
+    /// rungs, so the limiter is a no-op there.
+    fn coupled_pairs(&self, _state: &State) -> Vec<(usize, usize)> {
+        Vec::new()
+    }
 }
 
 /// Cosmological background. `StaticBackground` => a≡1, H≡0 (Newtonian).

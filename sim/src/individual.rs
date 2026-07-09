@@ -67,6 +67,30 @@ fn assign_one(dt_i: f64, dt_base: f64, courant: f64, r_max: u32) -> u32 {
     r
 }
 
+/// The Saitoh–Makino (2009) timestep limiter (I4b/I5) — CORRECTNESS, not a dial.
+/// Raise (refine) any gas particle sitting more than `n_limit` rungs coarser than a
+/// coupled neighbour, iterated to a fixpoint, so no coupled pair differs by more than
+/// `n_limit` rungs. `pairs` are the force-coupled gas neighbours (global indices,
+/// [`ForceSolver::coupled_pairs`](galaxy_core::ForceSolver::coupled_pairs)); the
+/// limiter only ever INCREASES a rung, never coarsens, so it is monotone and bounded
+/// above by the finest rung present ⇒ the fixpoint always converges.
+///
+/// Why it is load-bearing: a slow-rung particle in cold gas struck by a shock from a
+/// fast-rung neighbour would, without this, step at its stale coarse `dt` straight
+/// THROUGH the shock arrival and mis-integrate it (poisoning the shocked-merger gas
+/// physics — and, on the adiabatic arm, the internal energy `u`). Forcing it within
+/// `n_limit` rungs of its fastest neighbour wakes it early — many base blocks before
+/// the shock physically reaches it, since the neighbour range (≈ 2h) far exceeds the
+/// per-block signal travel (≈ courant·h). `n_limit` (typically 1) is the only dial.
+///
+/// `rungs` is state-length and mutated in place; `pairs` index into it. Non-gas rows
+/// carry no pairs ⇒ are never touched. A no-op when the rung spread already satisfies
+/// the constraint (e.g. `n_limit ≥` the spread), so a non-binding `n_limit` is free.
+pub fn limit_rungs(rungs: &mut [u32], pairs: &[(usize, usize)], n_limit: u32) {
+    let _ = (&rungs, pairs, n_limit);
+    todo!("I4b GREEN: fixpoint raising any r_i more than n_limit below a coupled neighbour")
+}
+
 /// Drift-predict a particle to a time offset `dt` from its last sync: `x + v·dt`
 /// (I3 predictor). This is EXACT for KDK — acceleration enters only through the
 /// kicks, so between an inactive particle's kicks its velocity is constant and the

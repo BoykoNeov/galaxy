@@ -432,6 +432,16 @@ pub struct IndividualConfig {
     /// the I4b limiter covers — that is neighbour-rung coupling). Must be in [1, 60]
     /// (the rung set is tracked in a `u64` bitmask for the summary diagnostics).
     pub r_max: u32,
+    /// Saitoh–Makino timestep-limiter depth (I4b): after CFL rung assignment, no gas
+    /// particle may sit more than `n_limit` rungs coarser than a force-coupled
+    /// neighbour — the coarser one is refined (woken) to within `n_limit`. This is
+    /// CORRECTNESS (a slow particle struck by a shock from a fast neighbour must wake
+    /// before mis-integrating it), not a speed dial. `n_limit = 1` is the standard
+    /// value (adjacent rungs only). Setting `n_limit >= r_max` makes the constraint
+    /// unreachable (rungs span `[0, r_max]`) ⇒ the limiter is skipped entirely and the
+    /// rungs are exactly the CFL assignment — the non-binding setting the fixed-dt-in-
+    /// disguise gates (and I4a) run at, so those paths stay byte-identical.
+    pub n_limit: u32,
     /// Sim-time between emitted snapshots (must be > 0). Snapshots land exactly on
     /// integer multiples of this via a per-interval final-block clamp (D3) — the
     /// only place all rungs are synchronized (pos+vel consistent).
@@ -567,7 +577,17 @@ pub fn run_individual(
             let remaining = t_target - t;
             let dt_base =
                 individual::base_dt(&dt_pp, config.courant, config.dt_base_cap).min(remaining);
-            let rungs = individual::assign_rungs(&dt_pp, dt_base, config.courant, config.r_max);
+            let mut rungs = individual::assign_rungs(&dt_pp, dt_base, config.courant, config.r_max);
+            // Saitoh–Makino limiter (I4b): refine any gas particle more than `n_limit`
+            // rungs coarser than a force-coupled neighbour, so a slow particle struck
+            // by a shock from a fast neighbour wakes before mis-integrating it. Skipped
+            // when non-binding (`n_limit >= r_max` — the constraint is unreachable),
+            // which keeps the coupled-pairs gather off the hot path AND leaves the
+            // rungs byte-identical to the pure CFL assignment (I4a / fixed-dt disguise).
+            if config.n_limit < config.r_max {
+                let pairs = solver.coupled_pairs(state);
+                individual::limit_rungs(&mut rungs, &pairs, config.n_limit);
+            }
             for &r in &rungs {
                 seen_rungs |= 1u64 << r;
             }

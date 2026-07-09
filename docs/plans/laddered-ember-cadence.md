@@ -564,11 +564,32 @@ against, exactly as the LBVH/G-series lineage did.
   capped; collisionless `+∞` ⇒ rung 0. Gates: uniform⇒one-rung, monotone in 1/dt,
   clamp `[0,r_max]`, hand-derived ceil-log2 (incl. boundaries + courant shift),
   every-finite-rung fits-and-is-tight, base_dt courant-scaled-coarsest-capped. (I2)
-- **I3 — active-set KDK integrator + predictor (ISOTHERMAL first).** Red: (i)
-  single-rung run reduces to global-adaptive **to tolerance** (NOT bit-identical
-  — active-set ordering + prediction differ; decide the tolerance up front and
-  do not overclaim); (ii) predictor keeps neighbour lists correct across a base
-  block. (I3, I6, I7)
+- **I3 — active-set KDK stepper + predictor (ISOTHERMAL first). DONE 2026-07-09
+  (RED cedb36d / GREEN e203b6f).** `sim::individual::{ActiveSetKdk, predict_pos}`.
+  `step_block` sub-cycles a power-of-two rung hierarchy over one base block:
+  opening half-kick all → per fine tick {drift ALL by `dt_base/2^r_max`,
+  recompute forces, kick the active subset}; rung `r` active every `2^(r_max−r)`
+  ticks; interior boundaries merge closing+opening half-kicks into one full-step
+  kick, block end takes the closing half. All integer rung arithmetic (no float
+  `log2`). **Gate design REVISED vs the pre-build sketch (advisor, 2026-07-09):
+  the "single-rung reduces to global-adaptive TO TOLERANCE" framing was weaker
+  and wronger.** Replaced by: **collapsed (all rung 0) → BIT-IDENTICAL** to
+  `LeapfrogKdk` at `dt_base` (integrator-vs-integrator over 4 blocks incl.
+  cached-acc reuse — NOT vs `run_adaptive`, whose growth limiter diverges the dt
+  sequence); **multi-rung is a genuinely different correct integrator** (converges
+  to the TRUE solution as rungs refine, never bit-compared), gated by (a)
+  exactness under constant acceleration (leapfrog exact at any step ⇒ pins the
+  open/interior-full/close kick bookkeeping to roundoff) + (b) convergence to the
+  analytic oscillator (finer rung tracks closer; coarse-rung error falls ~2nd
+  order under base-dt refinement). Predictor is drift-only `x + v·dt`, EXACT for
+  KDK (velocity constant between kicks — not an approximation), hand-value pinned.
+  Momentum bounded-drift deferred to the I4 driver. Force-caching-AGNOSTIC (takes
+  forces through the `ForceSolver` seam ⇒ fresh-vs-stale-tree is I4/I6's policy,
+  which is what keeps `hydro-only`/`hydro+gravity` honestly droppable — no I3 test
+  pins "fresh gravity every substep"). Drifts every particle at the fine cadence
+  (positions exact); `predict_pos` is pinned + ready for I6's predict-inactive
+  efficiency switch. Isothermal (`accelerations`); thermal `u`-kick arm is I5/I8.
+  (I3, I6, I7)
 - **I4 — `sim::run_individual` driver + timestep limiter.** Red: (i)
   full-duration convergence to a fine-dt reference on a CFL-moving testbed
   (PRIMARY, per-path); (ii) **limiter shock-wakeup** — shock into a slow-rung
@@ -612,7 +633,7 @@ against, exactly as the LBVH/G-series lineage did.
 |---|---|---|
 | **Full-duration convergence to fine-dt reference** | individual, per-path | PRIMARY: coarse run → fine as courant↓ on a CFL-MOVING testbed (same discipline as global adaptive's convergence gate). |
 | **Timestep-limiter shock-wakeup** | individual | CENTRAL correctness (I5): shock into a slow-rung region wakes the struck particles and captures the same energy as a fully-fine reference. |
-| Reduces to global-adaptive at single rung | individual vs global | TOLERANCE (not bit-identical — active-set/prediction ordering; I3). |
+| **Collapsed rungs ≡ LeapfrogKdk** | individual vs integrator | I3 (REVISED, advisor 2026-07-09 — replaces the old "reduces to global-adaptive to tolerance"): all-rung-0 ⇒ BIT-IDENTICAL to `LeapfrogKdk` at `dt_base` (NOT vs `run_adaptive`, whose growth limiter diverges the sequence). Multi-rung is NOT bit-compared — gated by constant-accel exactness + oscillator convergence. |
 | Rung synchronization | individual | pos+vel consistent at every `dt_base` boundary; snapshots emit only there (I2). |
 | Momentum bounded-drift | individual | DIAGNOSTIC not tripwire (I4): drift stays under a documented bound (kick-active-only forfeits exact conservation). |
 | Per-particle CFL vector `min` ≡ scalar | solver | I1: the vector is a strict generalization of the shipped scalar bound. |

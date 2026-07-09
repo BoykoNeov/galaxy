@@ -384,3 +384,106 @@ fn emit_adaptive(
     );
     sink.emit(&header, state)
 }
+
+// ---------------------------------------------------------------------------
+// Individual (per-particle rung) timestepping (plan: laddered-ember-cadence.md).
+//
+// The THIRD stepping path, beside fixed-dt `run` and global-adaptive
+// `run_adaptive` — neither of those byte-paths is touched. Each gas particle sits
+// on its own power-of-two rung below a per-block base dt and is re-integrated only
+// when its rung is due (I1/I2 rung policy, I3 `ActiveSetKdk` mechanic). This driver
+// owns the block loop: re-derive `dt_base` + rungs at each base-block boundary from
+// the solver's per-particle CFL vector, sub-cycle the block via `ActiveSetKdk`, and
+// emit snapshots on a TIME cadence (base dt varies block to block — a step count is
+// meaningless, exactly as on the adaptive path, D3).
+//
+// I4a = `hydro-only` lever (a): gas CFL rungs, collisionless stars on the coarsest
+// rung. Gates: full-DURATION convergence to a fine-courant reference (PRIMARY, on a
+// testbed with a genuine ≥3-rung spread — else it is fixed-dt in disguise) and a
+// momentum BOUNDED-DRIFT diagnostic (kick-active-only forfeits exact conservation —
+// drift ∝ courant, so it shrinks as courant → 0; NOT a roundoff tripwire). No energy
+// gate (isothermal heat bath + variable per-particle dt, D4/D2 carry over). The
+// Saitoh–Makino timestep limiter + shock-wakeup gate are I4b; the thermal `u`-kick
+// arm is I5; `[sim.individual].mode` scenario/snapshot wiring is owed before I6.
+// ---------------------------------------------------------------------------
+
+/// Policy + schedule for [`run_individual`]. Timestep POLICY (`courant`, the base-dt
+/// cap, the rung depth) lives here in the loop's config, never in the solver — the
+/// solver reports only the per-particle physics CFL vector.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndividualConfig {
+    /// Courant number applied to each particle's CFL limit: a particle's safe
+    /// sub-step is `courant · dt_i` and the base step is `courant · dt_coarsest`
+    /// (capped). Must be in (0, 1]; < 1 gives the stability margin. Halving it
+    /// halves every particle's step uniformly while the rung STRUCTURE is unchanged
+    /// (as long as `dt_base_cap` does not bind) — the property the convergence gate
+    /// leans on.
+    pub courant: f64,
+    /// Cap on the base (coarsest-rung) timestep: `dt_base = min(courant·dt_coarsest,
+    /// dt_base_cap)`. A scenario ceiling that keeps the diffuse majority from an
+    /// unbounded coarse step. Must be > 0. When it does NOT bind, the rung structure
+    /// is courant-invariant (see `courant`); when it binds, finer courant pushes
+    /// particles to finer rungs — keep it non-binding on convergence testbeds.
+    pub dt_base_cap: f64,
+    /// Maximum rung depth: the finest sub-step is `dt_base / 2^r_max`. A particle
+    /// needing a finer step than `r_max` allows CLAMPS there and steps coarser than
+    /// its CFL limit — bounded under-resolution with no red gate, so `r_max` must be
+    /// chosen large enough for the run's dynamic range (a tracked I6 hazard; NOT what
+    /// the I4b limiter covers — that is neighbour-rung coupling). Must be in [1, 60]
+    /// (the rung set is tracked in a `u64` bitmask for the summary diagnostics).
+    pub r_max: u32,
+    /// Sim-time between emitted snapshots (must be > 0). Snapshots land exactly on
+    /// integer multiples of this via a per-interval final-block clamp (D3) — the
+    /// only place all rungs are synchronized (pos+vel consistent).
+    pub output_dt: f64,
+    /// Number of output intervals; the run ends at `n_outputs · output_dt` (≥ 1).
+    pub n_outputs: u64,
+    /// Softening length recorded in headers (must match the solver's).
+    pub softening: f64,
+    /// RNG seed that produced the IC, recorded in headers.
+    pub rng_seed: u64,
+    /// Scenario config hash, recorded in headers.
+    pub config_hash: u64,
+    /// Units tag, recorded in headers.
+    pub units: String,
+}
+
+/// Summary returned by [`run_individual`]: the shared [`RunSummary`] plus the rung
+/// DIAGNOSTICS the convergence gate needs to prove the run genuinely exercised the
+/// multi-rung machinery (a single-rung run reduces to fixed-dt `LeapfrogKdk`, already
+/// bit-pinned in I3, and would make the gates vacuous).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndividualSummary {
+    /// The shared run summary (steps = base blocks integrated, final time, snapshots).
+    pub run: RunSummary,
+    /// The finest (largest) rung assigned to any particle over the whole run. A gate
+    /// asserts this is `< r_max`, proving the reference run is not itself
+    /// under-resolved (clamped) — which would make convergence meaningless.
+    pub max_rung: u32,
+    /// The number of DISTINCT rungs assigned over the whole run. A gate asserts this
+    /// is ≥ 3 on the convergence/momentum testbed — genuine active-subset stepping,
+    /// not fixed-dt in disguise.
+    pub distinct_rungs: usize,
+}
+
+/// Run the individual-timestep stepping loop (plan: laddered-ember-cadence.md,
+/// `hydro-only` mode / I4a). Emits the IC (time 0) then a snapshot at each output
+/// time `k · output_dt` (`k = 1..=n_outputs`). Each base block re-derives `dt_base`
+/// and the per-particle rungs from `solver.max_stable_dt_per_particle`, then
+/// sub-cycles the block with an internally-owned [`individual::ActiveSetKdk`],
+/// kicking only the active subset each fine tick. Header `step` is the output index
+/// `k`; header/state time is the exact `k · output_dt`.
+///
+/// Errors on an invalid config, or if no gas is present (all per-particle CFL limits
+/// are `+∞` — the individual path has no finite base dt to size; use the fixed-dt
+/// [`run`] for collisionless runs, per Scope).
+pub fn run_individual(
+    state: &mut State,
+    solver: &mut dyn ForceSolver,
+    bg: &dyn Background,
+    config: &IndividualConfig,
+    sink: &mut dyn SnapshotSink,
+) -> Result<IndividualSummary, SimError> {
+    let _ = (state, solver, bg, config, sink);
+    todo!("I4a: run_individual driver")
+}

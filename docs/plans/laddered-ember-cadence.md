@@ -355,6 +355,39 @@ an existing snapshot; no regen. This is a distinct tool from `rung-spread`
 (different criterion), so it is deliberately deferred to the point it pays,
 per the advisor.
 
+**I0b RESULT (2026-07-09) — MARGINAL, reopens the scope call (does NOT close it).**
+`grav-rung-spread` (xtask) landed and ran on the retained gasrich QUICK run
+(`m7f_gasdemo`, seed 0x00C0FFEE, ε=0.05, θ=0.5). At the star gravitational
+pericenter (t=28, `snapshot_00005600`):
+
+- **star drop-finest walk factor = 1.42×** (full-tail 2.84×). 56% of stars bunch
+  on a single rung — exactly the `dt ∝ |a|^(−½)` compression the criterion
+  predicts (spread NARROWER than the gas CFL spread, as flagged two-sidedly above:
+  this run landed on the *bunch-fine* side).
+- **Amdahl reprojection** (2026-07-09 block split: build 120 / walk 176 /
+  hydro 347 / cfl 134 ms, total 777):
+  - hydro-only (lever a, ships regardless): **1.68×**
+  - hydro+gravity, MEASURED w_grav=1.42×: **1.90×** — only **+13%** over hydro-only.
+  - hydro+gravity, full-tail w_grav=2.84×: **2.23×** — recovers the pre-registered
+    **2.24×**, confirming that number was the *ideal ceiling* (borrowed 2.9×); the
+    finest-rung penalty pulls the realistic drop-finest figure down to 1.90×.
+- **Robustness:** a θ=0 exact (direct-sum) rerun gives an identical rung
+  distribution (drop-finest 1.42×, cross-check 1.3e-14) ⇒ the bunching is
+  **physical**, not a Barnes-Hut opening-angle artefact.
+- **This is the best-moment figure** — measured at pericenter (widest spread);
+  the whole-run average walk factor is ≤ this, so 1.90× is an upper read.
+
+**Caveat (load-bearing, NOT harmless):** single seed, QUICK resolution. At FULL
+(smaller ε, deeper resolved wells) peak |a| rises ⇒ the star gravitational spread
+*widens* ⇒ subcycling gets MORE attractive, not less. The comparable hydro finding
+needed a 4-seed sweep to call itself structural; I0b is one seed / one res. So the
+verdict is **"the precondition came in below estimate (2.24× → 1.90×) — the
+`hydro+gravity` ROI is marginal at QUICK and reopens the user's scope call,"** NOT
+"don't build I-grav." Building `hydro-only` remains unconditionally worth it (I0's
+1.68× stands on already-measured gas rungs). A FULL/seed-sweep confirmation of the
+star spread is the natural gate before committing I-grav code, if the user wants
+to pursue the gravity layer.
+
 ### I1 — per-particle CFL is a VECTOR, not the scalar min
 `ForceSolver::max_stable_dt` returns `f64` (the min). Individual timesteps need
 `h_i / v_sig,i` per gas particle. Add a per-particle variant — either
@@ -468,8 +501,13 @@ pieces, none needed by `hydro-only`:
    before the walk, exactly as SPH neighbours are (I6). Integrator-owned scratch,
    not `State`.
 
-**Caveat carried on the ~2.24×:** its walk factor is the I0b-unmeasured star
-gravitational-rung spread. Build I0b first; do not overclaim 2.24× until it lands.
+**Caveat carried on the ~2.24× — NOW MEASURED (I0b, 2026-07-09):** its walk factor
+was the unmeasured star gravitational-rung spread. I0b landed it: the drop-finest
+star walk factor is **1.42×**, reprojecting `hydro+gravity` to **1.90×** (only +13%
+over hydro-only's 1.68×), not 2.24×. The 2.24× was the *ideal ceiling* (full-tail
+2.84× ≈ borrowed 2.9×). Verdict MARGINAL at QUICK res / one seed; FULL plausibly
+widens the spread (deeper wells). See the **I0b RESULT** block above — the payoff
+reopens the user's scope call rather than clearing a bar.
 
 ### I-GPU — GPU individual timesteps DEFERRED (rationale recorded)
 `GpuResidentLeapfrog::step_many` batches ≤`MAX_BATCH` steps into one submit at a
@@ -500,11 +538,15 @@ against, exactly as the LBVH/G-series lineage did.
   (same-N, resolves neither the log-N scaling trend nor the scope call). See "AMDAHL
   SPLIT".
 - **I0b — gravitational rung-spread (xtask; PRECONDITION for `hydro+gravity` ONLY,
-  NOT for `hydro-only`).** A `rung-spread` analogue over the star gravitational
-  criterion `dt_i = η·√(ε/|a_i|)` — histogram, drop-finest factor, projected walk
-  speedup at pericenter. Firms up the unmeasured factor behind lever (b)'s ~2.24×.
-  Deferred until the `hydro+gravity` milestone is actually approached (distinct
-  criterion = distinct tool; do not build speculatively). (I0b, I-grav)
+  NOT for `hydro-only`). DONE 2026-07-09 — MARGINAL, see "I0b RESULT" above.**
+  `galaxy-xtask grav-rung-spread <dir>` histograms the star gravitational criterion
+  `dt_i = η·√(ε/|a_i|)` at pericenter + diffuse, drop-finest factor, θ cross-check vs
+  direct sum, Amdahl reprojection. RESULT: star drop-finest walk factor **1.42×**
+  (full-tail 2.84×) ⇒ `hydro+gravity` reprojects to **1.90×**, only +13% over
+  hydro-only's 1.68× (NOT the 2.24× ceiling). θ=0 rerun identical ⇒ bunching is
+  physical. Single seed / QUICK res — FULL plausibly widens the spread. The gravity
+  layer's payoff is MARGINAL here; the scope call reopens rather than clears.
+  (I0b, I-grav)
 - **I1 — per-particle CFL vector.** Red: the vector's `min` equals the existing
   scalar `max_stable_dt` bit-for-bit on a fixed state (the vector is a strict
   generalization); collisionless rows are `+∞`. (I1)

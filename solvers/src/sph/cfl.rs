@@ -153,12 +153,84 @@ pub fn max_stable_dt(state: &State, params: &HydroParams, cfg: &DensityConfig, c
 /// its `isothermal_cfl_pins_pre_e4a_bits` guard is untouched. The individual-
 /// timestep driver bins these into power-of-two rungs (I2).
 pub fn max_stable_dt_per_particle(
-    _state: &State,
-    _params: &HydroParams,
-    _cfg: &DensityConfig,
-    _c_cfl: f64,
+    state: &State,
+    params: &HydroParams,
+    cfg: &DensityConfig,
+    c_cfl: f64,
 ) -> Vec<f64> {
-    todo!("I1: per-particle CFL vector")
+    // State-indexed output; collisionless rows stay `+∞` (no hydro constraint).
+    // Gas rows are written at their GLOBAL index `gas[k]`. A gas-free state keeps
+    // the all-`+∞` fill (its `min` = the scalar's gas-free `+∞`).
+    let mut out = vec![f64::INFINITY; state.len()];
+    let gas: Vec<usize> = (0..state.len())
+        .filter(|&i| state.kind[i] == Species::Gas)
+        .collect();
+    if gas.is_empty() {
+        return out;
+    }
+    let gpos: Vec<DVec3> = gas.iter().map(|&i| state.pos[i]).collect();
+    let gvel: Vec<DVec3> = gas.iter().map(|&i| state.vel[i]).collect();
+    let gmass: Vec<f64> = gas.iter().map(|&i| state.mass[i]).collect();
+    let dens = density_adaptive(&gpos, &gmass, cfg, None);
+    let h = &dens.h;
+
+    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+    let grid = HashGrid::build(&gpos, SUPPORT * h_max);
+
+    // The per-particle body is TEXTUALLY VERBATIM against `max_stable_dt`'s inner
+    // loop (same EOS split, same global-support gather + cross-support gate), with
+    // the `min_dt.min(...)` fold replaced by a store at the global index — so
+    // `out.iter().min()` reproduces the scalar bound bit-for-bit (the I1 gate). The
+    // scalar itself is left FROZEN; this is a parallel copy, not a refactor of it.
+    match params.eos {
+        Eos::Isothermal { .. } => {
+            let two_cs = 2.0 * params.sound_speed();
+            for i in 0..gpos.len() {
+                let ngb = grid.neighbours_within(&gpos, gpos[i], SUPPORT * h_max);
+                let mut v_sig = two_cs;
+                for &j in &ngb {
+                    if j == i {
+                        continue;
+                    }
+                    let r_ij = gpos[i] - gpos[j];
+                    let r = r_ij.length();
+                    if r == 0.0 || r >= SUPPORT * h[i].max(h[j]) {
+                        continue;
+                    }
+                    let w = (gvel[i] - gvel[j]).dot(r_ij) / r;
+                    if w < 0.0 {
+                        v_sig = v_sig.max(two_cs - 3.0 * w);
+                    }
+                }
+                out[gas[i]] = c_cfl * h[i] / v_sig;
+            }
+        }
+        Eos::Adiabatic { .. } => {
+            let cs: Vec<f64> = gas
+                .iter()
+                .map(|&i| params.eos.sound_speed_of(state.u[i]))
+                .collect();
+            for i in 0..gpos.len() {
+                let ngb = grid.neighbours_within(&gpos, gpos[i], SUPPORT * h_max);
+                let mut v_sig = 2.0 * cs[i];
+                for &j in &ngb {
+                    if j == i {
+                        continue;
+                    }
+                    let r_ij = gpos[i] - gpos[j];
+                    let r = r_ij.length();
+                    if r == 0.0 || r >= SUPPORT * h[i].max(h[j]) {
+                        continue;
+                    }
+                    let w = (gvel[i] - gvel[j]).dot(r_ij) / r;
+                    let approach = if w < 0.0 { -3.0 * w } else { 0.0 };
+                    v_sig = v_sig.max(cs[i] + cs[j] + approach);
+                }
+                out[gas[i]] = c_cfl * h[i] / v_sig;
+            }
+        }
+    }
+    out
 }
 
 /// Fail-loud check: `Ok(())` iff `dt ≤ max_stable_dt(...)`.

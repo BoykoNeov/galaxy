@@ -124,18 +124,16 @@ fn collisionless_rows_are_infinite() {
     let params = HydroParams::default();
     let vector = max_stable_dt_per_particle(&state, &params, &cfg, C_CFL);
 
-    for i in 0..state.len() {
+    for (i, &dt) in vector.iter().enumerate() {
         match state.kind[i] {
             Species::Gas => assert!(
-                vector[i].is_finite() && vector[i] > 0.0,
-                "gas row {i} must be finite positive, got {}",
-                vector[i]
+                dt.is_finite() && dt > 0.0,
+                "gas row {i} must be finite positive, got {dt}"
             ),
             _ => assert_eq!(
-                vector[i],
+                dt,
                 f64::INFINITY,
-                "collisionless row {i} must be +∞, got {}",
-                vector[i]
+                "collisionless row {i} must be +∞, got {dt}"
             ),
         }
     }
@@ -170,13 +168,12 @@ fn static_cloud_pins_the_full_vector_closed_form() {
     let dens = density_adaptive(&pos, &state.mass, &cfg, None);
     let vector = max_stable_dt_per_particle(&state, &params, &cfg, C_CFL);
 
-    for k in 0..pos.len() {
+    for (k, &dt) in vector.iter().enumerate() {
         let expect = C_CFL * dens.h[k] / (2.0 * c_s);
-        let rel = (vector[k] - expect).abs() / expect;
+        let rel = (dt - expect).abs() / expect;
         assert!(
             rel < 1e-9,
-            "static entry {k}: got {}, want {expect} (= C_cfl·h/(2c_s))",
-            vector[k]
+            "static entry {k}: got {dt}, want {expect} (= C_cfl·h/(2c_s))"
         );
     }
 }

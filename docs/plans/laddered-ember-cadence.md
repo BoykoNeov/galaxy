@@ -594,7 +594,7 @@ against, exactly as the LBVH/G-series lineage did.
   (driver) + I4b (limiter) per the user's scope call (2026-07-09) — the driver
   and the correctness-critical limiter each get a focused red/green cycle.
   - **I4a — driver + convergence + momentum diagnostic (ISOTHERMAL). DONE
-    2026-07-09 (RED 55b89c0 / GREEN pending-below).** `sim::{run_individual,
+    2026-07-09 (RED 55b89c0 / GREEN 4da1975).** `sim::{run_individual,
     IndividualConfig, IndividualSummary}` — the block-over-block loop: re-derive
     `dt_base` (`base_dt`, cap `.min(remaining)` to land on the output time) +
     per-particle rungs (`assign_rungs`) from `max_stable_dt_per_particle` each
@@ -615,9 +615,39 @@ against, exactly as the LBVH/G-series lineage did.
     `< 5%` of gross flux (kick-active-only ⇒ ∝ courant, shrinks as courant→0, NOT
     a roundoff tripwire); (iii) cadence on the output grid; gas-free + degenerate
     config reject. NO energy gate. (I4)
-  - **I4b — Saitoh–Makino timestep limiter + shock-wakeup gate (NEXT).** Red:
-    shock into a slow-rung region, assert the struck particles WAKE and capture the
-    same energy as a fully-fine reference (CENTRAL correctness, not a dial). (I5)
+  - **I4b — Saitoh–Makino timestep limiter + shock-wakeup gate. DONE 2026-07-10
+    (RED 9d52d6d / GREEN 4369268).** After CFL rung assignment, no gas particle
+    may sit more than `n_limit` rungs coarser than a force-coupled neighbour — the
+    coarser one is refined (woken); `IndividualConfig.n_limit` (typical 1) is the only
+    dial. Pieces: `ForceSolver::coupled_pairs` (trait default empty; `GravitySph` →
+    `sph::cfl::coupled_pairs`, the THIRD verbatim copy of the `r < SUPPORT·max(h_i,h_j)`
+    coupling gate — grid gather at global support, per-pair gated, so the limiter's
+    neighbour set never diverges from the force's), `individual::limit_rungs`
+    (raise-only fixpoint ⇒ converges; one pass propagates a single hop, the fixpoint
+    grades a whole chain), and `run_individual` wiring **SKIPPED when `n_limit >= r_max`**
+    (constraint unreachable ⇒ I4a / fixed-dt-disguise byte-identical AND coupled-pairs
+    gather kept off the hot path). **BLOCK-BOUNDARY limiting, NOT mid-substep wakeup**
+    — advisor-vetted + empirically confirmed via a throwaway probe
+    (`xtask/examples/i4b_probe.rs`, deleted): neighbour range (≈2h) ≫ per-block signal
+    travel (≈courant·h), so the limiter wakes a victim many base blocks before the
+    shock reaches it. Holds in the band Mach ∈ [2/courant, ~10/courant]; below it plain
+    CFL refines in time (gate vacuous), above it block-boundary grading can't keep up
+    (mid-tick wakeup would be needed — the code LOCATION is coupled to the answer:
+    driver-level for block-boundary, inside `ActiveSetKdk` for fine-tick). **The
+    load-bearing risk was TEETH: the CFL `v_sig` already carries `−3w`, so own-CFL
+    refines a DIRECT approacher on its own — the limiter's distinct value is the extra
+    lead from MULTI-HOP graded propagation, observable only when
+    `ratio = shock_speed·dt_base/h ≈ Mach·courant/2 ≳ 1`.** Gate = a high-Mach
+    directional RAM (dense fast stream into cold at-rest gas, Mach 15, ratio 1.9
+    asserted) in THREE arms — fine-courant oracle (0.05, limiter irrelevant at ratio
+    ≈0.4, convergence out-of-band |0.05−0.025|≈1.4e-3), limiter-OFF (`n_limit=r_max`),
+    limiter-ON (`n_limit=1`) — asserting BOTH that OFF measurably MISSES the oracle
+    (non-vacuous: KE-err 5.4%, RMS 5.2e-3) AND that ON RECOVERS it (KE-err 0.48%, ≥3×
+    closer; RMS 2.0e-3, ≥1.5× closer), keyed on struck-region kinetic energy (the plan's
+    wording) with an RMS-position corroborator. Plus 6 `limit_rungs` pure-fn unit tests
+    (one-hop refine, multi-hop chain fixpoint, raise-only monotonicity, symmetry,
+    n_limit=0 component collapse, non-binding no-op). Cheap always-on (~0.9s).
+    ISOTHERMAL; the thermal `u`-kick arm is I5. (I5)
 - **I5 — thermal arm.** Red: adiabatic single-rung reduces to global-adaptive
   thermal to tolerance; `u`-floor leak reported; convergence holds with `du/dt`
   kicked per-rung. (I8)

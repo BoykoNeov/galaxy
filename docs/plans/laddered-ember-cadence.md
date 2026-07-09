@@ -60,6 +60,15 @@ first.
 > ~2.0× (median) — clears the user's 30 % bar on lever (a) alone**; **+ gravity
 > subcycling ≈ 2.24× / 3.06×**. The decision is a **scope call** (how far to push, not
 > whether it pays), NOT a FULL regen. See the "AMDAHL SPLIT" subsection below.
+>
+> **Scope call RESOLVED (2026-07-09):** build BOTH levers as a **layered opt-in
+> toggle** `[sim.individual].mode = fixed-dt | hydro-only | hydro+gravity`, each
+> mode droppable to the one below (so gravity subcycling can be turned off later
+> without losing the hydro-only win). ⚠ The ~2.24× (`hydro+gravity`) carries an
+> **unmeasured** term — I0 measured *gas CFL* rungs; lever (b)'s walk factor is
+> the *star gravitational-rung* spread, gated by a new precondition **I0b**
+> (gravitational `rung-spread`) before any gravity-subcycling code. `hydro-only`
+> (~1.68×) stands on I0's already-measured spread and clears the bar on its own.
 
 The xtask exists: `galaxy-xtask rung-spread <snapshots_dir | .snap>` (isothermal
 arm of `cfl.rs` copied verbatim, `min` removed; the copy's `min` is asserted
@@ -251,9 +260,17 @@ promoted to a TDD'd `galaxy-xtask amdahl-split` subcommand beside `rung-spread`.
 
 ## What it buys — and what it does NOT
 
-- **Buys (primary, IF I0 clears): wall-clock speedup** from the per-instant
-  spatial spread of the CFL bound — the diffuse majority steps on coarse rungs
-  while only the shocked minority steps fine. Magnitude set by I0, not assumed.
+- **Buys (primary, `hydro-only` mode): wall-clock speedup** from the per-instant
+  spatial spread of the *gas CFL* bound — the diffuse majority steps on coarse
+  rungs while only the shocked minority steps fine. Magnitude set by I0
+  (~1.68× drop-finest whole-sim), not assumed. This lever (a) already clears the
+  user's 30% bar without touching gravity.
+- **Buys (`hydro+gravity` mode): a further speedup from subcycling gravity** on a
+  stale tree — the O(N·logN) tree WALK reduces to the active subset (the O(N)
+  *build* cannot; build:walk ≈ 0.68). Targets ~2.24× whole-sim, but the walk's
+  effective factor rests on the *star gravitational-rung* spread, which is
+  **unmeasured** (I0 measured gas CFL rungs only) — flagged, gated by I0b, and
+  could run either way (see AMDAHL SPLIT + I-grav).
 - **Buys (secondary): shock fidelity via the timestep limiter** — a slow-rung
   particle hit by a fast shock is forced awake (I5). This is a *correctness*
   gain over global adaptive's uniform coarse step in quiescent phases, not just
@@ -277,8 +294,28 @@ promoted to a TDD'd `galaxy-xtask amdahl-split` subcommand beside `rung-spread`.
   The fixed-dt and global-adaptive byte-paths are **literally untouched**, so
   their gates (fixed-dt reversibility/energy oscillation; global-adaptive
   convergence + D2b) stay intact and green.
-- **Gas-free path untouched** — collisionless runs keep fixed-dt `run`; a
-  gravitational per-particle criterion is a separate later item.
+- **A LAYERED, opt-in toggle — three modes, each droppable to the one below.**
+  The Amdahl split (below) found two independent reducibility levers, so the
+  feature is a *sub-toggle*, not all-or-nothing — mirroring how `[sim.adaptive]`
+  / `gasrich` opt in to global adaptive. `[sim.individual].mode`:
+  - **`fixed-dt`** (default / OFF) — no rungs; the fixed-dt or global-adaptive
+    path runs unchanged.
+  - **`hydro-only`** — gas CFL rungs (lever **a**). Delivers ~1.68× drop-finest
+    on lever (a) alone (clears the user's 30% bar); collisionless stars stay on
+    the coarsest rung (hydro `dt = +∞`), gravity is walked over all-N once per
+    base block as today. Carries the variable-dt integration risk (breaks
+    symplectic leapfrog).
+  - **`hydro+gravity`** — additionally subcycles gravity on a stale tree (lever
+    **b**), giving currently-`dt=+∞` stars finite *gravitational* rungs. Targets
+    ~2.24× (with an **unmeasured** walk-factor caveat — see I-grav / I0b).
+  - **Dropping gravity subcycling later = flip `hydro+gravity` → `hydro-only`**,
+    which falls back to 1.68×, *not* to fixed-dt. This is exactly the user's
+    "toggleable if we decide later we don't want it": the fallback is graceful,
+    one rung of the ladder, not the whole feature.
+- **Collisionless-only (gas-free) runs** stay on fixed-dt `run` in *every* mode —
+  the gravitational per-particle criterion added by `hydro+gravity` exists to
+  subcycle STARS *within a gas run* (so the gravity walk reduces to an active
+  subset), not to turn a pure-N-body run into an individual-timestep run.
 - GPU individual timesteps: **deferred**, rationale recorded (I-GPU).
 
 ---
@@ -293,8 +330,30 @@ early diffuse snapshot) — run the existing per-particle CFL body with the `min
 almost verbatim (the per-`i` loop already exists; drop the `min_dt.min(...)`
 fold and collect the vector). Report: the rung histogram, the fraction on the
 tightest rung, and the projected speedup `N / Σ_r n_r · 2^(r_max−r)`.
-**Decision rule:** projected speedup ≥ ~3× at pericenter → build. < ~2× → stop,
-record the finding, global adaptive is enough. Hours, not days.
+**Decision rule (SUPERSEDED — see AMDAHL SPLIT):** the go/no-go is no longer
+"≥3× at pericenter"; the Amdahl split reframed it as a *scope call* — how far up
+the ladder to build. `hydro-only` (lever a) already clears the user's 30% bar at
+~1.68×; `hydro+gravity` (lever b) targets ~2.24×. Hours, not days.
+
+### I0b — MEASURE the star GRAVITATIONAL-rung spread (precondition for `hydro+gravity` ONLY)
+I0/rung-spread measured **gas CFL rungs only** (`h_i / v_sig,i`). Lever (b)'s
+~2.24× — the gravity-walk reduction — rests on the **star gravitational-rung**
+distribution, a *different criterion* (`dt ~ η·√(ε / |a_i|)`, not `c·h/v_sig`)
+over a *larger, different population* (5000 stars vs 2500 gas in the measured
+snapshot). Borrowing gas's 2.9× drop-finest for the walk is an **unmeasured
+extrapolation**, and it is genuinely two-sided: stars bunching fine near the
+merger core weaken the factor; a broad spread with many coarse slow stars
+strengthens it. (Direction note: the baseline `run_adaptive` already steps *all*
+stars at the global min dt — wasteful for slow stars — so subcycling gravity
+helps stars too; treating the walk as accelerable is defensible, just
+un-quantified.) **I0b = a gravitational analogue of `rung-spread`**: histogram
+`dt_i = η·√(ε/|a_i|)` over stars+gas at pericenter, drop-finest factor, projected
+walk speedup. Run it **before any `hydro+gravity` (I-grav) code** — it firms up
+the one number the ON path's payoff hangs on. It is NOT a precondition for
+`hydro-only`, which stands on I0's already-measured gas spread. Measure it from
+an existing snapshot; no regen. This is a distinct tool from `rung-spread`
+(different criterion), so it is deliberately deferred to the point it pays,
+per the advisor.
 
 ### I1 — per-particle CFL is a VECTOR, not the scalar min
 `ForceSolver::max_stable_dt` returns `f64` (the min). Individual timesteps need
@@ -384,6 +443,34 @@ does for the whole state. Isothermal (`LeapfrogKdk`, no `u`) is the simpler
 first arm; the thermal arm lands second (I5-driver already in place). The
 `u`-floor leak accounting must still be reported (bounded non-conservation).
 
+### I-grav — gravity subcycling (`hydro+gravity` mode ONLY; the lever-b design surface)
+This is the whole cost of chasing ~2.24× over `hydro-only`'s ~1.68×, and it is
+**gated OFF unless `[sim.individual].mode = "hydro+gravity"`**. Three coupled
+pieces, none needed by `hydro-only`:
+
+1. **A gravitational per-particle dt criterion for STARS.** Collisionless stars
+   have hydro `dt = +∞` (coarsest rung) — under `hydro-only` they never subcycle,
+   so the gravity walk stays all-N. To reduce the walk to an active subset, stars
+   need a *finite* rung from a gravitational criterion `dt_i = η·√(ε/|a_i|)`
+   (Plummer softening `ε`, `|a_i|` the gravitational accel). This is the item the
+   old Scope parked as "a separate later item" — it is now **in scope, behind the
+   toggle**. A floor keeps the coarsest slow stars from an unbounded rung.
+2. **Stale-tree gravity gather (the efficiency crux, gravity edition of I7).**
+   Rebuild the O(N) tree/grid ONCE per base block; on fine ticks, walk the
+   *active subset* against the stale-but-dilated tree. The O(N) build is the
+   fixed floor lever (b) cannot cut (and "more stars" inflates it — the log-N
+   headwind); the walk is what reduces. Rebuild-every-fine-tick = build × 2^r_max
+   = catastrophic, so stale reuse is mandatory. Same "safe over-gather" argument
+   as the frozen-`h_max` hydro gather (I7) and the G-series LBVH endpoint.
+3. **Gravity prediction of inactive neighbours (gravity edition of I6).** An
+   active target's gravity walk gathers contributions from inactive stars/gas
+   that were last synced earlier; those must be drift-predicted to the fine tick
+   before the walk, exactly as SPH neighbours are (I6). Integrator-owned scratch,
+   not `State`.
+
+**Caveat carried on the ~2.24×:** its walk factor is the I0b-unmeasured star
+gravitational-rung spread. Build I0b first; do not overclaim 2.24× until it lands.
+
 ### I-GPU — GPU individual timesteps DEFERRED (rationale recorded)
 `GpuResidentLeapfrog::step_many` batches ≤`MAX_BATCH` steps into one submit at a
 single `dt` uniform — that batching IS the residency throughput win. Per-particle
@@ -412,6 +499,12 @@ against, exactly as the LBVH/G-series lineage did.
   pays. Hydro-only already clears the bar.** FULL regen is low value for this decision
   (same-N, resolves neither the log-N scaling trend nor the scope call). See "AMDAHL
   SPLIT".
+- **I0b — gravitational rung-spread (xtask; PRECONDITION for `hydro+gravity` ONLY,
+  NOT for `hydro-only`).** A `rung-spread` analogue over the star gravitational
+  criterion `dt_i = η·√(ε/|a_i|)` — histogram, drop-finest factor, projected walk
+  speedup at pericenter. Firms up the unmeasured factor behind lever (b)'s ~2.24×.
+  Deferred until the `hydro+gravity` milestone is actually approached (distinct
+  criterion = distinct tool; do not build speculatively). (I0b, I-grav)
 - **I1 — per-particle CFL vector.** Red: the vector's `min` equals the existing
   scalar `max_stable_dt` bit-for-bit on a fixed state (the vector is a strict
   generalization); collisionless rows are `+∞`. (I1)
@@ -431,11 +524,23 @@ against, exactly as the LBVH/G-series lineage did.
 - **I5 — thermal arm.** Red: adiabatic single-rung reduces to global-adaptive
   thermal to tolerance; `u`-floor leak reported; convergence holds with `du/dt`
   kicked per-rung. (I8)
-- **I6 — full-res producibility + speedup validation (the real "done").** Run
-  the full-res `gasrich` showpiece through `run_individual`; confirm it
-  completes, converges to the reference, and delivers the I0-projected speedup
-  (or explain the gap). "Done" = **completes AND converges AND the measured
-  speedup justifies the path**, not "tests green."
+- **I6 — full-res producibility + speedup validation, `hydro-only` mode (the
+  real "done" for lever a).** Run the full-res `gasrich` showpiece through
+  `run_individual` in `hydro-only` mode; confirm it completes, converges to the
+  reference, and delivers the ~1.68× hydro-only speedup (or explain the gap).
+  "Done" = **completes AND converges AND the measured speedup justifies the
+  path**, not "tests green." At this point the toggle ships at `hydro-only` and
+  the 30% bar is cleared.
+- **I-grav — gravity subcycling (`hydro+gravity` mode; the lever-b follow-on,
+  ONLY after I0b clears).** Gated behind `[sim.individual].mode="hydro+gravity"`.
+  Red: (i) star gravitational rung assignment + floor (pure fn, like I2); (ii)
+  stale-tree gravity walk over the active subset converges to a
+  rebuild-every-tick reference to tolerance (the I7 argument, gravity edition);
+  (iii) gravity prediction of inactive neighbours keeps the walk correct across a
+  base block (the I6 argument, gravity edition); (iv) full-res speedup validation
+  vs `hydro-only` — deliver the I0b-measured walk factor toward ~2.24× or explain
+  the gap. Sequenced AFTER I0b confirms the star gravitational-rung spread makes
+  it worth building. (I0b, I-grav)
 
 ---
 
@@ -449,6 +554,9 @@ against, exactly as the LBVH/G-series lineage did.
 | Rung synchronization | individual | pos+vel consistent at every `dt_base` boundary; snapshots emit only there (I2). |
 | Momentum bounded-drift | individual | DIAGNOSTIC not tripwire (I4): drift stays under a documented bound (kick-active-only forfeits exact conservation). |
 | Per-particle CFL vector `min` ≡ scalar | solver | I1: the vector is a strict generalization of the shipped scalar bound. |
+| **Stale-tree gravity walk convergence** | `hydro+gravity` only | I-grav: active-subset walk on a once-per-base-block tree → rebuild-every-tick reference to tolerance (the I7 over-gather argument, gravity edition). |
+| Gravity neighbour prediction correct across a base block | `hydro+gravity` only | I-grav: drift-predicted inactive stars/gas keep the walk correct at fine ticks (the I6 argument, gravity edition). |
+| Mode ladder falls back gracefully | toggle | `hydro+gravity`→`hydro-only`→`fixed-dt`: dropping a rung of the ladder never touches the paths below it (their gates stay green). |
 | Fixed-dt reversibility + energy oscillation | fixed-dt | UNCHANGED, untouched. |
 | Global-adaptive convergence + D2b | global | UNCHANGED, untouched. |
 | Gas-free byte identity | gas-free | UNCHANGED. |
@@ -458,13 +566,23 @@ against, exactly as the LBVH/G-series lineage did.
 
 ## Risks & dependencies
 
-- **I0 can kill the plan.** If the pericenter spatial spread is narrow (<2×),
-  the rewrite is not worth it — record the finding and stop. This is the whole
-  reason I0 is first.
+- **I0 is DONE and did NOT kill the plan** — it reframed the go/no-go into a
+  scope call (AMDAHL SPLIT). `hydro-only` clears the 30% bar at ~1.68×; the
+  original "<2× → stop" rule is superseded. The residual kill risk is now
+  per-mode, not whole-plan.
+- **The ~2.24× (`hydro+gravity`) rests on an UNMEASURED number.** The gravity-walk
+  reduction assumes a favourable *star gravitational-rung* spread; I0 measured
+  only gas CFL rungs. **I0b must land before I-grav code** — if the star spread
+  is narrow (stars bunch fine near the core), lever (b) underdelivers and the
+  right call is to ship `hydro-only` and stop. This is the gravity-path kill
+  switch, and it is why gravity is a droppable rung of the toggle, not baked in.
 - **The efficiency trap (I7) is the second kill switch.** Grid rebuild +
   neighbour prediction per fine tick can eat the savings; the rebuild cadence
   must be resolved, and the I6 measurement must show the *net* win, not the
-  ideal-integrator win.
+  ideal-integrator win. The **gravity** stale-tree gather (I-grav) inherits this
+  trap in a sharper form: the O(N) tree build is a fixed floor lever (b) cannot
+  cut, and "more stars" inflates it (log-N headwind) — the net gravity win must
+  be measured, not assumed.
 - **The timestep limiter (I5) is not optional** — without it the adiabatic
   shocked-merger physics (this project's aim) is silently wrong, with no red
   gate unless the shock-wakeup test exists. Build the test with the mechanism.

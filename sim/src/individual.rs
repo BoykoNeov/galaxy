@@ -7,9 +7,12 @@
 //! `dt_base` and is re-integrated only when its rung is due, so the diffuse
 //! majority steps far less often than the shocked knot that pins the global
 //! bound. This module hosts the rung POLICY (I2) — pure functions, unit-testable
-//! without stepping — and (later) the `run_individual` driver + active-set
-//! schedule. Rung policy lives here in the loop, never in the solver, mirroring
-//! how [`plan_block`](crate::plan_block) owns the global-adaptive policy.
+//! without stepping — the active-set KDK stepper (I3, [`ActiveSetKdk`]), and
+//! (later) the `run_individual` driver. Rung policy lives here in the loop, never
+//! in the solver, mirroring how [`plan_block`](crate::plan_block) owns the
+//! global-adaptive policy.
+
+use galaxy_core::{Background, DVec3, ForceSolver, State};
 
 /// The sub-step for rung `r` below `dt_base`: `dt_base / 2^r`. Rung 0 is the
 /// coarsest (the full base step); each higher rung halves it.
@@ -62,4 +65,77 @@ fn assign_one(dt_i: f64, dt_base: f64, courant: f64, r_max: u32) -> u32 {
         r += 1;
     }
     r
+}
+
+/// Drift-predict a particle to a time offset `dt` from its last sync: `x + v·dt`
+/// (I3 predictor). This is EXACT for KDK — acceleration enters only through the
+/// kicks, so between an inactive particle's kicks its velocity is constant and the
+/// linear extrapolation is the true position, NOT an approximation. (Adding a
+/// `½a·Δt²` term would double-count acceleration — wrong for KDK.) I3 drifts every
+/// particle at the fine cadence, so positions are already current; this pins the
+/// predictor the I6 efficiency path will call to AVOID touching inactive neighbours.
+#[inline]
+pub fn predict_pos(x: DVec3, v: DVec3, dt: f64) -> DVec3 {
+    todo!("I3 predictor: x + v·dt")
+}
+
+/// Active-set Kick-Drift-Kick stepper (I3): advances one base block by sub-cycling
+/// a power-of-two rung hierarchy. Each fine tick drifts ALL particles and kicks
+/// only the ACTIVE subset (those whose rung is due), so a rung-`r` particle takes
+/// `2^r` sub-steps of `dt_base/2^r` per block while a rung-0 particle takes one. A
+/// distinct type — NOT a branch on [`LeapfrogKdk`](galaxy_core::LeapfrogKdk) — because
+/// per-particle rungs + an active mask do not fit `Integrator::step(dt)`.
+///
+/// When every particle is on rung 0 this reduces to `LeapfrogKdk` at `dt_base`
+/// bit-for-bit (one fine tick, active set = all). Multi-rung it is a genuinely
+/// different, correct integrator that converges to the true solution as rungs
+/// refine — it is NOT bit-equal to any single-`dt` scheme.
+///
+/// Caches accelerations as scratch (the closing half-kick and the next block's
+/// opening kick reuse the last force eval); nothing derived is stored in `State`
+/// (the D2 discipline). Isothermal first (I3); the thermal `u`-kick arm is I5/I8.
+#[derive(Clone, Debug, Default)]
+pub struct ActiveSetKdk {
+    /// Cached accelerations at the current positions (scratch). Reused across the
+    /// block boundary as the next opening kick, exactly as `LeapfrogKdk` does.
+    acc: Vec<DVec3>,
+    primed: bool,
+}
+
+impl ActiveSetKdk {
+    pub fn new() -> Self {
+        Self {
+            acc: Vec::new(),
+            primed: false,
+        }
+    }
+
+    /// Clear cached state so the next `step_block` re-primes from scratch. Call
+    /// before reusing one stepper on a different run / initial condition.
+    pub fn reset(&mut self) {
+        self.acc.clear();
+        self.primed = false;
+    }
+
+    /// Eagerly compute and cache accelerations at the current state, so the next
+    /// `step_block` opens with a fresh (not stale) half-kick.
+    pub fn prime(&mut self, state: &State, solver: &mut dyn ForceSolver) {
+        todo!("I3: compute acc at current positions")
+    }
+
+    /// Advance one base block of size `dt_base`, each particle on rung `rungs[i]`
+    /// (0 = coarsest = full base step; the finest present rung sets the fine-tick
+    /// count `2^r_max`). Kicks only active particles each fine tick; drifts all.
+    /// `rungs.len()` must equal `state.len()`. Synchronizes all rungs at the block
+    /// boundary — the only place a snapshot may be emitted (I2/D3).
+    pub fn step_block(
+        &mut self,
+        state: &mut State,
+        solver: &mut dyn ForceSolver,
+        bg: &dyn Background,
+        dt_base: f64,
+        rungs: &[u32],
+    ) {
+        todo!("I3: active-set KDK sub-cycle over one base block")
+    }
 }

@@ -20,7 +20,7 @@ pub mod grid;
 pub mod kernel;
 pub mod reference;
 
-pub use cfl::{max_stable_dt, validate_dt, CflViolation};
+pub use cfl::{max_stable_dt, max_stable_dt_per_particle, validate_dt, CflViolation};
 pub use density::{
     density_adaptive, density_adaptive_serial, density_fixed, DensityConfig, DensityResult,
 };

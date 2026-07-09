@@ -37,6 +37,19 @@ pub trait ForceSolver {
     fn max_stable_dt(&self, _state: &State) -> f64 {
         f64::INFINITY
     }
+
+    /// The per-particle CFL limit (I1) — the state-indexed vector whose `min` is
+    /// [`max_stable_dt`](Self::max_stable_dt). Individual timesteps bin these into
+    /// power-of-two rungs (a particle's rung IS its `dt_i`). Gas rows carry the
+    /// finite hydro bound; collisionless rows (and any solver with no hydro
+    /// constraint) carry `+∞`. The default is `vec![+∞; len]`, consistent with the
+    /// scalar default — a pure-gravity solver imposes no per-particle limit.
+    ///
+    /// Like the scalar, this reports only the *physics* limit; the Courant number
+    /// and rung policy live in the individual-timestep loop, never in the solver.
+    fn max_stable_dt_per_particle(&self, state: &State) -> Vec<f64> {
+        vec![f64::INFINITY; state.len()]
+    }
 }
 
 /// Cosmological background. `StaticBackground` => a≡1, H≡0 (Newtonian).

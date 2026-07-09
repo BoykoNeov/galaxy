@@ -147,4 +147,12 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
         // gas-free state returns `+∞` exactly as the free function does.
         super::cfl::max_stable_dt(state, &self.params, &self.density_cfg, 1.0)
     }
+
+    fn max_stable_dt_per_particle(&self, state: &State) -> Vec<f64> {
+        // The per-particle CFL vector (I1) at Courant number 1, state-indexed:
+        // gas rows carry `h_i / v_sig,i`, collisionless rows `+∞`. Its `min`
+        // equals `max_stable_dt` (the I1 bit-identity gate). Same reuse as the
+        // scalar — the rung policy sits in the individual-timestep loop.
+        super::cfl::max_stable_dt_per_particle(state, &self.params, &self.density_cfg, 1.0)
+    }
 }

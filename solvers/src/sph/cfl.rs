@@ -143,6 +143,24 @@ pub fn max_stable_dt(state: &State, params: &HydroParams, cfg: &DensityConfig, c
     }
 }
 
+/// The per-particle CFL vector `dt_i = c_cfl · h_i / v_sig,i` (I1) — the additive
+/// generalization of [`max_stable_dt`]'s scalar `min`, for individual timesteps.
+///
+/// Full-length and state-indexed: gas rows carry the finite bound; collisionless
+/// rows carry `+∞` (no hydro constraint). By construction the vector's `min`
+/// equals the scalar [`max_stable_dt`] (asserted bit-for-bit in the I1 gate) — the
+/// shipped scalar stays FROZEN (this is a parallel copy, not a refactor of it), so
+/// its `isothermal_cfl_pins_pre_e4a_bits` guard is untouched. The individual-
+/// timestep driver bins these into power-of-two rungs (I2).
+pub fn max_stable_dt_per_particle(
+    _state: &State,
+    _params: &HydroParams,
+    _cfg: &DensityConfig,
+    _c_cfl: f64,
+) -> Vec<f64> {
+    todo!("I1: per-particle CFL vector")
+}
+
 /// Fail-loud check: `Ok(())` iff `dt ≤ max_stable_dt(...)`.
 pub fn validate_dt(
     state: &State,

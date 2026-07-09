@@ -8,8 +8,10 @@ pub mod spec;
 use std::path::PathBuf;
 
 use crate::simulate::Backend;
+use galaxy_core::{DVec3, ForceSolver, Species, State};
 use galaxy_grade::{BloomConfig, GradeConfig, LocalToneConfig, ToneMap};
 use galaxy_renderprep::FrameData;
+use galaxy_solvers::{BarnesHut, DirectSum};
 use glam::Vec3;
 
 // --- Shared physics / look constants (every scenario) --------------------------
@@ -575,6 +577,136 @@ pub fn rung_spread(dt: &[f64]) -> Option<RungSpread> {
     })
 }
 
+// --- I0b: the GRAVITATIONAL rung-spread (precondition for `hydro+gravity`) ------
+// docs/plans/laddered-ember-cadence.md, milestone I0b. I0/rung-spread measured the
+// *gas CFL* rung spread (`h_i/v_sig,i`) — lever (a), the hydro-only win. Lever (b)
+// — subcycling the gravity WALK on a stale tree — reduces the O(N·logN) walk to its
+// active subset, and its payoff rests on a DIFFERENT distribution: the *star
+// gravitational-rung* spread `dt_i = η·√(ε/|a_i|)`. That number is unmeasured; this
+// is the tool that measures it, so the ~2.24× `hydro+gravity` claim rests on data,
+// not a borrowed hydro factor. Like I0, it lives in the xtask (a go/no-go
+// measurement), leaving the shipped force path textually untouched.
+
+/// One particle's GRAVITATIONAL timestep datum (I0b): its stable step
+/// `dt = η·√(ε/|a|)` (the standard Plummer-softened gravitational criterion), the
+/// acceleration magnitude `|a|` that sets it, and its species.
+///
+/// Two facts about this `dt` govern how the histogram reads (both flagged by the
+/// advisor):
+/// - **η and the ε *prefactor* cancel in the rung ratios** — `dt_base/dt_i =
+///   √(|a_i|/|a_min|)`, so the rung binning and speedup are invariant to `η` and to
+///   the ε in `√(ε/·)`. `η` is purely cosmetic (scales every printed `dt` equally).
+///   ε is NOT cosmetic where it enters `|a|` itself (BarnesHut softening), so it is a
+///   real knob on the *force*, just not on the *spread*.
+/// - **`dt ∝ |a|^(−½)` compresses the spread**: a given acceleration dynamic range
+///   yields only ~half as many log₂ rungs as the same range in a `dt ∝ 1/v` (hydro)
+///   criterion. So the gravitational spread tends to be NARROWER than hydro's — a
+///   modest drop-finest here is the expected "stars bunch fine" regime, not a bug.
+#[derive(Clone, Copy, Debug)]
+pub struct GravDt {
+    /// The gravitational stable step `η·√(ε/|a|)` (`+∞` when `|a| == 0`).
+    pub dt: f64,
+    /// Acceleration magnitude `|a_i|` (the quantity that actually sets the rung).
+    pub a_mag: f64,
+    /// Species — the star (`Collisionless`) subset carries the lever-(b) verdict;
+    /// gas walks on its hydro rung under `hydro+gravity`, not on this one.
+    pub kind: Species,
+}
+
+/// The pure gravitational-timestep map: `dt = η·√(ε/|a|)`, with `|a| == 0 ⇒ +∞`
+/// (a particle feeling no net force needs no gravitational step — the coarsest,
+/// best-case rung, NOT a non-participant; contrast the hydro `+∞` = collisionless).
+pub fn grav_timestep(_a_mag: f64, _eps: f64, _eta: f64) -> f64 {
+    todo!("I0b green: dt = η·√(ε/|a|), +∞ when |a|==0")
+}
+
+/// Per-particle gravitational timestep over EVERY particle in `state` (stars + gas),
+/// in particle-index order, one [`GravDt`] each. The acceleration field is the
+/// pipeline's own Barnes-Hut force (`G` = [`G`], softening `eps`, opening angle
+/// `theta` — pass the pipeline [`THETA`] so the rungs match what the real sim would
+/// assign), so this measures the rungs the actual `hydro+gravity` walk would use.
+///
+/// Returns one entry per particle (never drops any) so the caller can slice by
+/// species and assert nothing is lost — the `+∞` here is a coarse-rung particle, not
+/// an excluded one (the inverted semantics vs [`RungSpread`]/hydro). Non-hydro to the
+/// core: this is gravity, which acts on all mass.
+pub fn per_particle_grav_dt(_state: &State, _eps: f64, _eta: f64, _theta: f64) -> Vec<GravDt> {
+    todo!("I0b green: BarnesHut accel → per-particle grav_timestep, one entry each")
+}
+
+/// The θ cross-check (I0b's nearest analogue to rung-spread's runtime self-check
+/// against the shipped scalar bound — there is no shipped gravitational bound, so
+/// this validates the Barnes-Hut acceleration field the rungs are built from). Max
+/// over particles of the relative difference `|a_BH − a_exact| / |a_exact|` between
+/// the θ-approximated tree walk and the exact O(N²) Plummer direct sum at the SAME
+/// softening. A small value confirms the θ=0.5 rungs are not tree-approximation
+/// artefacts; it doubles as the tail's θ-sensitivity (cheap at ~7500 particles).
+pub fn accel_max_rel_vs_direct(_state: &State, _eps: f64, _theta: f64) -> f64 {
+    todo!("I0b green: max relative |a_BH − a_direct| over particles")
+}
+
+/// The per-force-block cost split that turns a measured rung factor into a
+/// whole-sim speedup (the Amdahl reprojection). Costs in ms/block, measured
+/// 2026-07-09 on the shipped-seed gasrich pericenter (`laddered-ember-cadence.md`,
+/// "AMDAHL SPLIT"). They are structural (set by N, gas fraction, tree depth) but the
+/// build:walk ratio specifically is clustering-sensitive — read the reprojection
+/// with a ± and re-measure at a tighter pericenter if the scope call proceeds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AmdahlBlock {
+    /// Gravity tree build (Barnes-Hut, O(N)) — the fixed floor NO lever can cut.
+    pub build_ms: f64,
+    /// Gravity walk (O(active·logN)) — reducible ONLY by lever (b) (stale-tree
+    /// subcycle); this is the term I0b's star factor multiplies.
+    pub walk_ms: f64,
+    /// Density + hydro on the gas subset — reducible by lever (a) (the core rung
+    /// win), factor = the gas hydro drop-finest ([`W_HYDRO_DROP_FINEST`]).
+    pub hydro_ms: f64,
+    /// Per-particle `dt` (CFL) — reducible by lever (a): free with hydro-only rungs
+    /// (a rung IS the per-particle dt), fuses with the active-subset hydro solve.
+    pub cfl_ms: f64,
+}
+
+/// The 2026-07-09 measured gasrich-pericenter block split (`build:walk = 0.68`).
+pub const AMDAHL_GASRICH_PERICENTER: AmdahlBlock = AmdahlBlock {
+    build_ms: 120.0,
+    walk_ms: 176.0,
+    hydro_ms: 347.0,
+    cfl_ms: 134.0,
+};
+
+/// The robust lever-(a) hydro factor: the seed-sweep DROP-FINEST median (~2.9×), the
+/// conservative gas-CFL rung speedup (I0 RESULT). Paired here with I0b's measured
+/// star drop-finest so both Amdahl terms use the same robust (drop-the-finest-rung)
+/// convention rather than the fragile full-tail ceiling.
+pub const W_HYDRO_DROP_FINEST: f64 = 2.9;
+
+impl AmdahlBlock {
+    /// Total block cost with no rungs — the Amdahl denominator's `1×` baseline.
+    pub fn total_ms(&self) -> f64 {
+        todo!("I0b green: sum of the four block terms")
+    }
+
+    /// Whole-sim speedup of **`hydro-only`** rungs (lever a): gravity build+walk stay
+    /// fixed (all-N walk, once per base block), the hydro+CFL terms reduce by
+    /// `w_hydro`. With `w_hydro = W_HYDRO_DROP_FINEST` this reproduces the plan's
+    /// ~1.68×.
+    pub fn hydro_only_speedup(&self, _w_hydro: f64) -> f64 {
+        todo!("I0b green: total / (build + walk + (hydro+cfl)/w_hydro)")
+    }
+
+    /// Whole-sim speedup of **`hydro+gravity`** rungs (levers a+b): the O(N) build
+    /// stays fixed, the walk reduces by `w_grav` (I0b's measured star drop-finest),
+    /// the hydro+CFL terms by `w_hydro`. With `w_hydro = w_grav = W_HYDRO_DROP_FINEST`
+    /// this reproduces the plan's ~2.24× (the borrowed-2.9× estimate I0b replaces).
+    ///
+    /// Conservative: it charges the WHOLE walk at the star factor, but under
+    /// `hydro+gravity` the ~⅓ gas share of the walk actually rides the (typically
+    /// larger) hydro factor, so the true speedup is ≥ this when `w_grav < w_hydro`.
+    pub fn hydro_plus_gravity_speedup(&self, _w_hydro: f64, _w_grav: f64) -> f64 {
+        todo!("I0b green: total / (build + walk/w_grav + (hydro+cfl)/w_hydro)")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,6 +860,115 @@ mod tests {
         assert_eq!(s.counts, vec![1]);
         assert!(rung_spread(&[]).is_none());
         assert!(rung_spread(&[f64::INFINITY, -1.0, 0.0]).is_none());
+    }
+
+    // --- I0b: gravitational rung spread (go/no-go precondition for hydro+gravity) --
+
+    use galaxy_core::{DVec3, Species, State};
+
+    #[test]
+    fn grav_timestep_is_the_softened_criterion_and_infinite_at_zero_accel() {
+        // dt = η·√(ε/|a|); a force-free particle (|a| = 0) sits on the coarsest rung
+        // (dt = +∞ — the BEST case, not an exclusion; inverted vs the hydro +∞).
+        let dt = grav_timestep(0.25, 0.5, 0.7);
+        assert!((dt - 0.7 * (0.5f64 / 0.25).sqrt()).abs() < 1e-15, "{dt}");
+        assert_eq!(grav_timestep(0.0, 0.5, 0.7), f64::INFINITY);
+    }
+
+    #[test]
+    fn per_particle_grav_dt_matches_the_two_body_hand_derivation() {
+        // Two equal unit masses at separation d along x. Each feels the other's
+        // softened pull |a| = G·m·d / (d² + ε²)^{3/2} (G = 1), so
+        // dt = η·√(ε/|a|). Hand-derived, independent of the function's own output —
+        // and it exercises the full BarnesHut-wiring + dt-map end to end. (Barnes-Hut
+        // on two bodies is exact for any θ: the sibling is a single-particle leaf.)
+        let d = 2.0;
+        let m = 1.0;
+        let eps = 0.5;
+        let eta = 0.7;
+        let state = State::from_phase_space(
+            vec![DVec3::ZERO, DVec3::new(d, 0.0, 0.0)],
+            vec![DVec3::ZERO; 2],
+            vec![m; 2],
+        );
+        let a_expected = G * m * d / (d * d + eps * eps).powf(1.5);
+        let dt_expected = eta * (eps / a_expected).sqrt();
+
+        let g = per_particle_grav_dt(&state, eps, eta, 0.5);
+        assert_eq!(g.len(), 2, "one datum per particle, never dropped");
+        for gd in &g {
+            assert!((gd.a_mag - a_expected).abs() < 1e-12, "|a| {}", gd.a_mag);
+            assert!((gd.dt - dt_expected).abs() < 1e-12, "dt {}", gd.dt);
+            assert_eq!(gd.kind, Species::Collisionless);
+        }
+    }
+
+    #[test]
+    fn per_particle_grav_dt_preserves_species_and_returns_every_particle() {
+        // The star subset (Collisionless) carries the lever-(b) verdict, so the
+        // per-particle data must keep species and length so the caller can slice —
+        // and a lone particle feels no force (|a| = 0 ⇒ dt = +∞), kept not dropped.
+        let mut state = State::from_phase_space(
+            vec![DVec3::new(3.0, 0.0, 0.0), DVec3::new(-3.0, 0.0, 0.0)],
+            vec![DVec3::ZERO; 2],
+            vec![1.0; 2],
+        );
+        state.kind = vec![Species::Collisionless, Species::Gas];
+        let g = per_particle_grav_dt(&state, 0.05, 1.0, 0.5);
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].kind, Species::Collisionless);
+        assert_eq!(g[1].kind, Species::Gas);
+
+        // A single isolated particle: no force, coarsest rung, still returned.
+        let solo = State::from_phase_space(vec![DVec3::ZERO], vec![DVec3::ZERO], vec![1.0]);
+        let gs = per_particle_grav_dt(&solo, 0.05, 1.0, 0.5);
+        assert_eq!(gs.len(), 1);
+        assert_eq!(gs[0].a_mag, 0.0);
+        assert_eq!(gs[0].dt, f64::INFINITY);
+    }
+
+    #[test]
+    fn accel_cross_check_is_near_zero_for_a_well_separated_pair() {
+        // θ can't approximate a two-body pair (each sees the other as a single leaf),
+        // so the BH field equals the exact direct sum to roundoff — the self-check's
+        // clean-field baseline.
+        let state = State::from_phase_space(
+            vec![DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0)],
+            vec![DVec3::ZERO; 2],
+            vec![1.0; 2],
+        );
+        assert!(accel_max_rel_vs_direct(&state, 0.05, 0.5) < 1e-12);
+    }
+
+    #[test]
+    fn amdahl_reprojects_the_plan_speedups() {
+        let b = AMDAHL_GASRICH_PERICENTER;
+        assert_eq!(b.total_ms(), 777.0);
+
+        // hydro-only (lever a) at the robust drop-finest hydro factor → the plan's 1.68×.
+        let hydro_only = b.hydro_only_speedup(W_HYDRO_DROP_FINEST);
+        assert!((hydro_only - 1.68).abs() < 0.01, "hydro-only {hydro_only}");
+
+        // hydro+gravity (levers a+b) with the plan's BORROWED 2.9× walk factor → 2.24×.
+        let both = b.hydro_plus_gravity_speedup(W_HYDRO_DROP_FINEST, W_HYDRO_DROP_FINEST);
+        assert!((both - 2.24).abs() < 0.01, "hydro+gravity {both}");
+    }
+
+    #[test]
+    fn amdahl_gravity_subcycling_is_monotone_and_bracketed() {
+        let b = AMDAHL_GASRICH_PERICENTER;
+        let w_h = W_HYDRO_DROP_FINEST;
+        // w_grav = 1 (walk not reduced) ≡ hydro-only exactly (lever b contributes nothing).
+        assert!(
+            (b.hydro_plus_gravity_speedup(w_h, 1.0) - b.hydro_only_speedup(w_h)).abs() < 1e-12
+        );
+        // Strictly increasing in the walk factor: more star subcycling ⇒ more speedup.
+        assert!(b.hydro_plus_gravity_speedup(w_h, 2.0) > b.hydro_plus_gravity_speedup(w_h, 1.5));
+        // Upper bracket: a perfectly-subcycled walk (w_grav → ∞) removes the whole
+        // walk term — the ceiling lever (b) can approach but never exceed.
+        let ceil = b.total_ms() / (b.build_ms + (b.hydro_ms + b.cfl_ms) / w_h);
+        assert!(b.hydro_plus_gravity_speedup(w_h, 1e12) <= ceil + 1e-9);
+        assert!(b.hydro_plus_gravity_speedup(w_h, 1e12) > ceil - 1e-3);
     }
 
     // --- regrade arg parsing (M6a) -------------------------------------------

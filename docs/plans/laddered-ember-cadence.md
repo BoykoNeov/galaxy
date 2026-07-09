@@ -556,9 +556,14 @@ against, exactly as the LBVH/G-series lineage did.
   bit-for-bit (BOTH EOS arms), collisionless `+∞`, static-cloud FULL-vector
   closed-form pin, non-minimal `−3w` approacher pin (advisor teeth — `min ≡ scalar`
   only guards the minimal particle), GravitySph trait plumbing. (I1)
-- **I2 — rung assignment (pure fn).** Red: power-of-two binning is monotone,
-  clamped to `[0, r_max]`, and a uniform-CFL state maps every particle to the
-  same rung. Unit-testable without stepping. (I2)
+- **I2 — rung assignment (pure fn). DONE 2026-07-09 (RED 4826842 / GREEN 65db7ce).**
+  `sim::individual::{assign_rungs, base_dt, rung_step}` (new module beside
+  run/run_adaptive). `assign_rungs` bins via an EXACT integer search (smallest `r`
+  with `dt_base/2^r ≤ courant·dt_i`) — exact at power-of-two boundaries where a
+  float `log2().ceil()` could round either way. `base_dt = courant·max_finite(dt_i)`
+  capped; collisionless `+∞` ⇒ rung 0. Gates: uniform⇒one-rung, monotone in 1/dt,
+  clamp `[0,r_max]`, hand-derived ceil-log2 (incl. boundaries + courant shift),
+  every-finite-rung fits-and-is-tight, base_dt courant-scaled-coarsest-capped. (I2)
 - **I3 — active-set KDK integrator + predictor (ISOTHERMAL first).** Red: (i)
   single-rung run reduces to global-adaptive **to tolerance** (NOT bit-identical
   — active-set ordering + prediction differ; decide the tolerance up front and

@@ -616,8 +616,12 @@ pub struct GravDt {
 /// The pure gravitational-timestep map: `dt = η·√(ε/|a|)`, with `|a| == 0 ⇒ +∞`
 /// (a particle feeling no net force needs no gravitational step — the coarsest,
 /// best-case rung, NOT a non-participant; contrast the hydro `+∞` = collisionless).
-pub fn grav_timestep(_a_mag: f64, _eps: f64, _eta: f64) -> f64 {
-    todo!("I0b green: dt = η·√(ε/|a|), +∞ when |a|==0")
+pub fn grav_timestep(a_mag: f64, eps: f64, eta: f64) -> f64 {
+    if a_mag > 0.0 {
+        eta * (eps / a_mag).sqrt()
+    } else {
+        f64::INFINITY
+    }
 }
 
 /// Per-particle gravitational timestep over EVERY particle in `state` (stars + gas),
@@ -630,8 +634,20 @@ pub fn grav_timestep(_a_mag: f64, _eps: f64, _eta: f64) -> f64 {
 /// species and assert nothing is lost — the `+∞` here is a coarse-rung particle, not
 /// an excluded one (the inverted semantics vs [`RungSpread`]/hydro). Non-hydro to the
 /// core: this is gravity, which acts on all mass.
-pub fn per_particle_grav_dt(_state: &State, _eps: f64, _eta: f64, _theta: f64) -> Vec<GravDt> {
-    todo!("I0b green: BarnesHut accel → per-particle grav_timestep, one entry each")
+pub fn per_particle_grav_dt(state: &State, eps: f64, eta: f64, theta: f64) -> Vec<GravDt> {
+    let mut acc = vec![DVec3::ZERO; state.len()];
+    BarnesHut::new(G, eps, theta).accelerations(state, &mut acc);
+    acc.iter()
+        .zip(&state.kind)
+        .map(|(a, &kind)| {
+            let a_mag = a.length();
+            GravDt {
+                dt: grav_timestep(a_mag, eps, eta),
+                a_mag,
+                kind,
+            }
+        })
+        .collect()
 }
 
 /// The θ cross-check (I0b's nearest analogue to rung-spread's runtime self-check
@@ -641,8 +657,16 @@ pub fn per_particle_grav_dt(_state: &State, _eps: f64, _eta: f64, _theta: f64) -
 /// the θ-approximated tree walk and the exact O(N²) Plummer direct sum at the SAME
 /// softening. A small value confirms the θ=0.5 rungs are not tree-approximation
 /// artefacts; it doubles as the tail's θ-sensitivity (cheap at ~7500 particles).
-pub fn accel_max_rel_vs_direct(_state: &State, _eps: f64, _theta: f64) -> f64 {
-    todo!("I0b green: max relative |a_BH − a_direct| over particles")
+pub fn accel_max_rel_vs_direct(state: &State, eps: f64, theta: f64) -> f64 {
+    let n = state.len();
+    let mut a_bh = vec![DVec3::ZERO; n];
+    let mut a_exact = vec![DVec3::ZERO; n];
+    BarnesHut::new(G, eps, theta).accelerations(state, &mut a_bh);
+    DirectSum::new(G, eps).accelerations(state, &mut a_exact);
+    a_bh.iter()
+        .zip(&a_exact)
+        .map(|(bh, ex)| (*bh - *ex).length() / ex.length().max(f64::MIN_POSITIVE))
+        .fold(0.0_f64, f64::max)
 }
 
 /// The per-force-block cost split that turns a measured rung factor into a
@@ -683,15 +707,15 @@ pub const W_HYDRO_DROP_FINEST: f64 = 2.9;
 impl AmdahlBlock {
     /// Total block cost with no rungs — the Amdahl denominator's `1×` baseline.
     pub fn total_ms(&self) -> f64 {
-        todo!("I0b green: sum of the four block terms")
+        self.build_ms + self.walk_ms + self.hydro_ms + self.cfl_ms
     }
 
     /// Whole-sim speedup of **`hydro-only`** rungs (lever a): gravity build+walk stay
     /// fixed (all-N walk, once per base block), the hydro+CFL terms reduce by
     /// `w_hydro`. With `w_hydro = W_HYDRO_DROP_FINEST` this reproduces the plan's
     /// ~1.68×.
-    pub fn hydro_only_speedup(&self, _w_hydro: f64) -> f64 {
-        todo!("I0b green: total / (build + walk + (hydro+cfl)/w_hydro)")
+    pub fn hydro_only_speedup(&self, w_hydro: f64) -> f64 {
+        self.total_ms() / (self.build_ms + self.walk_ms + (self.hydro_ms + self.cfl_ms) / w_hydro)
     }
 
     /// Whole-sim speedup of **`hydro+gravity`** rungs (levers a+b): the O(N) build
@@ -702,8 +726,9 @@ impl AmdahlBlock {
     /// Conservative: it charges the WHOLE walk at the star factor, but under
     /// `hydro+gravity` the ~⅓ gas share of the walk actually rides the (typically
     /// larger) hydro factor, so the true speedup is ≥ this when `w_grav < w_hydro`.
-    pub fn hydro_plus_gravity_speedup(&self, _w_hydro: f64, _w_grav: f64) -> f64 {
-        todo!("I0b green: total / (build + walk/w_grav + (hydro+cfl)/w_hydro)")
+    pub fn hydro_plus_gravity_speedup(&self, w_hydro: f64, w_grav: f64) -> f64 {
+        self.total_ms()
+            / (self.build_ms + self.walk_ms / w_grav + (self.hydro_ms + self.cfl_ms) / w_hydro)
     }
 }
 

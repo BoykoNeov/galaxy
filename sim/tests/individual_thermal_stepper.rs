@@ -68,6 +68,32 @@ impl ForceSolver for ShmThermal {
     }
 }
 
+/// Uniform CONSTANT acceleration `g` AND constant `du/dt = c` on every particle.
+/// Leapfrog integrates constant fields EXACTLY at any step, so the block-end
+/// pos/vel/`u` are closed-form regardless of rung — the sharpest pin on the kick
+/// bookkeeping, and the ONLY gate that exercises the interior full-kick branch
+/// (`n_fine > 1`, floor inert) without the floor clamping the result away.
+struct ConstAccelThermal {
+    g: DVec3,
+    c: f64,
+}
+impl ForceSolver for ConstAccelThermal {
+    fn accelerations(&mut self, _state: &State, acc: &mut [DVec3]) {
+        for a in acc.iter_mut() {
+            *a = self.g;
+        }
+    }
+    fn accel_and_dudt(&mut self, state: &State, acc: &mut [DVec3], dudt: &mut [f64]) {
+        self.accelerations(state, acc);
+        for d in dudt.iter_mut() {
+            *d = self.c;
+        }
+    }
+    fn potential_energy(&self, _state: &State) -> f64 {
+        0.0
+    }
+}
+
 /// Zero acceleration + a large CONSTANT negative `du/dt` (E4b `CoolingToy`):
 /// drives `u` below any positive floor within a step, isolating the clamp +
 /// leak accounting from any dynamics.
@@ -194,6 +220,65 @@ fn collapsed_rungs_are_bit_identical_to_leapfrog_kdk_thermal() {
 }
 
 // --------------------------------------------------------------------------
+// GATE 1b — INTERIOR full-kick exactness under constant fields (u-channel).
+// --------------------------------------------------------------------------
+
+#[test]
+fn two_rung_block_is_exact_under_constant_accel_and_dudt() {
+    // Particle A rung 0 (full base step), particle B rung 2 (four fine sub-steps
+    // ⇒ exercises the interior full-kick branch the collapsed gate never reaches).
+    // Constant g and c ⇒ leapfrog is exact at any step, so BOTH land on the closed
+    // form regardless of rung. B's opening + 3 interior full-kicks + closing sum to
+    // exactly c·dt_base on u (and g·dt_base on v) — a wrong interior multiplier
+    // (half instead of full, stale force, missed tick) throws B off this mark.
+    let g = DVec3::new(0.3, -0.2, 0.1);
+    let c = 0.7;
+    let dt_base = 0.2;
+    let x0 = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(5.0, 1.0, -2.0)];
+    let v0 = [DVec3::new(1.0, 0.0, 0.5), DVec3::new(-0.4, 0.7, 0.0)];
+    let u0 = [1.5, 0.4];
+
+    let mut s = state_of(x0.to_vec(), v0.to_vec(), u0.to_vec());
+    let mut solver = ConstAccelThermal { g, c };
+    let mut stepper = ActiveSetKdkThermal::new(); // u_min = 0 ⇒ floor inert (c > 0)
+    let bg = StaticBackground;
+    let rungs = vec![0u32, 2u32];
+
+    stepper.step_block(&mut s, &mut solver, &bg, dt_base, &rungs);
+
+    for i in 0..2 {
+        let want_x = x0[i] + v0[i] * dt_base + g * (0.5 * dt_base * dt_base);
+        let want_v = v0[i] + g * dt_base;
+        let want_u = u0[i] + c * dt_base;
+        assert!(
+            (s.pos[i] - want_x).length() < 1e-12,
+            "particle {i} (rung {}) pos {:?} != analytic {:?}",
+            rungs[i],
+            s.pos[i],
+            want_x
+        );
+        assert!(
+            (s.vel[i] - want_v).length() < 1e-12,
+            "particle {i} (rung {}) vel {:?} != analytic {:?}",
+            rungs[i],
+            s.vel[i],
+            want_v
+        );
+        assert!(
+            (s.u[i] - want_u).abs() < 1e-12,
+            "particle {i} (rung {}) u {} != analytic {want_u}",
+            rungs[i],
+            s.u[i]
+        );
+    }
+    assert_eq!(
+        stepper.u_floor_energy(),
+        0.0,
+        "u_min = 0 floor must stay inert"
+    );
+}
+
+// --------------------------------------------------------------------------
 // GATE 2 — U-FLOOR LEAK EQUALITY (collapsed ≡ LeapfrogKdkThermal) + multi-rung hold.
 // --------------------------------------------------------------------------
 
@@ -258,7 +343,11 @@ fn multi_rung_floor_holds_u_at_the_block_boundary() {
     let rate = 50.0;
     let bg = StaticBackground;
 
-    let pos = vec![DVec3::ZERO, DVec3::new(1.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0)];
+    let pos = vec![
+        DVec3::ZERO,
+        DVec3::new(1.0, 0.0, 0.0),
+        DVec3::new(2.0, 0.0, 0.0),
+    ];
     let vel = vec![DVec3::ZERO; 3];
     let u0 = vec![0.5, 0.3, 0.4];
     let mut s = state_of(pos, vel, u0);

@@ -326,29 +326,113 @@ impl ActiveSetKdkThermal {
     /// Clear cached state so the next `step_block` re-primes from scratch; also
     /// zeroes the accumulated `u`-floor leak (`u_min` is config, retained).
     pub fn reset(&mut self) {
-        todo!("I5: clear acc/dudt/primed and zero u_floor_energy")
+        self.acc.clear();
+        self.dudt.clear();
+        self.primed = false;
+        self.u_floor_energy = 0.0;
     }
 
     /// Eagerly compute and cache `(acc, du/dt)` at the current state, so the
     /// next `step_block` opens with a fresh (not stale) half-kick.
     pub fn prime(&mut self, state: &State, solver: &mut dyn ForceSolver) {
-        let _ = (state, solver);
-        todo!("I5: fused prime via accel_and_dudt")
+        self.acc.clear();
+        self.acc.resize(state.len(), DVec3::ZERO);
+        self.dudt.clear();
+        self.dudt.resize(state.len(), 0.0);
+        solver.accel_and_dudt(state, &mut self.acc, &mut self.dudt);
+        self.primed = true;
+    }
+
+    /// Clamp particle `i`'s internal energy to `max(u, u_min)`, accumulating the
+    /// injected energy `mᵢ(u_min − u_raw)`. Applied right after a kick touches
+    /// `u`, so the next force eval never reads a negative `u` (a NaN sound speed).
+    /// Inert when `u_min = 0.0` and `u ≥ 0` (the `< u_min` test never fires).
+    #[inline]
+    fn apply_u_floor_at(&mut self, state: &mut State, i: usize) {
+        if state.u[i] < self.u_min {
+            self.u_floor_energy += state.mass[i] * (self.u_min - state.u[i]);
+            state.u[i] = self.u_min;
+        }
     }
 
     /// Advance one base block of size `dt_base`, each particle on rung `rungs[i]`,
     /// kicking `vel` AND `u` on the active subset each fine tick and applying the
     /// `u`-floor to the just-kicked subset. Same active-set mechanic and
-    /// synchronization as [`ActiveSetKdk::step_block`].
+    /// synchronization as [`ActiveSetKdk::step_block`]; the `u`-kick and floor
+    /// mirror [`LeapfrogKdkThermal`](galaxy_core::LeapfrogKdkThermal) so the
+    /// collapsed (all-rung-0) case is bit-identical to it.
     pub fn step_block(
         &mut self,
         state: &mut State,
         solver: &mut dyn ForceSolver,
-        bg: &dyn Background,
+        _bg: &dyn Background,
         dt_base: f64,
         rungs: &[u32],
     ) {
-        let _ = (state, solver, bg, dt_base, rungs);
-        todo!("I5: thermal active-set KDK — kick u + apply floor per active subset")
+        let n = state.len();
+        assert_eq!(rungs.len(), n, "rungs must be state-length");
+        // Prime (acc, du/dt) at the current positions on the first block (or after
+        // a particle-count change); later blocks reuse the values left by the
+        // previous block's closing kick — one fused force eval per fine tick.
+        if self.acc.len() != n {
+            self.acc.clear();
+            self.acc.resize(n, DVec3::ZERO);
+            self.dudt.clear();
+            self.dudt.resize(n, 0.0);
+            self.primed = false;
+        }
+        if !self.primed {
+            solver.accel_and_dudt(state, &mut self.acc, &mut self.dudt);
+            self.primed = true;
+        }
+
+        // The finest rung sets the fine-tick count 2^r_max; a rung-r particle is
+        // active every 2^(r_max−r) ticks. Both exact integer relations.
+        let r_max = rungs.iter().copied().max().unwrap_or(0);
+        let n_fine: u64 = 1 << r_max;
+        let d = dt_base / n_fine as f64;
+
+        // Opening half-kick: every particle opens a step, kicking vel with a(xₙ)
+        // and u with (du/dt)(xₙ) by half its OWN step.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..n {
+            let half_step = 0.5 * (dt_base / (1u64 << rungs[i]) as f64);
+            state.vel[i] += self.acc[i] * half_step;
+            state.u[i] += self.dudt[i] * half_step;
+        }
+        // Floor every particle (all were just kicked) before the first force eval.
+        for i in 0..n {
+            self.apply_u_floor_at(state, i);
+        }
+
+        for k in 0..n_fine {
+            // Drift ALL by the fine sub-step (velocity is constant between an
+            // inactive particle's kicks, so its sub-drifts sum to one full drift).
+            for (x, v) in state.pos.iter_mut().zip(&state.vel) {
+                *x += *v * d;
+            }
+            // Fresh fused force at the new positions.
+            solver.accel_and_dudt(state, &mut self.acc, &mut self.dudt);
+
+            let ticks_done = k + 1;
+            let block_end = ticks_done == n_fine;
+            #[allow(clippy::needless_range_loop)] // parallel SoA columns
+            for i in 0..n {
+                let period: u64 = 1 << (r_max - rungs[i]);
+                if ticks_done % period != 0 {
+                    continue;
+                }
+                let step_i = dt_base / (1u64 << rungs[i]) as f64;
+                // Closing half-kick at the block boundary; a full-step kick at an
+                // interior boundary (the KDK half-kick merge). Kicks vel AND u.
+                let kick = if block_end { 0.5 * step_i } else { step_i };
+                state.vel[i] += self.acc[i] * kick;
+                state.u[i] += self.dudt[i] * kick;
+                // Floor the just-kicked particle before the next force eval (or, at
+                // block end, so u ≥ u_min holds at the synchronized boundary).
+                self.apply_u_floor_at(state, i);
+            }
+        }
+        state.time += dt_base;
     }
 }

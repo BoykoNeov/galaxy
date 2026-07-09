@@ -87,8 +87,32 @@ fn assign_one(dt_i: f64, dt_base: f64, courant: f64, r_max: u32) -> u32 {
 /// carry no pairs ⇒ are never touched. A no-op when the rung spread already satisfies
 /// the constraint (e.g. `n_limit ≥` the spread), so a non-binding `n_limit` is free.
 pub fn limit_rungs(rungs: &mut [u32], pairs: &[(usize, usize)], n_limit: u32) {
-    let _ = (&rungs, pairs, n_limit);
-    todo!("I4b GREEN: fixpoint raising any r_i more than n_limit below a coupled neighbour")
+    // Sweep the pairs until a full pass makes no change (a fixpoint). Each pair raises
+    // the coarser member to within `n_limit` of the finer; because rungs only ever go
+    // UP and are bounded above by the finest rung present, the sweep terminates. A
+    // single pass propagates fineness one hop; the fixpoint carries it across a chain.
+    loop {
+        let mut changed = false;
+        for &(i, j) in pairs {
+            let hi = rungs[i].max(rungs[j]);
+            // `hi <= n_limit` ⇒ every rung is already within `n_limit` of `hi`
+            // (nothing to raise, and it guards the `hi - n_limit` subtraction).
+            if hi > n_limit {
+                let floor = hi - n_limit;
+                if rungs[i] < floor {
+                    rungs[i] = floor;
+                    changed = true;
+                }
+                if rungs[j] < floor {
+                    rungs[j] = floor;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Drift-predict a particle to a time offset `dt` from its last sync: `x + v·dt`

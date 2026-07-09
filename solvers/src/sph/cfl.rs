@@ -240,8 +240,40 @@ pub fn max_stable_dt_per_particle(
 /// timestep limiter constrains exactly the pairs the force couples. `h` is the
 /// adaptive smoothing length (recomputed here, same routine the CFL/force paths
 /// use). A gas-free state returns no pairs (the limiter is a no-op).
-pub fn coupled_pairs(_state: &State, _cfg: &DensityConfig) -> Vec<(usize, usize)> {
-    todo!("I4b GREEN: grid gather with the r < SUPPORT·max(h_i,h_j) coupling gate")
+pub fn coupled_pairs(state: &State, cfg: &DensityConfig) -> Vec<(usize, usize)> {
+    let gas: Vec<usize> = (0..state.len())
+        .filter(|&i| state.kind[i] == Species::Gas)
+        .collect();
+    if gas.is_empty() {
+        return Vec::new();
+    }
+    let gpos: Vec<DVec3> = gas.iter().map(|&i| state.pos[i]).collect();
+    let gmass: Vec<f64> = gas.iter().map(|&i| state.mass[i]).collect();
+    let dens = density_adaptive(&gpos, &gmass, cfg, None);
+    let h = &dens.h;
+
+    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+    let grid = HashGrid::build(&gpos, SUPPORT * h_max);
+
+    // Gather at the GLOBAL max support and gate each pair on the real force-coupling
+    // range `r < SUPPORT·max(h_a,h_b)` — the SAME gate the CFL arms above and the
+    // force path use (kept textually identical so the limiter's neighbour set never
+    // diverges from the force's). Emit each unordered pair once (local `b > a` ⇒
+    // `gas[a] < gas[b]` since `gas` is ascending), in GLOBAL indices.
+    let mut pairs = Vec::new();
+    for a in 0..gpos.len() {
+        let ngb = grid.neighbours_within(&gpos, gpos[a], SUPPORT * h_max);
+        for &b in &ngb {
+            if b <= a {
+                continue; // dedup: take the pair only from its lower local index
+            }
+            let r = (gpos[a] - gpos[b]).length();
+            if r > 0.0 && r < SUPPORT * h[a].max(h[b]) {
+                pairs.push((gas[a], gas[b]));
+            }
+        }
+    }
+    pairs
 }
 
 /// Fail-loud check: `Ok(())` iff `dt ≤ max_stable_dt(...)`.

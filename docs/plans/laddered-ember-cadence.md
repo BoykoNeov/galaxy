@@ -648,9 +648,30 @@ against, exactly as the LBVH/G-series lineage did.
     (one-hop refine, multi-hop chain fixpoint, raise-only monotonicity, symmetry,
     n_limit=0 component collapse, non-binding no-op). Cheap always-on (~0.9s).
     ISOTHERMAL; the thermal `u`-kick arm is I5. (I5)
-- **I5 — thermal arm.** Red: adiabatic single-rung reduces to global-adaptive
-  thermal to tolerance; `u`-floor leak reported; convergence holds with `du/dt`
-  kicked per-rung. (I8)
+- **I5 — thermal arm. DONE 2026-07-10 (RED 58c4cb6 \ GREEN 8f21176).**
+  `ActiveSetKdkThermal` — a DISTINCT type beside `ActiveSetKdk` (advisor-vetted:
+  a separate type keeps the frozen isothermal I3/I4a/I4b bit-paths from ever
+  depending on the `accel_and_dudt`-fills-`acc`-like-`accelerations` invariant),
+  kicks `u` via `du/dt` wherever it kicks `vel` and floors the just-kicked ACTIVE
+  subset (E4b), mirroring `LeapfrogKdkThermal`. Six stepper-level gates (the plan's
+  original "reduces to global-adaptive thermal to tolerance" wording is SUPERSEDED
+  by bit-identity, exactly as the I3 revision superseded it for the isothermal arm —
+  `run_adaptive`'s growth limiter diverges the dt sequence):
+    1. COLLAPSED bit-identity (all-rung-0 ≡ `LeapfrogKdkThermal` at `dt_base` on
+       pos/vel/`u`/time, real adiabatic hydro solver, `u_min=0` so ordering — not
+       the clamp — is what is tested);
+    2. INTERIOR full-kick exactness (const accel + const `du/dt`, rungs `[0,2]` ⇒
+       closed-form pos/vel/`u` to 1e-12 — the ONLY gate hitting the `n_fine>1`
+       interior branch without the floor clamping the value away; advisor-flagged
+       gap, teeth-verified: a wrong interior multiplier fails it);
+    3. U-FLOOR LEAK EQUALITY (collapsed `with_u_floor` ≡ `LeapfrogKdkThermal`'s
+       leak AND `u` bit-for-bit — apples-to-apples, not a hand tolerance);
+    4. multi-rung floor HOLDS `u ≥ u_min` at the synchronized boundary + leak>0;
+    5–6. PER-RUNG `du/dt` CONVERGENCE (state-coupled `dudt=|x|²` on SHM = trapezoidal
+       quadrature of 2nd-order `x` ⇒ genuinely O(dt²): finer rung tracks analytic
+       `u(t)` closer; coarse-rung `u`-error falls ~2nd order under `dt_base` refine).
+  STEPPER-ONLY per the advisor — driver wiring (a `[sim.individual]` EOS-arm field
+  on `IndividualConfig`, NOT a second `run_individual_thermal`) is owed at I6. (I8)
 - **I6 — full-res producibility + speedup validation, `hydro-only` mode (the
   real "done" for lever a).** Run the full-res `gasrich` showpiece through
   `run_individual` in `hydro-only` mode; confirm it completes, converges to the

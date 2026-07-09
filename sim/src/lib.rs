@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use galaxy_core::{Background, ForceSolver, Integrator, State};
 use galaxy_io::Header;
 
+pub mod individual;
+
 /// Errors from a simulation run.
 #[derive(thiserror::Error, Debug)]
 pub enum SimError {

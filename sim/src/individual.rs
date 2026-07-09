@@ -257,3 +257,98 @@ impl ActiveSetKdk {
         state.time += dt_base;
     }
 }
+
+/// Active-set KDK stepper for the ADIABATIC thermal path (I5/I8): identical
+/// active-set rung mechanic to [`ActiveSetKdk`], but also kicks `state.u`
+/// alongside `state.vel` at every (opening / interior / closing) kick, using
+/// [`ForceSolver::accel_and_dudt`](galaxy_core::ForceSolver::accel_and_dudt)'s
+/// fused `(acc, du/dt)` output, and applies the positive-`u` floor (E4b) to the
+/// just-kicked ACTIVE subset. A separate type — NOT a branch on `ActiveSetKdk`
+/// — so the isothermal individual byte-path (I3/I4a/I4b bit-identity gates) is
+/// never made to depend on the `accel_and_dudt`-fills-`acc`-like-`accelerations`
+/// invariant.
+///
+/// When every particle lands on rung 0 this reduces to
+/// [`LeapfrogKdkThermal`](galaxy_core::LeapfrogKdkThermal) at `dt_base`
+/// bit-for-bit (one fine tick, active set = all): same fused solver call, same
+/// KDK order, same floor placement (after each half-kick). Multi-rung it is a
+/// genuinely different, correct integrator that converges to the true solution
+/// as rungs refine.
+///
+/// The `u`-floor `u ← max(u, u_min)` clamps `u` after each active-subset kick so
+/// the next force eval never builds pressure from a negative `u` (a NaN sound
+/// speed). The injected energy `Σ mᵢ(u_min − u_raw)` is accumulated in
+/// [`u_floor_energy`](Self::u_floor_energy) as bounded, reported
+/// non-conservation. `u_min = 0.0` (the default) is provably inert on any run
+/// whose `u` stays positive.
+#[derive(Clone, Debug, Default)]
+pub struct ActiveSetKdkThermal {
+    /// Cached accelerations at the current positions (scratch), reused across
+    /// the block boundary as the next opening kick.
+    acc: Vec<DVec3>,
+    /// Cached `du/dt` at the current positions (scratch), reused likewise.
+    dudt: Vec<f64>,
+    primed: bool,
+    /// Positive-`u` floor `u ← max(u, u_min)` after each active-subset kick.
+    /// `0.0` by default (inert on positive-`u` runs).
+    u_min: f64,
+    /// Accumulated energy injected by the floor: `Σ mᵢ(u_min − u_raw)` over
+    /// every clamp (≥ 0). The bounded, reported non-conservation.
+    u_floor_energy: f64,
+}
+
+impl ActiveSetKdkThermal {
+    pub fn new() -> Self {
+        Self {
+            acc: Vec::new(),
+            dudt: Vec::new(),
+            primed: false,
+            u_min: 0.0,
+            u_floor_energy: 0.0,
+        }
+    }
+
+    /// Construct with a positive internal-energy floor `u_min`, mirroring
+    /// [`LeapfrogKdkThermal::with_u_floor`](galaxy_core::LeapfrogKdkThermal::with_u_floor).
+    pub fn with_u_floor(u_min: f64) -> Self {
+        Self {
+            u_min,
+            ..Self::new()
+        }
+    }
+
+    /// Total energy injected by the `u`-floor so far (≥ 0, `0.0` if the floor
+    /// never engaged). Cleared by [`reset`](Self::reset).
+    pub fn u_floor_energy(&self) -> f64 {
+        self.u_floor_energy
+    }
+
+    /// Clear cached state so the next `step_block` re-primes from scratch; also
+    /// zeroes the accumulated `u`-floor leak (`u_min` is config, retained).
+    pub fn reset(&mut self) {
+        todo!("I5: clear acc/dudt/primed and zero u_floor_energy")
+    }
+
+    /// Eagerly compute and cache `(acc, du/dt)` at the current state, so the
+    /// next `step_block` opens with a fresh (not stale) half-kick.
+    pub fn prime(&mut self, state: &State, solver: &mut dyn ForceSolver) {
+        let _ = (state, solver);
+        todo!("I5: fused prime via accel_and_dudt")
+    }
+
+    /// Advance one base block of size `dt_base`, each particle on rung `rungs[i]`,
+    /// kicking `vel` AND `u` on the active subset each fine tick and applying the
+    /// `u`-floor to the just-kicked subset. Same active-set mechanic and
+    /// synchronization as [`ActiveSetKdk::step_block`].
+    pub fn step_block(
+        &mut self,
+        state: &mut State,
+        solver: &mut dyn ForceSolver,
+        bg: &dyn Background,
+        dt_base: f64,
+        rungs: &[u32],
+    ) {
+        let _ = (state, solver, bg, dt_base, rungs);
+        todo!("I5: thermal active-set KDK — kick u + apply floor per active subset")
+    }
+}

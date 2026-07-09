@@ -590,11 +590,34 @@ against, exactly as the LBVH/G-series lineage did.
   (positions exact); `predict_pos` is pinned + ready for I6's predict-inactive
   efficiency switch. Isothermal (`accelerations`); thermal `u`-kick arm is I5/I8.
   (I3, I6, I7)
-- **I4 — `sim::run_individual` driver + timestep limiter.** Red: (i)
-  full-duration convergence to a fine-dt reference on a CFL-moving testbed
-  (PRIMARY, per-path); (ii) **limiter shock-wakeup** — shock into a slow-rung
-  region, assert wake-up + captured energy vs a fully-fine reference (CENTRAL);
-  (iii) momentum bounded-drift diagnostic. (I4, I5)
+- **I4 — `sim::run_individual` driver + timestep limiter.** SPLIT into I4a
+  (driver) + I4b (limiter) per the user's scope call (2026-07-09) — the driver
+  and the correctness-critical limiter each get a focused red/green cycle.
+  - **I4a — driver + convergence + momentum diagnostic (ISOTHERMAL). DONE
+    2026-07-09 (RED 55b89c0 / GREEN pending-below).** `sim::{run_individual,
+    IndividualConfig, IndividualSummary}` — the block-over-block loop: re-derive
+    `dt_base` (`base_dt`, cap `.min(remaining)` to land on the output time) +
+    per-particle rungs (`assign_rungs`) from `max_stable_dt_per_particle` each
+    base block, sub-cycle via an internally-owned `ActiveSetKdk`, emit on a TIME
+    cadence (output index `k` ↔ time `k·output_dt`). Cached-acc carries across the
+    varying `dt_base` (velocity-Verlet, no reprime — like `run_adaptive`).
+    **Advisor's load-bearing catch: both gates go vacuous on a uniform (one-rung)
+    testbed** (active-subset ≡ full kick ⇒ fixed-dt in disguise, already
+    bit-pinned in I3), so both run on a **centrally-concentrated core+halo IC**
+    (500 gas in r=0.1 + 100 in r=1.0 ⇒ steep h ⇒ steep dt ⇒ real rung spread) and
+    SELF-CHECK, on the driver's ACTUAL `IndividualSummary`, that the run spanned
+    **≥3 distinct rungs** with the **finest rung `< r_max`** (reference not
+    under-resolved). Cap kept **non-binding** (`+∞`) + `output_dt` ≥ a full base
+    block ⇒ rung structure is **courant-invariant**, so the three convergence runs
+    are comparable and self-reference at fine courant (0.02) is valid. Gates: (i)
+    PRIMARY convergence `err(0.1) < err(0.2)` + generous cap (monotone, not an
+    order factor); (ii) DIAGNOSTIC momentum drift `drift(0.05) < drift(0.2)` +
+    `< 5%` of gross flux (kick-active-only ⇒ ∝ courant, shrinks as courant→0, NOT
+    a roundoff tripwire); (iii) cadence on the output grid; gas-free + degenerate
+    config reject. NO energy gate. (I4)
+  - **I4b — Saitoh–Makino timestep limiter + shock-wakeup gate (NEXT).** Red:
+    shock into a slow-rung region, assert the struck particles WAKE and capture the
+    same energy as a fully-fine reference (CENTRAL correctness, not a dial). (I5)
 - **I5 — thermal arm.** Red: adiabatic single-rung reduces to global-adaptive
   thermal to tolerance; `u`-floor leak reported; convergence holds with `du/dt`
   kicked per-rung. (I8)

@@ -25,11 +25,12 @@
 //!     deferred), so momentum drifts; the drift is ∝ courant and must SHRINK as
 //!     courant → 0. NOT a roundoff tripwire (that is the global path's gate, where
 //!     one dt kicks all particles ⇒ Σmᵢaᵢ = 0 exactly).
+//!
 //! There is NO energy gate (isothermal heat bath + variable per-particle dt — D4/D2
 //! carry over and worsen); convergence subsumes it. The Saitoh–Makino limiter +
 //! shock-wakeup gate are I4b; the thermal `u`-kick arm is I5.
 
-use galaxy_core::{diagnostics, DVec3, ForceSolver, Species, State, StaticBackground};
+use galaxy_core::{diagnostics, DVec3, Species, State, StaticBackground};
 use galaxy_io::Header;
 use galaxy_sim::{run_individual, IndividualConfig, IndividualSummary, SimError, SnapshotSink};
 use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
@@ -135,9 +136,14 @@ fn individual_converges_to_fine_reference_as_courant_shrinks() {
         let mut s = ic.clone();
         let mut solver = hydro_solver(c_s);
         let mut sink = CollectingSink::default();
-        let summary =
-            run_individual(&mut s, &mut solver, &bg, &cfg(courant, output_dt, n_outputs), &mut sink)
-                .unwrap();
+        let summary = run_individual(
+            &mut s,
+            &mut solver,
+            &bg,
+            &cfg(courant, output_dt, n_outputs),
+            &mut sink,
+        )
+        .unwrap();
         (sink.snaps.last().unwrap().1.pos.clone(), summary)
     };
 
@@ -201,9 +207,14 @@ fn momentum_drift_is_bounded_and_shrinks_with_courant() {
         let mut s = ic.clone();
         let mut solver = hydro_solver(c_s);
         let mut sink = CollectingSink::default();
-        let summary =
-            run_individual(&mut s, &mut solver, &bg, &cfg(courant, output_dt, n_outputs), &mut sink)
-                .unwrap();
+        let summary = run_individual(
+            &mut s,
+            &mut solver,
+            &bg,
+            &cfg(courant, output_dt, n_outputs),
+            &mut sink,
+        )
+        .unwrap();
         assert!(
             summary.distinct_rungs >= 3,
             "momentum drift is only meaningful on a multi-rung run (got {} rungs)",
@@ -222,8 +233,14 @@ fn momentum_drift_is_bounded_and_shrinks_with_courant() {
         let mut s = ic.clone();
         let mut solver = hydro_solver(c_s);
         let mut sink = CollectingSink::default();
-        run_individual(&mut s, &mut solver, &bg, &cfg(0.1, output_dt, n_outputs), &mut sink)
-            .unwrap();
+        run_individual(
+            &mut s,
+            &mut solver,
+            &bg,
+            &cfg(0.1, output_dt, n_outputs),
+            &mut sink,
+        )
+        .unwrap();
         let (_, last) = sink.snaps.last().unwrap();
         last.mass
             .iter()
@@ -299,7 +316,13 @@ fn rejects_gas_free_state_and_invalid_config() {
     let mut solver = hydro_solver(1.0);
     let mut sink = CollectingSink::default();
     assert!(matches!(
-        run_individual(&mut gas_free, &mut solver, &bg, &cfg(0.2, 0.15, 2), &mut sink),
+        run_individual(
+            &mut gas_free,
+            &mut solver,
+            &bg,
+            &cfg(0.2, 0.15, 2),
+            &mut sink
+        ),
         Err(SimError::Config(_))
     ));
 
@@ -307,7 +330,10 @@ fn rejects_gas_free_state_and_invalid_config() {
     let bad = [
         cfg(0.2, 0.0, 2),  // output_dt = 0
         cfg(0.0, 0.15, 2), // courant = 0
-        IndividualConfig { r_max: 0, ..cfg(0.2, 0.15, 2) },
+        IndividualConfig {
+            r_max: 0,
+            ..cfg(0.2, 0.15, 2)
+        },
         cfg(0.2, 0.15, 0), // n_outputs = 0
     ];
     for c in &bad {

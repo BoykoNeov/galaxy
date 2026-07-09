@@ -484,6 +484,135 @@ pub fn run_individual(
     config: &IndividualConfig,
     sink: &mut dyn SnapshotSink,
 ) -> Result<IndividualSummary, SimError> {
-    let _ = (state, solver, bg, config, sink);
-    todo!("I4a: run_individual driver")
+    // Validate the policy + schedule (mirrors run_adaptive's up-front checks).
+    if !(config.courant.is_finite() && config.courant > 0.0) {
+        return Err(SimError::Config(format!(
+            "courant must be a positive finite number, got {}",
+            config.courant
+        )));
+    }
+    // Positive; `+∞` is allowed (a non-binding cap), NaN is not.
+    if config.dt_base_cap.is_nan() || config.dt_base_cap <= 0.0 {
+        return Err(SimError::Config(format!(
+            "dt_base_cap must be positive (may be +∞), got {}",
+            config.dt_base_cap
+        )));
+    }
+    // r_max is tracked in a u64 rung-bitmask for the summary — cap it well below 64.
+    if !(1..=60).contains(&config.r_max) {
+        return Err(SimError::Config(format!(
+            "r_max must be in [1, 60], got {}",
+            config.r_max
+        )));
+    }
+    if !(config.output_dt.is_finite() && config.output_dt > 0.0) {
+        return Err(SimError::Config(format!(
+            "output_dt must be a positive finite number, got {}",
+            config.output_dt
+        )));
+    }
+    if config.n_outputs == 0 {
+        return Err(SimError::Config("n_outputs must be >= 1".to_string()));
+    }
+
+    // The individual path needs at least one finite per-particle CFL limit (gas
+    // present) to size the base dt. An all-`+∞` (collisionless) state has none — use
+    // the fixed-dt `run` for those, per Scope.
+    let dt_pp0 = solver.max_stable_dt_per_particle(state);
+    if !dt_pp0.iter().any(|d| d.is_finite()) {
+        return Err(SimError::Config(
+            "individual timesteps require a finite per-particle CFL limit (gas present); \
+             all limits are +∞ — use the fixed-dt `run` for collisionless runs"
+                .to_string(),
+        ));
+    }
+
+    // Step 0: the IC, stamped at time 0 (output index 0 ↔ time 0). Emit before any
+    // integration, mirroring `run` / `run_adaptive`.
+    state.time = 0.0;
+    emit_individual(state, 0, config, sink)?;
+    let mut emitted = 1u64;
+
+    // The stepper is owned by the driver (the rung SCHEDULE is the driver's job); its
+    // cached accelerations carry across base blocks (the closing kick becomes the next
+    // opening kick) even as `dt_base` changes block to block — velocity-Verlet, so no
+    // reprime, exactly as `run_adaptive` reuses the cached accel across a dt change.
+    let mut stepper = individual::ActiveSetKdk::new();
+
+    // Rung diagnostics for the summary (the convergence/momentum gates prove the run
+    // genuinely engaged the multi-rung machinery). `seen` bit `r` set ⇒ rung `r` used.
+    let mut seen_rungs: u64 = 0;
+    let mut total_blocks = 0u64;
+    let mut t = 0.0_f64;
+
+    for k in 1..=config.n_outputs {
+        let t_target = k as f64 * config.output_dt;
+        // Relative epsilon so FP wander cannot spawn a zero-length trailing block.
+        let eps = 1e-12 * t_target.max(config.output_dt);
+        while t < t_target - eps {
+            // Re-derive the base dt and rungs from the current per-particle CFL vector
+            // (I1 → I2). The bound moves and its spatial spread changes as the gas
+            // evolves, so this is recomputed every base block.
+            let dt_pp = solver.max_stable_dt_per_particle(state);
+            if !dt_pp.iter().any(|d| d.is_finite()) {
+                return Err(SimError::Config(format!(
+                    "per-particle CFL limit became non-finite mid-run (t = {t}) — the run blew up"
+                )));
+            }
+            // Base dt = courant·(coarsest finite CFL), capped; then clamp to `remaining`
+            // so the block lands exactly on the output time (D3 — the only place all
+            // rungs are synchronized). Clamping `dt_base` down re-derives the rungs for
+            // the shortened block, which is correct: a shorter base step only pushes
+            // particles to coarser rungs, never past their CFL limit.
+            let remaining = t_target - t;
+            let dt_base =
+                individual::base_dt(&dt_pp, config.courant, config.dt_base_cap).min(remaining);
+            let rungs = individual::assign_rungs(&dt_pp, dt_base, config.courant, config.r_max);
+            for &r in &rungs {
+                seen_rungs |= 1u64 << r;
+            }
+            stepper.step_block(state, solver, bg, dt_base, &rungs);
+            t += dt_base;
+            total_blocks += 1;
+        }
+        // Land exactly on the output time (kill accumulated FP wander before emit).
+        t = t_target;
+        state.time = t_target;
+        emit_individual(state, k, config, sink)?;
+        emitted += 1;
+    }
+
+    let max_rung = if seen_rungs == 0 {
+        0
+    } else {
+        63 - seen_rungs.leading_zeros()
+    };
+    Ok(IndividualSummary {
+        run: RunSummary {
+            steps: total_blocks,
+            final_time: config.n_outputs as f64 * config.output_dt,
+            snapshots_emitted: emitted,
+        },
+        max_rung,
+        distinct_rungs: seen_rungs.count_ones() as usize,
+    })
+}
+
+/// Stamp a header for an individual-run snapshot (output index `k`, time already set
+/// on `state`) and hand it to the sink.
+fn emit_individual(
+    state: &State,
+    k: u64,
+    config: &IndividualConfig,
+    sink: &mut dyn SnapshotSink,
+) -> Result<(), SimError> {
+    let header = Header::for_state(
+        state,
+        k,
+        config.softening,
+        config.rng_seed,
+        config.config_hash,
+        config.units.as_str(),
+    );
+    sink.emit(&header, state)
 }

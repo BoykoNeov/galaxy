@@ -28,9 +28,7 @@
 //!     oscillator (finer rung tracks closer; coarse-rung error falls ~2nd order
 //!     under base-dt refinement). Momentum bounded-drift is an I4 (driver) gate.
 
-use galaxy_core::{
-    Background, DVec3, ForceSolver, Integrator, LeapfrogKdk, Species, State, StaticBackground,
-};
+use galaxy_core::{DVec3, ForceSolver, Integrator, LeapfrogKdk, Species, State, StaticBackground};
 use galaxy_sim::individual::{predict_pos, ActiveSetKdk};
 use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
@@ -127,11 +125,7 @@ fn predictor_is_exact_drift_only() {
     // impl that also happens to add v·dt). Drift-only ⇒ NO acceleration term: the
     // signature has no `a`, so `½a·Δt²` is structurally impossible, and these pins
     // confirm the linear extrapolation.
-    let got = predict_pos(
-        DVec3::new(1.0, 0.0, 0.0),
-        DVec3::new(2.0, 0.0, 0.0),
-        0.5,
-    );
+    let got = predict_pos(DVec3::new(1.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0), 0.5);
     assert_eq!(got, DVec3::new(2.0, 0.0, 0.0), "1 + 2·0.5 = 2");
 
     let got = predict_pos(
@@ -232,7 +226,10 @@ fn two_rung_block_is_exact_under_constant_acceleration() {
             want_v
         );
     }
-    assert!((s.time - dt_base).abs() < 1e-15, "block advances time by dt_base");
+    assert!(
+        (s.time - dt_base).abs() < 1e-15,
+        "block advances time by dt_base"
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -256,8 +253,8 @@ fn shm_run_errors(omega2: f64, dt_base: f64, n_blocks: usize, rungs: &[u32]) -> 
         stepper.step_block(&mut s, &mut solver, &bg, dt_base, rungs);
         let t = b as f64 * dt_base;
         let truth = DVec3::new((omega * t).cos(), 0.0, 0.0);
-        for i in 0..n {
-            max_err[i] = max_err[i].max((s.pos[i] - truth).length());
+        for (i, e) in max_err.iter_mut().enumerate() {
+            *e = e.max((s.pos[i] - truth).length());
         }
     }
     max_err
@@ -270,7 +267,10 @@ fn finer_rung_tracks_the_true_oscillator_more_closely() {
     // closer to truth (leapfrog error ∝ dt² ⇒ B's bound ≈ A's/16).
     let errs = shm_run_errors(1.0, 0.2, 10, &[0, 2]);
     let (e_a, e_b) = (errs[0], errs[1]);
-    assert!(e_a > 0.0 && e_b > 0.0, "both must have nonzero finite error");
+    assert!(
+        e_a > 0.0 && e_b > 0.0,
+        "both must have nonzero finite error"
+    );
     assert!(
         e_b < 0.25 * e_a,
         "finer rung must track closer: e_B = {e_b:e} !< 0.25·e_A = {:e}",
@@ -287,7 +287,10 @@ fn coarse_rung_error_falls_second_order_under_base_dt_refinement() {
     // the coarse particle where the base step is the whole error.
     let coarse = shm_run_errors(1.0, 0.2, 10, &[0, 2])[0];
     let fine = shm_run_errors(1.0, 0.1, 20, &[0, 2])[0]; // same horizon T = 2.0
-    assert!(fine < coarse, "refinement must reduce error: {fine:e} !< {coarse:e}");
+    assert!(
+        fine < coarse,
+        "refinement must reduce error: {fine:e} !< {coarse:e}"
+    );
     let ratio = coarse / fine;
     assert!(
         ratio > 3.0,

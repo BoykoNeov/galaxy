@@ -76,7 +76,7 @@ fn assign_one(dt_i: f64, dt_base: f64, courant: f64, r_max: u32) -> u32 {
 /// predictor the I6 efficiency path will call to AVOID touching inactive neighbours.
 #[inline]
 pub fn predict_pos(x: DVec3, v: DVec3, dt: f64) -> DVec3 {
-    todo!("I3 predictor: x + v·dt")
+    x + v * dt
 }
 
 /// Active-set Kick-Drift-Kick stepper (I3): advances one base block by sub-cycling
@@ -120,7 +120,10 @@ impl ActiveSetKdk {
     /// Eagerly compute and cache accelerations at the current state, so the next
     /// `step_block` opens with a fresh (not stale) half-kick.
     pub fn prime(&mut self, state: &State, solver: &mut dyn ForceSolver) {
-        todo!("I3: compute acc at current positions")
+        self.acc.clear();
+        self.acc.resize(state.len(), DVec3::ZERO);
+        solver.accelerations(state, &mut self.acc);
+        self.primed = true;
     }
 
     /// Advance one base block of size `dt_base`, each particle on rung `rungs[i]`
@@ -132,10 +135,77 @@ impl ActiveSetKdk {
         &mut self,
         state: &mut State,
         solver: &mut dyn ForceSolver,
-        bg: &dyn Background,
+        _bg: &dyn Background,
         dt_base: f64,
         rungs: &[u32],
     ) {
-        todo!("I3: active-set KDK sub-cycle over one base block")
+        let n = state.len();
+        assert_eq!(rungs.len(), n, "rungs must be state-length");
+        // Prime accelerations at the current positions on the first block (or after
+        // a particle-count change); later blocks reuse the value left by the
+        // previous block's closing kick — one fresh force eval per fine tick.
+        if self.acc.len() != n {
+            self.acc.clear();
+            self.acc.resize(n, DVec3::ZERO);
+            self.primed = false;
+        }
+        if !self.primed {
+            solver.accelerations(state, &mut self.acc);
+            self.primed = true;
+        }
+
+        // The finest rung present sets the fine-tick count: 2^r_max ticks of
+        // `d = dt_base / 2^r_max`. A rung-r particle is active every 2^(r_max−r)
+        // ticks (its step `dt_base/2^r` spans that many fine ticks). Both are exact
+        // integer relations — no float `log2`.
+        let r_max = rungs.iter().copied().max().unwrap_or(0);
+        let n_fine: u64 = 1 << r_max;
+        let d = dt_base / n_fine as f64;
+
+        // Opening half-kick: every particle opens a step at the block start, kicked
+        // by half its OWN step with the primed (block-start) acceleration. Index
+        // loop: the body reads two parallel SoA columns (`rungs`, `acc`) and writes
+        // a third (`vel`) at `i` — an `enumerate` over any one is no clearer.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..n {
+            let half_step = 0.5 * (dt_base / (1u64 << rungs[i]) as f64);
+            state.vel[i] += self.acc[i] * half_step;
+        }
+
+        for k in 0..n_fine {
+            // Drift ALL by the fine sub-step (positions stay exact — velocity is
+            // constant between an inactive particle's kicks, so its many fine
+            // sub-drifts sum to one full drift).
+            for (x, v) in state.pos.iter_mut().zip(&state.vel) {
+                *x += *v * d;
+            }
+            // Fresh force at the new positions (the caching POLICY — fresh vs a
+            // stale tree — is the driver's choice at I4/I6, not this mechanic's:
+            // it takes forces through the ForceSolver seam).
+            solver.accelerations(state, &mut self.acc);
+
+            let ticks_done = k + 1; // fine ticks completed this block, in units of d
+            let block_end = ticks_done == n_fine;
+            #[allow(clippy::needless_range_loop)] // parallel SoA columns, as above
+            for i in 0..n {
+                let period: u64 = 1 << (r_max - rungs[i]); // active every `period` ticks
+                if ticks_done % period != 0 {
+                    continue;
+                }
+                let step_i = dt_base / (1u64 << rungs[i]) as f64;
+                if block_end {
+                    // Closing half-kick: the particle's step ends at the block
+                    // boundary; only the closing half remains (its next step opens
+                    // in the following block).
+                    state.vel[i] += self.acc[i] * (0.5 * step_i);
+                } else {
+                    // Interior boundary: the closing half of the ending step and the
+                    // opening half of the next step share this time and force ⇒ one
+                    // full-step kick (the standard KDK half-kick merge).
+                    state.vel[i] += self.acc[i] * step_i;
+                }
+            }
+        }
+        state.time += dt_base;
     }
 }

@@ -22,8 +22,17 @@ pub fn rung_step(dt_base: f64, r: u32) -> f64 {
 /// the COARSEST particle (largest finite `dt_i`), clamped by `cap`. Collisionless
 /// `+∞` rows are ignored — they never set the base. Returns `cap` if no finite
 /// `dt_i` exists (a gas-free block, which does not use the individual path).
-pub fn base_dt(_dt_per_particle: &[f64], _courant: f64, _cap: f64) -> f64 {
-    todo!("I2: base_dt")
+pub fn base_dt(dt_per_particle: &[f64], courant: f64, cap: f64) -> f64 {
+    let max_finite = dt_per_particle
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite())
+        .fold(0.0_f64, f64::max);
+    if max_finite > 0.0 {
+        (courant * max_finite).min(cap)
+    } else {
+        cap
+    }
 }
 
 /// Assign each particle to a power-of-two rung (I2): `r_i = clamp(⌈log2(dt_base /
@@ -34,11 +43,23 @@ pub fn base_dt(_dt_per_particle: &[f64], _courant: f64, _cap: f64) -> f64 {
 /// A collisionless `dt_i = +∞` (or any `dt_i ≥ dt_base/courant`) maps to rung 0,
 /// the coarsest. A `dt_i` too small to satisfy even at `r_max` clamps there
 /// (bounded under-resolution). Output is state-length, aligned to the input.
-pub fn assign_rungs(
-    _dt_per_particle: &[f64],
-    _dt_base: f64,
-    _courant: f64,
-    _r_max: u32,
-) -> Vec<u32> {
-    todo!("I2: assign_rungs")
+pub fn assign_rungs(dt_per_particle: &[f64], dt_base: f64, courant: f64, r_max: u32) -> Vec<u32> {
+    dt_per_particle
+        .iter()
+        .map(|&dt_i| assign_one(dt_i, dt_base, courant, r_max))
+        .collect()
+}
+
+/// Rung of one particle: the SMALLEST `r ∈ [0, r_max]` whose sub-step
+/// `dt_base/2^r` fits the safe step `courant·dt_i`. The integer search is exact at
+/// power-of-two boundaries where `⌈log2(·)⌉` via a float `log2` could round either
+/// way. `dt_i = +∞` (or any `dt_i` whose safe step already ≥ `dt_base`) never
+/// enters the loop ⇒ rung 0; a `dt_i` too small to fit even at `r_max` clamps there.
+fn assign_one(dt_i: f64, dt_base: f64, courant: f64, r_max: u32) -> u32 {
+    let target = courant * dt_i; // the particle's safe sub-step (`+∞` for collisionless)
+    let mut r = 0u32;
+    while r < r_max && rung_step(dt_base, r) > target {
+        r += 1;
+    }
+    r
 }

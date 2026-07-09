@@ -79,8 +79,9 @@ use galaxy_xtask::spec::{
     build_scenario, parse_scenario_toml, preset, Rig, Scenario, ScenarioSpec,
 };
 use galaxy_xtask::{
-    framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii, rung_spread,
-    ColorModeArg, ScenarioArg, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K,
+    accel_max_rel_vs_direct, framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii,
+    per_particle_grav_dt, rung_spread, ColorModeArg, ScenarioArg, AMDAHL_GASRICH_PERICENTER,
+    DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K, THETA, W_HYDRO_DROP_FINEST,
 };
 use glam::Vec3;
 
@@ -152,6 +153,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // report the ideal-ceiling individual-timestep speedup — no sim, no render.
     if args.first().map(String::as_str) == Some("rung-spread") {
         return rung_spread_cmd(&args[1..]);
+    }
+
+    // `grav-rung-spread` is I0b (docs/plans/laddered-ember-cadence.md): the
+    // GRAVITATIONAL analogue of rung-spread — histogram the per-instant per-particle
+    // gravitational timesteps dt = eta·√(eps/|a|) and report the STAR-subset walk
+    // factor lever (b)'s ~2.24× hangs on (I0 measured only gas CFL). No sim, no render.
+    if args.first().map(String::as_str) == Some("grav-rung-spread") {
+        return grav_rung_spread_cmd(&args[1..]);
     }
 
     let quick = std::env::var_os("GALAXY_MOVIE_QUICK").is_some();
@@ -1166,6 +1175,342 @@ fn report_snapshot(
             )
         };
         println!("  VERDICT: {verdict}");
+    }
+    println!();
+    Ok(())
+}
+
+/// I0b (docs/plans/laddered-ember-cadence.md): the GRAVITATIONAL rung-spread — the
+/// precondition for the individual-timestep plan's `hydro+gravity` mode. Where
+/// `rung-spread` (I0) measured the *gas CFL* rung spread that lever (a) / hydro-only
+/// exploits, this measures the **star gravitational-rung** spread that lever (b) —
+/// subcycling the O(N·logN) gravity WALK on a stale tree — hangs on. It loads a
+/// snapshot (or a run), computes every particle's gravitational step
+/// `dt = eta·√(eps/|a|)` from the pipeline Barnes-Hut field, finds the pericenter
+/// (the tightest STAR bound), histograms the star rungs there, and reprojects the
+/// measured star drop-finest walk factor onto the plan's 2026-07-09 Amdahl split so
+/// the ~2.24× `hydro+gravity` estimate rests on data, not a borrowed hydro factor.
+///
+/// The star (`Collisionless`) subset carries the verdict — under `hydro+gravity` the
+/// gas walks on its *hydro* rung (it is active for hydro anyway), so only the stars
+/// get a *gravitational* rung, and the star spread is the isolated lever-(b) number.
+/// The all-N and gas one-liners are context only.
+///
+/// Usage: `grav-rung-spread <snapshots_dir | snapshot.snap> [--eps E] [--eta H] [--theta T]`.
+fn grav_rung_spread_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    const USAGE: &str =
+        "usage: grav-rung-spread <snapshots_dir | snapshot.snap> [--eps E] [--eta H] [--theta T]";
+    let mut path: Option<PathBuf> = None;
+    // eps = gasrich softening (feeds |a| itself, so it IS a knob on the force — but
+    // the ε inside √(ε/|a|) cancels in the rung ratios). eta is purely cosmetic
+    // (cancels entirely — scales every dt equally). theta = the pipeline opening
+    // angle, so the rungs match what the real hydro+gravity walk would assign.
+    let mut eps = 0.05_f64;
+    let mut eta = 1.0_f64;
+    let mut theta = THETA;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut num = |flag: &str| -> Result<f64, String> {
+            it.next()
+                .ok_or(format!("{flag} needs a value"))?
+                .parse()
+                .map_err(|_| format!("{flag} must be a number"))
+        };
+        match a.as_str() {
+            "--eps" => eps = num("--eps")?,
+            "--eta" => eta = num("--eta")?,
+            "--theta" => theta = num("--theta")?,
+            other if path.is_none() => path = Some(PathBuf::from(other)),
+            other => return Err(format!("unexpected argument `{other}`\n{USAGE}").into()),
+        }
+    }
+    let path = path.ok_or_else(|| format!("no snapshot given\n{USAGE}"))?;
+    if !(eps.is_finite()
+        && eps > 0.0
+        && eta.is_finite()
+        && eta > 0.0
+        && theta.is_finite()
+        && theta >= 0.0)
+    {
+        return Err(format!("--eps/--eta must be positive and --theta ≥ 0 (got eps={eps}, eta={eta}, theta={theta})").into());
+    }
+
+    // A directory ⇒ the full run (scan for the pericenter); a single file ⇒ just it.
+    let files: Vec<PathBuf> = if path.is_dir() {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(&path)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "snap"))
+            .collect();
+        v.sort(); // snapshot_<step:08>.snap → lexicographic == time order
+        if v.is_empty() {
+            return Err(format!("no .snap files under {}", path.display()).into());
+        }
+        v
+    } else {
+        vec![path.clone()]
+    };
+
+    println!(
+        "I0b grav-rung-spread — the go/no-go PRECONDITION for the `hydro+gravity` mode\n\
+         source     {}\n\
+         params     Plummer softening ε = {eps}, η = {eta} (cancels), θ = {theta} (pipeline)\n\
+         measuring  the per-instant SPATIAL spread of gravitational dt_i = η·√(ε/|a_i|)\n\
+         verdict    the STAR subset (walk lever b); dt ∝ |a|^(−½) ⇒ spread NARROWER than hydro\n",
+        path.display(),
+    );
+
+    // Pass 1: the STAR-subset min-dt curve over the run (the gravitational pericenter
+    // = the tightest star bound = the max star |a|). Stars carry lever (b), so the
+    // pericenter is chosen on their bound, not all-N.
+    struct Row {
+        file: PathBuf,
+        time: f64,
+        star_min_dt: f64,
+        n_star: usize,
+    }
+    let mut rows: Vec<Row> = Vec::with_capacity(files.len());
+    for f in &files {
+        let (_hdr, state) = galaxy_io::read_file(f)?;
+        let g = per_particle_grav_dt(&state, eps, eta, theta);
+        let star_min = g
+            .iter()
+            .filter(|gd| gd.kind == Species::Collisionless)
+            .map(|gd| gd.dt)
+            .fold(f64::INFINITY, f64::min);
+        let n_star = g
+            .iter()
+            .filter(|gd| gd.kind == Species::Collisionless)
+            .count();
+        if n_star == 0 {
+            return Err(format!(
+                "{}: snapshot has no collisionless (star) particles",
+                f.display()
+            )
+            .into());
+        }
+        rows.push(Row {
+            file: f.clone(),
+            time: state.time,
+            star_min_dt: star_min,
+            n_star,
+        });
+    }
+
+    let peri = rows
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.star_min_dt.total_cmp(&b.star_min_dt))
+        .map(|(i, _)| i)
+        .expect("rows non-empty");
+    let loosest = rows.iter().map(|r| r.star_min_dt).fold(0.0_f64, f64::max);
+
+    if files.len() > 1 {
+        println!("--- STAR min dt over the run (the gravitational pericenter dip) ---");
+        println!("     snapshot                 t        min_i dt_i   N_star");
+        for (i, r) in rows.iter().enumerate() {
+            let name = r.file.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+            let mark = if i == peri { "  <- PERICENTER" } else { "" };
+            println!(
+                "  {name:<28} {:>6.2}   {:>10.4e}   {:>6}{mark}",
+                r.time, r.star_min_dt, r.n_star
+            );
+        }
+        println!(
+            "  span: tightest {:.4e} (pericenter) .. loosest {:.4e}  (temporal range {:.1}×)\n",
+            rows[peri].star_min_dt,
+            loosest,
+            loosest / rows[peri].star_min_dt,
+        );
+        // Contrast: the first (early diffuse) snapshot, verdict off.
+        report_grav_snapshot(
+            "EARLY DIFFUSE (first snapshot — contrast only)",
+            &rows[0].file,
+            eps,
+            eta,
+            theta,
+            false,
+        )?;
+    }
+    let peri_label = if files.len() > 1 {
+        "PERICENTER (tightest star bound — the decision snapshot)"
+    } else {
+        "SNAPSHOT"
+    };
+    report_grav_snapshot(peri_label, &rows[peri].file, eps, eta, theta, true)?;
+
+    Ok(())
+}
+
+/// Report one snapshot's gravitational rung spread. The STAR subset carries the
+/// verdict (histogram + drop-finest walk factor + the Amdahl reprojection when
+/// `decide`); all-N and gas are one-line context. Asserts nothing is dropped (the
+/// inverted +∞ semantics vs the hydro tool: a zero-accel star is the coarsest rung,
+/// not an exclusion) and cross-checks the θ Barnes-Hut field against exact direct sum.
+fn report_grav_snapshot(
+    label: &str,
+    file: &Path,
+    eps: f64,
+    eta: f64,
+    theta: f64,
+    decide: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_hdr, state) = galaxy_io::read_file(file)?;
+    let g = per_particle_grav_dt(&state, eps, eta, theta);
+    let name = file.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+
+    let star_dts: Vec<f64> = g
+        .iter()
+        .filter(|gd| gd.kind == Species::Collisionless)
+        .map(|gd| gd.dt)
+        .collect();
+    let gas_dts: Vec<f64> = g
+        .iter()
+        .filter(|gd| gd.kind == Species::Gas)
+        .map(|gd| gd.dt)
+        .collect();
+    let all_dts: Vec<f64> = g.iter().map(|gd| gd.dt).collect();
+
+    // Inverted +∞ semantics (advisor): unlike the hydro tool, a zero-accel particle
+    // is the BEST-case coarsest rung, not a non-participant — so nothing must drop.
+    let star_finite = star_dts
+        .iter()
+        .filter(|d| d.is_finite() && **d > 0.0)
+        .count();
+    if star_finite != star_dts.len() {
+        return Err(format!(
+            "{name}: {} of {} stars have |a| == 0 (dt = +∞) — a zero-accel star is a \
+             coarse rung, not an exclusion; padding is inverted here. Investigate the \
+             snapshot before trusting the walk factor.",
+            star_dts.len() - star_finite,
+            star_dts.len(),
+        )
+        .into());
+    }
+
+    let spread = rung_spread(&star_dts).ok_or("no finite star gravitational dt in snapshot")?;
+    let (dt_lo, dt_med, dt_hi) = min_median_max(&star_dts);
+    let r_max = spread.r_max();
+    let drop_finest = spread.speedup_at_cap(r_max.saturating_sub(1));
+
+    println!("=== {label} ===");
+    println!("  {name}  (t = {:.2})", state.time);
+    println!(
+        "  N_star {} (Collisionless), N_gas {}, N_total {}",
+        spread.n,
+        gas_dts.len(),
+        state.len(),
+    );
+    println!(
+        "  STAR dt: min {dt_lo:.4e}  median {dt_med:.4e}  max {dt_hi:.4e}  \
+         (spatial dynamic range {:.1}×)",
+        spread.dynamic_range(),
+    );
+
+    // The star rung histogram — the decision distribution.
+    let dt_base = spread.dt_base;
+    let n = spread.n as f64;
+    println!("  rung   step (dt_base/2^r)   count    frac   |");
+    for (r, &cnt) in spread.counts.iter().enumerate() {
+        let frac = cnt as f64 / n;
+        let bar = "#".repeat((frac * 40.0).round() as usize);
+        let tag = if r == r_max { " (finest)" } else { "" };
+        println!(
+            "  {r:>3}    {:>16.4e}   {cnt:>6}   {:>5.1}%  | {bar}{tag}",
+            dt_base / 2f64.powi(r as i32),
+            frac * 100.0,
+        );
+    }
+    println!(
+        "  finest rung r={r_max}: {} star(s) ({:.1}% of stars)",
+        spread.counts.last().copied().unwrap_or(0),
+        spread.finest_fraction() * 100.0,
+    );
+
+    // The θ cross-check: is the |a| field the rungs are built on trustworthy? (I0b's
+    // stand-in for rung-spread's runtime self-check — there is no shipped grav bound.)
+    let max_rel = accel_max_rel_vs_direct(&state, eps, theta);
+    // A few-% |a| error is Barnes-Hut's DESIGNED θ=0.5 tolerance, not a defect — and
+    // because dt ∝ |a|^(−½) it halves to ~sub-rung, so the rung assignment is robust
+    // (run --theta 0 to confirm the distribution is θ-invariant). Only a gross error
+    // (>10%) would actually move rungs.
+    println!(
+        "  θ cross-check: max |a_BH − a_exact| / |a_exact| = {max_rel:.3e}  \
+         (θ={theta} vs exact direct sum — {})",
+        if max_rel < 0.1 {
+            "within BH tolerance; dt∝|a|^(−½) ⇒ rungs robust"
+        } else {
+            "LARGE — rungs may be θ-artefacts; tighten θ"
+        },
+    );
+
+    // Context one-liners — all-N and gas drop-finest (NOT the verdict; gas walks on
+    // its hydro rung under hydro+gravity, all-N mis-assigns that third).
+    for (tag, dts) in [("all-N", &all_dts), ("gas", &gas_dts)] {
+        if let Some(s) = rung_spread(dts) {
+            let df = s.speedup_at_cap(s.r_max().saturating_sub(1));
+            println!(
+                "  [context] {tag:<5} full-tail {:.2}× / drop-finest {df:.2}×  (N={})",
+                s.speedup, s.n,
+            );
+        }
+    }
+
+    println!(
+        "  STAR WALK FACTOR (lever b): full-tail {:.2}× / DROP-FINEST {drop_finest:.2}×",
+        spread.speedup,
+    );
+
+    if decide {
+        // Reproject the measured star drop-finest onto the plan's Amdahl split. The
+        // borrowed estimate used w_grav = W_HYDRO_DROP_FINEST (2.9×) → 2.24×; I0b
+        // replaces it with the measured star factor.
+        let b = AMDAHL_GASRICH_PERICENTER;
+        let hydro_only = b.hydro_only_speedup(W_HYDRO_DROP_FINEST);
+        let borrowed = b.hydro_plus_gravity_speedup(W_HYDRO_DROP_FINEST, W_HYDRO_DROP_FINEST);
+        let measured = b.hydro_plus_gravity_speedup(W_HYDRO_DROP_FINEST, drop_finest);
+        let delta_pct = (measured / hydro_only - 1.0) * 100.0;
+        println!("\n  --- AMDAHL REPROJECTION (whole-sim, 2026-07-09 block split) ---");
+        println!(
+            "  hydro-only (lever a, ships regardless):        {hydro_only:.2}×  (clears the 30% bar)"
+        );
+        println!(
+            "  hydro+gravity, plan's BORROWED w_grav=2.9×:     {borrowed:.2}×  (the ~2.24× estimate)"
+        );
+        println!(
+            "  hydro+gravity, I0b MEASURED w_grav={drop_finest:.2}×:      {measured:.2}×  \
+             (+{delta_pct:.0}% over hydro-only)"
+        );
+
+        // Verdict: does lever (b) add enough over hydro-only to justify the I-grav
+        // design surface (gravity prediction + stale-tree gather + a gravitational-dt
+        // floor)? hydro-only already clears the user's bar, so this is purely "is the
+        // gravity scope expansion worth building".
+        let verdict = if drop_finest < 1.3 {
+            format!(
+                "STARS BUNCH FINE — star drop-finest {drop_finest:.2}× is near 1×, so lever (b) \
+                 adds only +{delta_pct:.0}% over hydro-only. Ship `hydro-only` and STOP; the \
+                 I-grav design surface is not worth ~{measured:.2}× vs {hydro_only:.2}×."
+            )
+        } else if measured >= 2.0 {
+            format!(
+                "GO for `hydro+gravity` — measured star walk factor {drop_finest:.2}× lifts the \
+                 whole-sim speedup to {measured:.2}× (+{delta_pct:.0}% over hydro-only's \
+                 {hydro_only:.2}×); the gravity subcycling scope expansion pays. Build I-grav."
+            )
+        } else {
+            format!(
+                "MARGINAL — {measured:.2}× vs hydro-only {hydro_only:.2}× (+{delta_pct:.0}%). \
+                 Lever (b) helps but the I-grav overhead (stale-tree gather + prediction) may \
+                 eat the margin; a scope call, not a clear go."
+            )
+        };
+        println!("  VERDICT: {verdict}");
+        println!(
+            "\n  Note: the walk factor is an IDEAL CEILING (walk-updates per base block only);\n\
+             it EXCLUDES the I-grav stale-tree rebuild / gravity-prediction overhead. The\n\
+             reprojection charges the WHOLE walk at the star factor — conservative, since the\n\
+             ~⅓ gas share of the walk actually rides the (larger) hydro factor."
+        );
     }
     println!();
     Ok(())

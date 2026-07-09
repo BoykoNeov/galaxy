@@ -984,9 +984,7 @@ mod tests {
         let b = AMDAHL_GASRICH_PERICENTER;
         let w_h = W_HYDRO_DROP_FINEST;
         // w_grav = 1 (walk not reduced) ≡ hydro-only exactly (lever b contributes nothing).
-        assert!(
-            (b.hydro_plus_gravity_speedup(w_h, 1.0) - b.hydro_only_speedup(w_h)).abs() < 1e-12
-        );
+        assert!((b.hydro_plus_gravity_speedup(w_h, 1.0) - b.hydro_only_speedup(w_h)).abs() < 1e-12);
         // Strictly increasing in the walk factor: more star subcycling ⇒ more speedup.
         assert!(b.hydro_plus_gravity_speedup(w_h, 2.0) > b.hydro_plus_gravity_speedup(w_h, 1.5));
         // Upper bracket: a perfectly-subcycled walk (w_grav → ∞) removes the whole

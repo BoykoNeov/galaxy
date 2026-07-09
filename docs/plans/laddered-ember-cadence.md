@@ -547,9 +547,15 @@ against, exactly as the LBVH/G-series lineage did.
   physical. Single seed / QUICK res — FULL plausibly widens the spread. The gravity
   layer's payoff is MARGINAL here; the scope call reopens rather than clears.
   (I0b, I-grav)
-- **I1 — per-particle CFL vector.** Red: the vector's `min` equals the existing
-  scalar `max_stable_dt` bit-for-bit on a fixed state (the vector is a strict
-  generalization); collisionless rows are `+∞`. (I1)
+- **I1 — per-particle CFL vector. DONE 2026-07-09 (RED 5a90e40 / GREEN 3aa9cd3).**
+  `sph::max_stable_dt_per_particle` + `ForceSolver::max_stable_dt_per_particle`
+  (trait default `vec![+∞; len]`, `GravitySph` overrides at `c_cfl=1`). Vector is
+  state-indexed (gas rows finite at their global index, collisionless `+∞`), a
+  textually-verbatim parallel copy of the scalar's inner loop with the min-fold
+  replaced by a store — the shipped scalar stays FROZEN. Gates: `min ≡ scalar`
+  bit-for-bit (BOTH EOS arms), collisionless `+∞`, static-cloud FULL-vector
+  closed-form pin, non-minimal `−3w` approacher pin (advisor teeth — `min ≡ scalar`
+  only guards the minimal particle), GravitySph trait plumbing. (I1)
 - **I2 — rung assignment (pure fn).** Red: power-of-two binning is monotone,
   clamped to `[0, r_max]`, and a uniform-CFL state maps every particle to the
   same rung. Unit-testable without stepping. (I2)
@@ -573,6 +579,15 @@ against, exactly as the LBVH/G-series lineage did.
   "Done" = **completes AND converges AND the measured speedup justifies the
   path**, not "tests green." At this point the toggle ships at `hydro-only` and
   the 30% bar is cleared.
+  - **I6→I-grav FULL star-spread gate (advisor, 2026-07-09, build phase).** I6
+    emits FULL-res snapshots; re-running `grav-rung-spread` on them is a ~30s
+    xtask (no regen), so **re-measure and REPORT the FULL star gravitational
+    rung spread at the I6→I-grav boundary** before any I-grav commits. I0b's
+    +13% (`hydro+gravity` 1.90×) was QUICK/one-seed; the physics predicts the
+    spread WIDENS at FULL (deeper resolved wells ⇒ higher peak |a| ⇒ finer rungs
+    for the fast stars, broader tail), so the FULL number is likely +30–40%, not
+    +13%. Not an abort gate (the user chose to build the layer) — a **record**
+    gate: land the real number before spending the I-grav design budget.
 - **I-grav — gravity subcycling (`hydro+gravity` mode; the lever-b follow-on,
   ONLY after I0b clears).** Gated behind `[sim.individual].mode="hydro+gravity"`.
   Red: (i) star gravitational rung assignment + floor (pure fn, like I2); (ii)

@@ -93,6 +93,37 @@ pub fn base_dt(dt_per_particle: &[f64], courant: f64, cap: f64) -> f64 {
     }
 }
 
+/// The gravitational per-particle timestep criterion (I-grav): `dt_i = η·√(ε/|a_i|)`
+/// (Aarseth/standard softened-gravity criterion, `ε` the Plummer softening, `|a_i|`
+/// the gravitational acceleration magnitude, `η` the accuracy factor). A force-free
+/// particle (`|a_i| = 0`) returns `+∞` — the coarsest rung, the BEST case (inverted
+/// vs the hydro CFL, where `+∞` means "no hydro constraint"). Mirrors the
+/// `grav_timestep` measurement helper (xtask) promoted here for the production
+/// `hydro+gravity` path. `η` is the loop's POLICY factor (like `courant` for hydro),
+/// not a solver property.
+#[inline]
+pub fn grav_rung_dt(a_mag: f64, eps: f64, eta: f64) -> f64 {
+    let _ = (a_mag, eps, eta);
+    todo!("I-grav green: eta * (eps / a_mag).sqrt(), +inf at a_mag <= 0")
+}
+
+/// Combine the hydro CFL per-particle vector (`+∞` for collisionless stars) with the
+/// gravitational criterion into ONE per-particle `dt` for rung assignment (I-grav,
+/// `hydro+gravity` mode): `dt_i = min(hydro_dt[i], η·√(ε/|a_i|))`. Gas rows take the
+/// tighter of their hydro CFL and gravitational step; collisionless stars (hydro
+/// `+∞`) take their gravitational step alone, giving them the FINITE rung that lets
+/// the gravity walk reduce to an active subset. A force-free star stays `+∞` (rung 0).
+/// Output is state-length, aligned to both inputs (which must match).
+pub fn combined_particle_dt(
+    hydro_dt: &[f64],
+    grav_accel_mag: &[f64],
+    eps: f64,
+    eta: f64,
+) -> Vec<f64> {
+    let _ = (hydro_dt, grav_accel_mag, eps, eta);
+    todo!("I-grav green: elementwise min(hydro_dt[i], grav_rung_dt(grav_accel_mag[i], eps, eta))")
+}
+
 /// Assign each particle to a power-of-two rung (I2): `r_i = clamp(⌈log2(dt_base /
 /// (courant·dt_i))⌉, 0, r_max)`, so its sub-step `dt_base/2^r_i ≤ courant·dt_i`
 /// (its safe step) and is the COARSEST rung that still fits. Computed by an exact

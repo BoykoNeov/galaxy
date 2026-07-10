@@ -23,7 +23,7 @@ use galaxy_sim::{
     RunSummary, SimConfig, SnapshotSink, ThermalArm,
 };
 use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
-use galaxy_solvers::BarnesHut;
+use galaxy_solvers::{BarnesHut, TreeGravity};
 
 use crate::cfl_guard::{CflGuard, C_CFL};
 use crate::spec::{AdaptiveSpec, IndividualMode, IndividualSpec, Scenario};
@@ -94,18 +94,29 @@ pub fn simulate_snapshots(
             // `dt_base` from the per-particle CFL bound each base block, so an over-large
             // fixed `dt` (now only the output cadence) can no longer make it unstable.
             if let Some(ind) = &s.individual {
-                if ind.mode == IndividualMode::HydroOnly {
+                if matches!(
+                    ind.mode,
+                    IndividualMode::HydroOnly | IndividualMode::HydroGravity
+                ) {
                     if backend != Backend::Cpu {
                         return Err("[sim.individual] timesteps are CPU-only; run the gas \
                                     path on the CPU backend"
                             .into());
                     }
                     let ind_cfg = build_individual_config(s, ind)?;
-                    let gravity = BarnesHut::new(G, s.eps, THETA);
-                    let mut solver = GravitySph::new(gravity, hydro, density_cfg);
+                    let bh = BarnesHut::new(G, s.eps, THETA);
                     let mut sink = DirectorySink::new(snap_dir)?;
-                    let summary =
-                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?;
+                    // `hydro+gravity` subcycles gravity on a cached stale tree, so it wraps
+                    // the Barnes-Hut solver in `TreeGravity` (the tree cache) and flips the
+                    // subcycle flag; `hydro-only` walks gravity all-N every fine tick.
+                    let summary = if ind.mode == IndividualMode::HydroGravity {
+                        let mut solver = GravitySph::new(TreeGravity::new(bh), hydro, density_cfg)
+                            .with_gravity_subcycling(true);
+                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?
+                    } else {
+                        let mut solver = GravitySph::new(bh, hydro, density_cfg);
+                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?
+                    };
                     return Ok(summary.run);
                 }
                 // `mode = fixed-dt`: fall through to the fixed-dt path below.
@@ -240,6 +251,15 @@ fn build_individual_config(
         dt_base_cap: ind.dt_base_cap,
         r_max: ind.r_max,
         n_limit: ind.n_limit,
+        // `hydro+gravity` (I-grav): subcycle gravity on the stale tree, stars get
+        // finite gravitational rungs. `grav_eta` scales the gravitational TIMESCALE
+        // `√(ε/|a|)`; `courant` is then applied uniformly to hydro AND gravity (a
+        // single global safety factor ⇒ the rung structure stays courant-invariant,
+        // which the convergence gate needs). `1.0` ⇒ the grav safe step is
+        // `courant·√(ε/|a|)`, matching the hydro `courant·h/v_sig`. A scenario knob is
+        // deferred until a run needs to tune it.
+        subcycle_gravity: ind.mode == IndividualMode::HydroGravity,
+        grav_eta: 1.0,
         eos: ThermalArm::Isothermal,
         output_dt: s.snapshot_every as f64 * s.dt,
         n_outputs: s.n_steps / s.snapshot_every,

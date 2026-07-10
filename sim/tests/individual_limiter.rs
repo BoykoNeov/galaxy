@@ -120,6 +120,8 @@ fn cfg(courant: f64, n_limit: u32) -> IndividualConfig {
         dt_base_cap: f64::INFINITY, // non-binding ⇒ dt_base = courant·dt_coarsest
         r_max: R_MAX,
         n_limit,
+        subcycle_gravity: false,
+        grav_eta: 0.3,
         eos: ThermalArm::Isothermal, // I4b limiter gates run on the isothermal arm
         output_dt: T_END,            // one output interval ⇒ run to exactly T_END
         n_outputs: 1,

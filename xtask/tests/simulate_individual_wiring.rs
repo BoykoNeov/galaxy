@@ -254,13 +254,21 @@ fn adaptive_and_individual_together_are_rejected() {
 }
 
 #[test]
-fn hydro_plus_gravity_mode_is_rejected_as_unbuilt() {
-    let toml = gas_toml("[sim.individual]\nmode = \"hydro+gravity\"\n");
-    let err = parse_scenario_toml(&toml).expect_err("hydro+gravity is unbuilt and must reject");
-    assert!(
-        err.contains("hydro+gravity") || err.contains("gravity"),
-        "reject message should point at the unbuilt gravity layer, got: {err}"
+fn hydro_plus_gravity_mode_parses_and_runs() {
+    // I-grav is now built: `hydro+gravity` parses and routes to run_individual with
+    // gravity subcycling (a gas run, so the individual path applies).
+    let s = gas_scenario("[sim.individual]\nmode = \"hydro+gravity\"\n");
+    assert_eq!(
+        s.individual.as_ref().map(|i| i.mode),
+        Some(IndividualMode::HydroGravity),
+        "hydro+gravity must parse to the HydroGravity mode"
     );
+    let mut s = s;
+    s.n_steps = s.snapshot_every; // one output interval — a bounded smoke run
+    let dir = tempdir("hydro_gravity");
+    let summary = simulate_snapshots(&s, &dir, Backend::Cpu)
+        .expect("hydro+gravity gas run must complete through run_individual");
+    assert_eq!(summary.snapshots_emitted, 2, "IC + 1 output interval");
 }
 
 #[test]

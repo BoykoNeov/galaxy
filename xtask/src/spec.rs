@@ -793,15 +793,8 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
         );
     }
     if let Some(ind) = &s.sim.individual {
-        // The hydro+gravity layer (I-grav / lever b) is not yet implemented — fail loud
-        // instead of silently degrading to hydro-only.
-        if ind.mode == IndividualMode::HydroGravity {
-            return Err(
-                "[sim.individual] mode = \"hydro+gravity\" is not yet implemented \
-                        (the gravity-subcycling layer is unbuilt); use \"hydro-only\""
-                    .into(),
-            );
-        }
+        // `hydro+gravity` (I-grav / lever b) is now built — it subcycles gravity on a
+        // cached stale tree, giving collisionless stars finite gravitational rungs.
         if !(ind.courant.is_finite() && ind.courant > 0.0 && ind.courant <= 1.0) {
             return Err(format!(
                 "[sim.individual] courant must be in (0, 1], got {}",

@@ -110,7 +110,9 @@ fn cfg(courant: f64, output_dt: f64, n_outputs: u64) -> IndividualConfig {
         courant,
         dt_base_cap: f64::INFINITY,
         r_max: 10,
-        n_limit: 10, // == r_max ⇒ limiter non-binding (I4a is pure CFL rungs)
+        n_limit: 10,             // == r_max ⇒ limiter non-binding (I4a is pure CFL rungs)
+        subcycle_gravity: false, // hydro-only (I4a gates)
+        grav_eta: 0.3,
         eos: ThermalArm::Isothermal, // I4a driver gates are the isothermal byte-path
         output_dt,
         n_outputs,

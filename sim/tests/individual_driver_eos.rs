@@ -98,6 +98,8 @@ fn cfg(eos: ThermalArm, output_dt: f64, n_outputs: u64) -> IndividualConfig {
         dt_base_cap: f64::INFINITY,
         r_max: 10,
         n_limit: 10, // == r_max ⇒ limiter non-binding
+        subcycle_gravity: false,
+        grav_eta: 0.3,
         eos,
         output_dt,
         n_outputs,

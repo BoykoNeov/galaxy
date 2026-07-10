@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use galaxy_core::{Background, ForceSolver, Integrator, State};
+use galaxy_core::{Background, DVec3, ForceSolver, Integrator, State};
 use galaxy_io::Header;
 
 pub mod individual;
@@ -465,6 +465,21 @@ pub struct IndividualConfig {
     /// rungs are exactly the CFL assignment — the non-binding setting the fixed-dt-in-
     /// disguise gates (and I4a) run at, so those paths stay byte-identical.
     pub n_limit: u32,
+    /// I-grav (`hydro+gravity` mode): when `true`, fold the gravitational criterion
+    /// `η·√(ε/|a|)` into the per-particle `dt` (via [`individual::combined_particle_dt`])
+    /// so collisionless stars get FINITE rungs, and subcycle gravity on the stale
+    /// cached tree (the driver rebuilds it once per base block). `false` = `hydro-only`
+    /// (stars stay on rung 0, gravity all-N every fine tick). Requires the solver's
+    /// gravity to actually cache (`TreeGravity`) for the walk to reduce.
+    pub subcycle_gravity: bool,
+    /// The gravitational-rung accuracy factor `η` (I-grav POLICY), scaling the
+    /// gravitational TIMESCALE `√(ε/|a|)` in [`individual::combined_particle_dt`].
+    /// `courant` is then applied uniformly to the combined hydro/gravity `dt`, so a
+    /// star's safe step is `courant·η·√(ε/|a|)` and the rung structure stays
+    /// courant-invariant (halving `courant` halves every step ⇒ same rungs — the
+    /// property the convergence gate leans on). `η = 1.0` makes gravity share the
+    /// hydro `courant` (`courant·√(ε/|a|)`). Unused when `subcycle_gravity` is `false`.
+    pub grav_eta: f64,
     /// Which EOS arm to step the gas on (isothermal vs adiabatic). Selects the
     /// stepper INSIDE the driver; derived from the scenario's gas EOS, never from the
     /// `mode`. `ThermalArm::Isothermal` keeps the frozen I3/I4a/I4b byte-path.
@@ -602,7 +617,26 @@ pub fn run_individual(
             // Re-derive the base dt and rungs from the current per-particle CFL vector
             // (I1 → I2). The bound moves and its spatial spread changes as the gas
             // evolves, so this is recomputed every base block.
-            let dt_pp = solver.max_stable_dt_per_particle(state);
+            let mut dt_pp = solver.max_stable_dt_per_particle(state);
+            // I-grav (`hydro+gravity`): fold the gravitational criterion into the
+            // per-particle `dt` so collisionless stars get finite rungs. Rebuild the
+            // gravity tree ONCE here — the driver owns the block-boundary rebuild, and
+            // the SAME cache serves both |a_grav| (walked over ALL particles now, at
+            // block-start positions ⇒ fresh) AND the fine-tick active walk inside
+            // `step_block` (rung–force θ/ε consistency by construction).
+            if config.subcycle_gravity {
+                solver.rebuild_gravity_cache(state);
+                let mut ag = vec![DVec3::ZERO; state.len()];
+                let all: Vec<usize> = (0..state.len()).collect();
+                solver.gravity_active_cached(state, &all, &mut ag);
+                let ag_mag: Vec<f64> = ag.iter().map(|a| a.length()).collect();
+                dt_pp = individual::combined_particle_dt(
+                    &dt_pp,
+                    &ag_mag,
+                    config.softening,
+                    config.grav_eta,
+                );
+            }
             if !dt_pp.iter().any(|d| d.is_finite()) {
                 return Err(SimError::Config(format!(
                     "per-particle CFL limit became non-finite mid-run (t = {t}) — the run blew up"

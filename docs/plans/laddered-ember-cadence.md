@@ -820,6 +820,35 @@ against, exactly as the LBVH/G-series lineage did.
     OPTIONAL (the mechanism is structural ⇒ should hold/amplify at FULL); a same-N run
     would confirm but is not load-bearing given the QUICK number + the clear mechanism.
     Convergence/correctness already gated (M12). (I0b, I-grav)
+  - **M-cache — `hydro-only` gravity-tree caching (the M-validate spinoff). DONE
+    2026-07-10.** Wired the once-per-base-block tree rebuild into the SHIPPING
+    `hydro-only` path: `mode="hydro-only"` now wraps Barnes-Hut in `TreeGravity` and
+    walks the cached stale tree (`gravity_active_cached`) each fine tick instead of
+    rebuilding a fresh octree ×2^r_max/block. Stars stay on rung 0 — caching is a WALK
+    optimization DECOUPLED from rung-folding via the new `IndividualConfig.cache_gravity_tree`
+    (the driver rebuilds the cache iff `cache_gravity_tree`, folds gravity into rungs iff
+    `subcycle_gravity`, and REJECTS `subcycle_gravity` without the cache). Prep: renamed
+    the mis-named `GravitySph.subcycle_gravity` field → `cached_gravity_walk` (it only ever
+    gated the walk). **The gate that CAN exist here but not for `hydro+gravity`** (advisor):
+    fresh(c) and cached(c) at the SAME courant share rung structure/`dt_base`/integrator,
+    so `D(c)=‖cached−fresh‖` isolates tree freshness ALONE — a strictly stronger gate.
+    NON-VACUOUS floor `D(coarse)≫roundoff` catches the accidental-every-tick-rebuild bug
+    (measured D(0.4)=7.6e-2, ~5 orders above the 1e-6 floor); CONVERGES `D(fine)<D(coarse)`
+    (7.6e-2→2.0e-2, ~3.8× per 4× courant — the stale-COM error is O(courant)). Plus a
+    FALLBACK bit-identity gate: the cache FLAG on a non-caching `BarnesHut` is byte-identical
+    to fresh (machinery adds zero error; all divergence is `TreeGravity`'s stale COMs).
+    Fresh path stays reachable in tests only (no scenario knob). **Numerics of the shipping
+    `hydro-only` CHANGED → the I6 1.71× and the retained `i6_individual` snapshots were
+    measured FRESH and need re-measuring / re-rendering.** Timing A/B (ignored test
+    `timing_fresh_vs_cached`, ~7000 particles / 3000 gas, courant 0.25, r_max CAPPED at 7
+    for runtime): **fresh 194.7 s vs cached 136.8 s = 1.42× FASTER** (both max_rung 7 =
+    clamped, so this is a LOWER BOUND — the shipping r_max=10 has deeper rungs ⇒ more
+    redundant per-tick fresh rebuilds ⇒ a larger win). Clears the ">1× / no QUICK
+    slowdown" bar the advisor flagged (unlike G6). More modest than the 2.55× hydro+gravity
+    number because that was a DIFFERENT comparison (hydro+gravity vs fresh hydro-only) and
+    the identical active-subset HYDRO cost (adaptive-h density) is unchanged here ⇒ Amdahl
+    caps the gravity-only win. FULL A/B to tighten the exact shipping figure is optional.
+    (I6, I-grav, M-validate)
 
 ---
 

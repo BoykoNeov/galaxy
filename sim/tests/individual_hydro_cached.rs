@@ -64,12 +64,22 @@ fn ball(rng: &mut impl FnMut() -> f64, n: usize, radius: f64) -> Vec<DVec3> {
 /// surrounded by orbiting stars. Same testbed shape as the `hydro+gravity` gates so the
 /// cached↔fresh comparison sees a realistic star/gas force field.
 fn core_and_stars(seed: u64) -> State {
+    core_and_stars_sized(seed, 400, 300)
+}
+
+/// `core_and_stars` with explicit particle counts (the timing A/B scales this up so the
+/// octree build is non-trivial — at a few hundred bodies the build is too cheap for the
+/// build-once-vs-per-tick lever to register).
+fn core_and_stars_sized(seed: u64, n_gas: usize, n_star: usize) -> State {
     let mut rng = lcg(seed);
-    let gas = ball(&mut rng, 400, 0.1);
+    // Scale the core radius with N^(1/3) so density (⇒ smoothing length, CFL, rung depth)
+    // stays comparable to the 400-gas correctness gates. Without this, packing thousands
+    // of bodies into r=0.1 makes h→tiny, the CFL→tiny, and 2^r_max fine ticks explode.
+    let radius = 0.1 * (n_gas as f64 / 400.0).cbrt();
+    let gas = ball(&mut rng, n_gas, radius);
     let n_gas = gas.len();
     let mut pos = gas;
     let mut vel = vec![DVec3::ZERO; n_gas];
-    let n_star = 300;
     for _ in 0..n_star {
         let r = 0.12 + rng() * 1.38;
         let dir = {
@@ -243,5 +253,63 @@ fn subcycle_without_cache_is_rejected() {
     assert!(
         matches!(err, Err(SimError::Config(_))),
         "subcycle_gravity without cache_gravity_tree must be a Config error, got {err:?}"
+    );
+}
+
+// --------------------------------------------------------------------------
+// TIMING A/B (ignored) — the whole POINT is speed; the correctness gates prove
+// not-wrong, not faster. Run manually:
+//   cargo test -p galaxy-sim --test individual_hydro_cached --release timing -- --ignored --nocapture
+// Scales the testbed up so the octree build is non-trivial (the build-once-vs-×256
+// lever is invisible at a few hundred bodies). Prints wall time; asserts nothing
+// (machine-dependent). At QUICK/small N the win may be modest or absent (tree build is
+// cheap, parallelism under-occupies — recall the G6 QUICK slowdown); the lever grows
+// with N and rung depth. The correctness of the two runs is already gated above.
+#[test]
+#[ignore = "timing A/B — run manually with --release --ignored --nocapture"]
+fn timing_fresh_vs_cached() {
+    use std::time::Instant;
+    // ~7000 particles like the M-validate QUICK run (density held constant via the
+    // N^(1/3) radius scaling in core_and_stars_sized), a real rung spread from the core.
+    let (n_gas, n_star) = (3000, 4000);
+    let (output_dt, n_outputs) = (0.2, 2);
+    // Bound r_max so the fine-tick count 2^r_max stays sane (the dense core would else
+    // clamp to r_max=14 ⇒ 16384 ticks/block). This CAPS the win (deeper rungs ⇒ more
+    // redundant fresh rebuilds ⇒ larger cached advantage), so the real shipping speedup
+    // at r_max=10 is at least this.
+    let conf = |cache: bool| IndividualConfig {
+        r_max: 7,
+        ..cfg(0.25, cache, output_dt, n_outputs)
+    };
+
+    let time_run = |cache: bool| -> (f64, IndividualSummary) {
+        let mut state = core_and_stars_sized(7, n_gas, n_star);
+        let bg = StaticBackground;
+        let t0 = Instant::now();
+        let summary = if cache {
+            let mut solver =
+                GravitySph::new(TreeGravity::new(bh()), params(), DensityConfig::default())
+                    .with_gravity_cache(true);
+            run_individual(&mut state, &mut solver, &bg, &conf(true), &mut NullSink).unwrap()
+        } else {
+            let mut solver = GravitySph::new(bh(), params(), DensityConfig::default());
+            run_individual(&mut state, &mut solver, &bg, &conf(false), &mut NullSink).unwrap()
+        };
+        (t0.elapsed().as_secs_f64(), summary)
+    };
+
+    let (fresh, s_fresh) = time_run(false);
+    let (cached, s_cached) = time_run(true);
+
+    eprintln!(
+        "n=({n_gas} gas, {n_star} star), {n_outputs}×{output_dt} outputs, courant 0.25, r_max 7\n\
+         fresh   hydro-only : {fresh:.2}s (blocks {}, max_rung {})\n\
+         cached  hydro-only : {cached:.2}s (blocks {}, max_rung {})\n\
+         speedup            : {:.2}×",
+        s_fresh.run.steps,
+        s_fresh.max_rung,
+        s_cached.run.steps,
+        s_cached.max_rung,
+        fresh / cached,
     );
 }

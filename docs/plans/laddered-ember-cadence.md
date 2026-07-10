@@ -693,6 +693,44 @@ against, exactly as the LBVH/G-series lineage did.
       (I-grav unbuilt), GPU backend. Gas-free / `fixed-dt` drop to the fixed-dt path.
       Producibility gate: gas run whose fixed dt trips `CflGuard` COMPLETES under
       hydro-only (Finding-A argument, individual edition). (I8)
+- **I7 — active-subset gather (the efficiency path). DONE 2026-07-10 (RED 1d15f05
+  / GREEN ff2812e).** The I3/I5 steppers recomputed density + hydro force over the
+  WHOLE gas set every fine tick ⇒ same force-eval count as global adaptive ⇒ ZERO
+  speedup (I6 would have measured ~1×). I7 reduces the *gather* to the ACTIVE
+  subset each fine tick. **Design (advisor-vetted 2026-07-10):** gravity stays
+  all-N/fresh/unreduced (the `hydro-only` non-rung fraction, f_accel 0.62); the
+  grid is rebuilt FRESH every fine tick (build is ~367× cheaper than the gather —
+  measured by a throwaway probe on the QUICK pericenter, so the plan's "stale +
+  dilated grid" option is REJECTED: at dt_base≈0.5 with dense-knot h≈0.02–0.04 a
+  fast particle drifts ~15 h/block, no fixed dilation finds its neighbours);
+  positions stay exact (drift-all kept from I3, so no position/velocity
+  prediction is needed — `predict_pos` stays pinned-but-unused for I-grav); only
+  the density root-find + force gather reduce to the active subset, reading
+  persistent ρ/h scratch (active targets refreshed, inactive neighbours read
+  stale — the SOLE bounded approximation; all rungs sync at block end ⇒ scratch
+  fully refreshed once per base block). **Extraction, not verbatim-copy
+  (advisor):** `DensitySetup{solve_one}` and `HydroCtx{force_one}` are single-
+  source per-target cores — the full pass maps them over `0..n`, the active pass
+  over the subset. Byte-identity is by CONSTRUCTION: grid + seeds computed over
+  ALL gas, the solve/force read only positions + per-target hint (independent of
+  which targets are active), so `active = 0..n` reproduces the full pass exactly.
+  Proven neutral by the frozen `isothermal_regression_pins_pre_e1b_bits` + all
+  density/forces gates staying green post-extract. **Interface:**
+  `ForceSolver::{accelerations_active, accel_and_dudt_active}` (trait defaults
+  forward to the full pass ⇒ non-SPH solvers correct-but-unaccelerated for free);
+  `GravitySph` overrides them (gravity all-N + two-pass active hydro on an
+  `h_hint`/`rho_scratch` persistent scratch). Both steppers' fine-tick loops call
+  `…_active(active_this_tick)`. **Load-bearing warm-start fix:** on the ρ-scratch
+  init tick the active path KEEPS an already-sized `h_hint` (from the full
+  `accelerations` prime) rather than zeroing it — else the density bisection
+  cold-starts to a within-tolerance-but-different `h` and breaks the I3 collapsed
+  bit-identity gate. Gates: solver anchors (active-over-ALL ≡ full BIT-IDENTICAL
+  for density + fused force; GravitySph checked TWICE so the scratch evolution
+  matches too), partial (subset gather on a fresh scratch ≡ full at the active
+  indices), stepper force-eval REDUCTION (`Σ_i 2^r_i` per block, not `N·2^r_max`),
+  and — the partial-active/stale-neighbour CORRECTNESS — the I4a driver
+  convergence + I4b limiter + I5 thermal + I8 dispatch gates ALL now run through
+  the wired active path and stay green. (I6, I7)
 - **I6 — full-res producibility + speedup validation, `hydro-only` mode (the
   real "done" for lever a).** Run the full-res `gasrich` showpiece through
   `run_individual` in `hydro-only` mode; confirm it completes, converges to the

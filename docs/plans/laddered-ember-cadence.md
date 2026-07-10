@@ -802,7 +802,8 @@ against, exactly as the LBVH/G-series lineage did.
     (fresh all-N ≠ stale-tree gravity even gas-only) — "graceful" = hydro-only's gates
     stay green, untouched.
   - **M-validate — `hydro+gravity` vs `hydro-only` speedup. QUICK DONE 2026-07-10;
-    FULL pending (optional).** QUICK gasrich pericenter (7500 particles / 2500 gas,
+    FULL DONE 2026-07-11 — and FULL says hydro+gravity FLOODS (over-collapses).**
+    QUICK gasrich pericenter (7500 particles / 2500 gas,
     T=2, throwaway `xtask/examples/igrav_timing.rs`, deleted): **hydro+gravity 9.43 s
     vs hydro-only 24.06 s = 2.55× FASTER** (distinct_rungs 4→9, max_rung 8 both). This
     BLOWS PAST the +6% record-gate reprojection and the advisor's "may be slower"
@@ -813,13 +814,33 @@ against, exactly as the LBVH/G-series lineage did.
     (the driver's `rebuild_gravity_cache`) and walks the cached `FlatTree`. So most of
     the 2.55× is **eliminating redundant per-tick tree BUILDS**, not the walk factor;
     the pure lever-(b) walk-reduction is still the record gate's ~+6%. **Honest
-    attribution + a valuable spinoff: `hydro-only` leaves a large optimization on the
-    table — it could cache the tree the same way (build once/block, walk all-N each
-    tick) using the now-existing `TreeGravity` infra, WITHOUT star subcycling.** So
-    the I6 hydro-only 1.71× is itself improvable. FULL `hydro+gravity` validation is
-    OPTIONAL (the mechanism is structural ⇒ should hold/amplify at FULL); a same-N run
-    would confirm but is not load-bearing given the QUICK number + the clear mechanism.
-    Convergence/correctness already gated (M12). (I0b, I-grav)
+    attribution + a spinoff that BACKFIRED: `hydro-only` could cache the tree the same
+    way (build once/block, walk all-N each tick) using the now-existing `TreeGravity`
+    infra, WITHOUT star subcycling.** That spinoff was tried (M-cache) and REVERTED —
+    the stale tree floods the merger core at FULL (below).
+    **FULL result (2026-07-11) — the QUICK 2.55× does NOT survive; `hydro+gravity`
+    over-collapses.** Ran the shipping `hydro+gravity` config at FULL / r_max=14 / full
+    horizon (new sibling test `full_res_gasrich_hydrogravity_completes_and_converges`,
+    xtask/tests/individual_producibility.rs = the deferred FULL M-validate), read
+    incrementally via the per-snapshot gas CFL bound. `hydro+gravity` walks the SAME
+    once-per-block STALE tree that made cached-hydro-only flood, and at FULL it floods
+    the same way: min-dt drops **below** the fresh floor (3.80e-3) at snap 32, reaches
+    **1.13e-3 (0.30× fresh) by snap 39, CFL range 103.9× and climbing** (pericenter runs
+    to ~snap 56 ⇒ deeper) — the cached-hydro-only signature (30.8×→196.1×) reproduced.
+    Run early-killed at snap 40/61 (verdict unambiguous). **The QUICK 2.55× was a
+    QUICK-only artifact** — QUICK never reaches the supersonic (Mach ~10) pericenter
+    infall that triggers the flood. At FULL, `hydro+gravity` has NO perf benefit (floods
+    → slow). **This SHARPENS the M-cache causal picture: n=2 stale-tree configs now flood
+    (cached-hydro-only + hydro+gravity) from the same IC/seed while the one fresh-tree
+    config does not** — strongly implicating staleness as causal (not a chaotic one-off),
+    honest caveat that the two stale configs share the mechanism (reproducibility, not an
+    independent 2nd sample). **DECISION (user call surfaced): ship `hydro-only` fresh
+    (1.71×) as default — now for a SECOND, stronger reason than the record gate's +6%:
+    hydro+gravity is actively WORSE at FULL, not marginally better. Keep hydro+gravity as
+    a droppable toggle for scaling/completeness; do NOT default to it.** Convergence/
+    correctness already gated (M12); the FULL test asserts completion + prefix
+    convergence, and REPORTS the CFL range as the over-collapse diagnostic. Writeup:
+    `M:\claud_projects\temp\mcache_mechanism.md`. (I0b, I-grav)
   - **M-cache — `hydro-only` gravity-tree caching (the M-validate spinoff). DONE
     2026-07-10.** Wired the once-per-base-block tree rebuild into the SHIPPING
     `hydro-only` path: `mode="hydro-only"` now wraps Barnes-Hut in `TreeGravity` and
@@ -863,8 +884,9 @@ against, exactly as the LBVH/G-series lineage did.
     rung-flooding, not per-walk cost (caching is a small WIN when the trajectory doesn't
     flood). **Decision: caching gives `hydro-only` zero speed upside and no accuracy
     benefit ⇒ reverted to the FRESH walk. `hydro+gravity` KEEPS caching (it needs it —
-    subcycling walks the cache — and QUICK showed 2.55×; whether it also over-collapses
-    at FULL is a separate open risk).** The wiring change: `simulate.rs` builds bare
+    subcycling walks the cache — and QUICK showed 2.55×; **it ALSO over-collapses at FULL
+    — RESOLVED 2026-07-11, see the M-validate FULL result above: same stale-tree flood,
+    QUICK win does not survive, ship hydro-only default).** The wiring change: `simulate.rs` builds bare
     `GravitySph<BarnesHut>` for `hydro-only` and sets `cache_gravity_tree` only for
     `hydro+gravity`; the caching machinery (`TreeGravity`, `with_gravity_cache`,
     `cached_gravity_walk`) and its gate tests are KEPT (hydro+gravity uses them). Fresh

@@ -672,6 +672,27 @@ against, exactly as the LBVH/G-series lineage did.
        `u(t)` closer; coarse-rung `u`-error falls ~2nd order under `dt_base` refine).
   STEPPER-ONLY per the advisor — driver wiring (a `[sim.individual]` EOS-arm field
   on `IndividualConfig`, NOT a second `run_individual_thermal`) is owed at I6. (I8)
+- **I8 driver + scenario wiring — DONE 2026-07-10 (RED b70555d/GREEN 1a009b5 sim;
+  RED adf04b3/GREEN e7d2360 xtask).** The owed pre-I6 wiring, two orthogonal axes:
+    * **EOS arm (sim):** `ThermalArm { Isothermal | Adiabatic { u_min } }` field on
+      `IndividualConfig` + `u_floor_energy` on `IndividualSummary`. ONE `run_individual`
+      dispatches over a private `individual::BlockStepper` trait (impl'd by both
+      `ActiveSetKdk` and `ActiveSetKdkThermal`) — `Box<dyn>`, one virtual call per base
+      block. Isothermal arm byte-identical (I3/I4a/I4b frozen). Dispatch gate
+      (`individual_driver_eos.rs`) drives the SAME real adiabatic solver + IC through
+      both arms — the advisor-flagged trap: an isothermal solver fills `du/dt≡0`, so the
+      test would be vacuous without a real `Eos::Adiabatic` solver; Adiabatic MUST evolve
+      `u` + report the floor leak, Isothermal MUST leave `u` byte-identical.
+    * **`mode` toggle (xtask):** `[sim.individual].mode = fixed-dt | hydro-only |
+      hydro+gravity` (serde-renamed) on `SimSpec`/`Scenario` (mirrors `[sim.adaptive]`;
+      defaults courant 0.25 / r_max 10 / **n_limit 1 binding** / dt_base_cap inf, mode
+      hydro-only). `simulate_snapshots` routes gas-rich `hydro-only` → `run_individual`
+      (CPU-only, no `CflGuard`); `build_individual_config` derives the output grid + pins
+      `eos = Isothermal` (scenarios express only isothermal gas — adiabatic scenario
+      wiring stays deferred). REJECTS: adaptive+individual together, `hydro+gravity`
+      (I-grav unbuilt), GPU backend. Gas-free / `fixed-dt` drop to the fixed-dt path.
+      Producibility gate: gas run whose fixed dt trips `CflGuard` COMPLETES under
+      hydro-only (Finding-A argument, individual edition). (I8)
 - **I6 — full-res producibility + speedup validation, `hydro-only` mode (the
   real "done" for lever a).** Run the full-res `gasrich` showpiece through
   `run_individual` in `hydro-only` mode; confirm it completes, converges to the

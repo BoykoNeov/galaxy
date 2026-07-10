@@ -227,6 +227,55 @@ fn gravity_sph_accelerations_active_all_equals_full_twice() {
     }
 }
 
+/// Gas cloud PLUS an offset star cluster: gravity is nonzero on every row and the
+/// active path must add hydro ONTO the gravity already in `acc` (not overwrite it),
+/// with non-gas rows in `active` routed to gravity-only. `gravity: None` anchors
+/// can't see an `=`-vs-`+=` slip because `acc` starts at zero there — this is the
+/// exact `GravitySph::new(BarnesHut…)` config the gasrich showpiece (I6) runs.
+fn mixed_state(seed: u64, n_gas: usize, n_star: usize, radius: f64) -> State {
+    let (mut pos, mut vel, mut mass, mut u) = gas_cloud(seed, n_gas, radius);
+    let mut rng = lcg(seed ^ 0xABCD);
+    for _ in 0..n_star {
+        pos.push(
+            DVec3::new(rng() - 0.5, rng() - 0.5, rng() - 0.5) * radius
+                + DVec3::new(3.0 * radius, 0.0, 0.0),
+        );
+        vel.push(DVec3::ZERO);
+        mass.push(2.0);
+        u.push(0.0);
+    }
+    let mut s = State::from_phase_space(pos, vel, mass);
+    for (su, uu) in s.u.iter_mut().zip(&u) {
+        *su = *uu;
+    }
+    // First `n_gas` rows are gas; the rest stay `Collisionless` (the default).
+    for kind in s.kind.iter_mut().take(n_gas) {
+        *kind = Species::Gas;
+    }
+    s
+}
+
+#[test]
+fn gravity_sph_accelerations_active_all_equals_full_with_gravity() {
+    let state = mixed_state(31, 250, 120, 2.0);
+    let n = state.len();
+    let all: Vec<usize> = (0..n).collect();
+    let bh = || galaxy_solvers::BarnesHut::new(1.0, 0.05, 0.5);
+    let mut full = GravitySph::new(bh(), hparams(), dcfg());
+    let mut active = GravitySph::new(bh(), hparams(), dcfg());
+
+    for round in 0..2 {
+        let mut a_full = vec![DVec3::ZERO; n];
+        let mut a_active = vec![DVec3::ZERO; n];
+        full.accelerations(&state, &mut a_full);
+        active.accelerations_active(&state, &all, &mut a_active);
+        assert_eq!(
+            a_active, a_full,
+            "gravity+hydro active(all) must equal full — hydro must ADD onto gravity (round {round})"
+        );
+    }
+}
+
 #[test]
 fn gravity_sph_accel_and_dudt_active_all_equals_full_twice() {
     // Adiabatic arm so du/dt is non-trivial (isothermal du/dt is also fine but the

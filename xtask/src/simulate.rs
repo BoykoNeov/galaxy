@@ -258,6 +258,9 @@ fn build_individual_config(
         // which the convergence gate needs). `1.0` ⇒ the grav safe step is
         // `courant·√(ε/|a|)`, matching the hydro `courant·h/v_sig`. A scenario knob is
         // deferred until a run needs to tune it.
+        // RED: shipping `hydro-only` still runs fresh gravity; GREEN flips it to the
+        // cached tree (and `hydro+gravity` requires the cache to subcycle).
+        cache_gravity_tree: ind.mode == IndividualMode::HydroGravity,
         subcycle_gravity: ind.mode == IndividualMode::HydroGravity,
         grav_eta: 1.0,
         eos: ThermalArm::Isothermal,

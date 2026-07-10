@@ -110,6 +110,7 @@ fn cfg(courant: f64, subcycle: bool, output_dt: f64, n_outputs: u64) -> Individu
         dt_base_cap: f64::INFINITY, // non-binding ⇒ rung structure is courant-invariant
         r_max: 14,
         n_limit: 14, // == r_max ⇒ limiter non-binding (pure CFL/grav rungs)
+        cache_gravity_tree: subcycle, // subcycling requires the cached tree
         subcycle_gravity: subcycle,
         grav_eta: 1.0, // gravity shares the hydro courant (courant·√(ε/|a|))
         eos: ThermalArm::Isothermal,

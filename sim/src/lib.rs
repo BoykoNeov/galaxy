@@ -465,12 +465,25 @@ pub struct IndividualConfig {
     /// rungs are exactly the CFL assignment — the non-binding setting the fixed-dt-in-
     /// disguise gates (and I4a) run at, so those paths stay byte-identical.
     pub n_limit: u32,
+    /// Rebuild the gravity tree ONCE per base block and walk it STALE on every fine
+    /// tick, instead of rebuilding a fresh tree each fine tick. When `true`, the driver
+    /// calls [`ForceSolver::rebuild_gravity_cache`] at each base-block start and the
+    /// solver's active path walks the cached tree ([`ForceSolver::gravity_active_cached`]);
+    /// requires a caching gravity solver (`TreeGravity`) for the build to actually reduce
+    /// (with a non-caching solver the trait defaults make it a correct-but-unaccelerated
+    /// full fresh walk). This is a WALK optimization independent of rung structure — it is
+    /// ON for BOTH `hydro-only` tree caching (stars on rung 0, gravity walked stale
+    /// once/block: the shipping speedup) AND `hydro+gravity` (which additionally folds
+    /// gravity into the rungs — see `subcycle_gravity`). `false` = the fresh path,
+    /// byte-identical to a bare `BarnesHut`. The stale far-cell COMs are a bounded
+    /// approximation that vanishes as `courant → 0` (convergence-gated).
+    pub cache_gravity_tree: bool,
     /// I-grav (`hydro+gravity` mode): when `true`, fold the gravitational criterion
     /// `η·√(ε/|a|)` into the per-particle `dt` (via [`individual::combined_particle_dt`])
-    /// so collisionless stars get FINITE rungs, and subcycle gravity on the stale
-    /// cached tree (the driver rebuilds it once per base block). `false` = `hydro-only`
-    /// (stars stay on rung 0, gravity all-N every fine tick). Requires the solver's
-    /// gravity to actually cache (`TreeGravity`) for the walk to reduce.
+    /// so collisionless stars get FINITE rungs (subcycled below the base block). `false`
+    /// = `hydro-only` (stars stay on rung 0). Requires `cache_gravity_tree` (subcycling
+    /// walks the cached tree for `|a_grav|` and the fine-tick force) — the driver rejects
+    /// `subcycle_gravity` without it.
     pub subcycle_gravity: bool,
     /// The gravitational-rung accuracy factor `η` (I-grav POLICY), scaling the
     /// gravitational TIMESCALE `√(ε/|a|)` in [`individual::combined_particle_dt`].
@@ -570,6 +583,12 @@ pub fn run_individual(
     }
     if config.n_outputs == 0 {
         return Err(SimError::Config("n_outputs must be >= 1".to_string()));
+    }
+    // RED placeholder — hydro-only tree caching (cache_gravity_tree without gravity
+    // rung folding) is not yet wired into the driver; GREEN replaces this with the
+    // per-block cache rebuild + the subcycle⇒cache validation.
+    if config.cache_gravity_tree && !config.subcycle_gravity {
+        todo!("hydro-only tree caching (cache_gravity_tree) not yet wired into run_individual");
     }
 
     // The individual path needs at least one finite per-particle CFL limit (gas

@@ -103,8 +103,11 @@ pub fn base_dt(dt_per_particle: &[f64], courant: f64, cap: f64) -> f64 {
 /// not a solver property.
 #[inline]
 pub fn grav_rung_dt(a_mag: f64, eps: f64, eta: f64) -> f64 {
-    let _ = (a_mag, eps, eta);
-    todo!("I-grav green: eta * (eps / a_mag).sqrt(), +inf at a_mag <= 0")
+    if a_mag > 0.0 {
+        eta * (eps / a_mag).sqrt()
+    } else {
+        f64::INFINITY
+    }
 }
 
 /// Combine the hydro CFL per-particle vector (`+∞` for collisionless stars) with the
@@ -120,8 +123,16 @@ pub fn combined_particle_dt(
     eps: f64,
     eta: f64,
 ) -> Vec<f64> {
-    let _ = (hydro_dt, grav_accel_mag, eps, eta);
-    todo!("I-grav green: elementwise min(hydro_dt[i], grav_rung_dt(grav_accel_mag[i], eps, eta))")
+    assert_eq!(
+        hydro_dt.len(),
+        grav_accel_mag.len(),
+        "hydro and gravity per-particle vectors must be the same length"
+    );
+    hydro_dt
+        .iter()
+        .zip(grav_accel_mag)
+        .map(|(&h, &a)| h.min(grav_rung_dt(a, eps, eta)))
+        .collect()
 }
 
 /// Assign each particle to a power-of-two rung (I2): `r_i = clamp(⌈log2(dt_base /

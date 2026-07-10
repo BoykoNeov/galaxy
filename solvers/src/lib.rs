@@ -10,7 +10,7 @@ pub mod lbvh;
 pub mod potential;
 pub mod sph;
 
-pub use barnes_hut::{BarnesHut, BuildMode, FlatNode, FlatTree};
+pub use barnes_hut::{BarnesHut, BuildMode, FlatNode, FlatTree, TreeGravity};
 pub use direct_sum::DirectSum;
 pub use lbvh::{
     reference_aggregate, reference_flatten, reference_karras, reference_morton, reference_sort,

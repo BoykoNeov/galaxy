@@ -509,6 +509,7 @@ pub struct FlatNode {
 /// accumulates contributions in the *same* order the recursion does — hence
 /// [`FlatTree::accel`] reproduces `accel_node` **bit-for-bit** in f64 (guarded by a
 /// unit test). The GPU kernel is the f32 mirror of that same walk.
+#[derive(Clone)]
 pub struct FlatTree {
     /// DFS pre-order nodes; the root is index 0.
     pub nodes: Vec<FlatNode>,
@@ -627,6 +628,56 @@ fn flatten_node(tree: &Octree, node: usize, out: &mut Vec<FlatNode>, bodies: &mu
     }
     // The next node after this whole subtree — the skip target when not opened.
     out[me].next = out.len() as u32;
+}
+
+/// [`BarnesHut`] plus a cached [`FlatTree`] for the I-grav stale-tree active gravity
+/// walk (`hydro+gravity` mode). [`BarnesHut`] is `Copy` and cannot hold the (owned,
+/// `Vec`-backed) tree, so the cache lives in this wrapper. As a [`ForceSolver`] its
+/// full `accelerations` delegates to the wrapped solver bit-for-bit (so any run that
+/// only calls `accelerations` is byte-identical to using `BarnesHut` directly); the
+/// stale-tree methods add the active-subset walk.
+///
+/// Lifecycle: the individual stepper calls [`rebuild_gravity_cache`](ForceSolver::rebuild_gravity_cache)
+/// ONCE per base block (freezing the tree topology + cell multipoles at the block-start
+/// positions), then [`gravity_active_cached`](ForceSolver::gravity_active_cached) every
+/// fine tick at the CURRENT positions. Near-field leaf sources are read from the current
+/// `state.pos` (drift-all keeps them exact); only the far cell COMs are stale — a
+/// bounded, converging approximation validated by the stale-vs-rebuild convergence gate.
+#[derive(Clone)]
+pub struct TreeGravity {
+    /// The wrapped monopole Barnes-Hut solver (g / softening / theta / build_mode).
+    pub bh: BarnesHut,
+    /// The tree frozen at the last `rebuild_gravity_cache` (block start). `None`
+    /// until the first rebuild.
+    cache: Option<FlatTree>,
+}
+
+impl TreeGravity {
+    /// Wrap a [`BarnesHut`] with an (initially empty) stale-tree cache.
+    pub fn new(bh: BarnesHut) -> Self {
+        TreeGravity { bh, cache: None }
+    }
+}
+
+impl ForceSolver for TreeGravity {
+    fn accelerations(&mut self, state: &State, acc: &mut [DVec3]) {
+        // Full fresh pass — byte-identical to the wrapped BarnesHut.
+        self.bh.accelerations(state, acc);
+    }
+
+    fn potential_energy(&self, state: &State) -> f64 {
+        self.bh.potential_energy(state)
+    }
+
+    fn rebuild_gravity_cache(&mut self, state: &State) {
+        let _ = state;
+        todo!("I-grav green: cache = Some(FlatTree::build(&state.pos, &state.mass)) (N>0)")
+    }
+
+    fn gravity_active_cached(&mut self, state: &State, active: &[usize], acc: &mut [DVec3]) {
+        let _ = (state, active, acc);
+        todo!("I-grav green: walk the cached FlatTree at CURRENT positions for active targets")
+    }
 }
 
 #[cfg(test)]

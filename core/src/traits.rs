@@ -52,6 +52,26 @@ pub trait ForceSolver {
         self.accel_and_dudt(state, acc, dudt);
     }
 
+    /// Rebuild the cached spatial structure for the stale-tree active gravity walk
+    /// (I-grav, `hydro+gravity` mode). The individual stepper calls this ONCE at each
+    /// BASE-BLOCK start; [`gravity_active_cached`](Self::gravity_active_cached) then
+    /// walks the cached structure on every fine tick. The default is a no-op — a
+    /// solver with no cacheable structure ignores it and walks all-N fresh each tick.
+    fn rebuild_gravity_cache(&mut self, _state: &State) {}
+
+    /// Active-subset gravity walk against the structure cached by the last
+    /// [`rebuild_gravity_cache`](Self::rebuild_gravity_cache), evaluated at the
+    /// CURRENT positions in `state` (I-grav). Fills `acc[i]` for `i` in `active`;
+    /// entries outside `active` are unspecified. Because the individual stepper
+    /// drifts ALL particles every fine tick, the near-field (opened-leaf) sources
+    /// read from `state.pos` are current — only the far-field cell multipoles are
+    /// stale (a bounded, converging approximation). The default computes the FULL
+    /// fresh pass and ignores `active` (correct but unreduced); `TreeGravity`
+    /// overrides it to walk the cached `FlatTree`.
+    fn gravity_active_cached(&mut self, state: &State, _active: &[usize], acc: &mut [DVec3]) {
+        self.accelerations(state, acc);
+    }
+
     /// Total gravitational potential energy, using the SAME softened kernel as
     /// `accelerations` so energy diagnostics stay consistent with the forces.
     fn potential_energy(&self, state: &State) -> f64;

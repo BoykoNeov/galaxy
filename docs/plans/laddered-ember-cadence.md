@@ -731,22 +731,36 @@ against, exactly as the LBVH/G-series lineage did.
   and — the partial-active/stale-neighbour CORRECTNESS — the I4a driver
   convergence + I4b limiter + I5 thermal + I8 dispatch gates ALL now run through
   the wired active path and stay green. (I6, I7)
-- **I6 — full-res producibility + speedup validation, `hydro-only` mode (the
-  real "done" for lever a).** Run the full-res `gasrich` showpiece through
-  `run_individual` in `hydro-only` mode; confirm it completes, converges to the
-  reference, and delivers the ~1.68× hydro-only speedup (or explain the gap).
-  "Done" = **completes AND converges AND the measured speedup justifies the
-  path**, not "tests green." At this point the toggle ships at `hydro-only` and
-  the 30% bar is cleared.
-  - **I6→I-grav FULL star-spread gate (advisor, 2026-07-09, build phase).** I6
-    emits FULL-res snapshots; re-running `grav-rung-spread` on them is a ~30s
-    xtask (no regen), so **re-measure and REPORT the FULL star gravitational
-    rung spread at the I6→I-grav boundary** before any I-grav commits. I0b's
-    +13% (`hydro+gravity` 1.90×) was QUICK/one-seed; the physics predicts the
-    spread WIDENS at FULL (deeper resolved wells ⇒ higher peak |a| ⇒ finer rungs
-    for the fast stars, broader tail), so the FULL number is likely +30–40%, not
-    +13%. Not an abort gate (the user chose to build the layer) — a **record**
-    gate: land the real number before spending the I-grav design budget.
+- **I6 — full-res producibility + speedup validation, `hydro-only` mode. DONE
+  2026-07-10 (harness f9c351b, `#[ignore]` full-res run).** Full-res `gasrich`
+  (24000 particles / 7000 gas, T=30, 61 snapshots) through `run_individual`
+  `hydro-only` at r_max=14: **COMPLETED in 1675.9 s (~27.9 min); wall-clock
+  speedup vs the A5 adaptive baseline (2868 s) = 1.71×** (ABOVE the ~1.68×
+  projection — the FULL win survived); **CONVERGED** (short-prefix err(0.25)=3.26e-3
+  → err(0.125)=1.06e-3, ~3× reduction under courant halving); CFL bound dynamic
+  range 30.8× (min 3.80e-3, max 1.17e-1, consistent with A5's temporal 34.2×).
+  So all three I6 criteria met — completes AND converges AND the 1.71× measured
+  speedup justifies the path. **The toggle ships at `hydro-only`; the 30% bar is
+  cleared with room to spare.** (A QUICK pericenter A/B first showed 1.27×; the
+  FULL number is higher because the denser knots widen the *gas* rung spread.)
+  Snapshots RETAINED at `M:\claud_projects\temp\i6_individual`. NOTE: the 1.71× is
+  vs the *documented* A5 baseline (2868 s), not a same-session paired adaptive run
+  — a same-session A/B would tighten it, but the margin over 1.3× is comfortable.
+  - **I6→I-grav FULL star-spread gate — DONE 2026-07-10, and it says STOP.**
+    Ran `grav-rung-spread` on the retained FULL I6 snapshots. At the star
+    gravitational pericenter (t=30, θ cross-check 8.7e-2 = within BH tolerance,
+    rungs robust NOT an opening-angle artefact): **star walk factor drop-finest
+    1.18×** — *narrower* than I0b's QUICK 1.42×, the OPPOSITE of the "FULL widens"
+    prediction. With 17000 stars now dominating N, **64% bunch on the single
+    finest rung** at the merger core, so dropping it leaves almost no spread.
+    Amdahl reprojection with the MEASURED 1.18×: **`hydro+gravity` → 1.79×, only
+    +6% over hydro-only's 1.68×**. **VERDICT: ship `hydro-only` and STOP — the
+    I-grav design surface (stale-tree gravity walk + gravity prediction +
+    gravitational-dt floor) is not worth ~1.79× vs the already-shipped 1.71×.**
+    The record gate was meant to "land the real number before spending the I-grav
+    budget"; the number says don't spend it. This REOPENS the 2026-07-09
+    "build the gravity layer" scope call (which assumed FULL would widen) — a
+    user decision, now informed by the real number.
 - **I-grav — gravity subcycling (`hydro+gravity` mode; the lever-b follow-on,
   ONLY after I0b clears).** Gated behind `[sim.individual].mode="hydro+gravity"`.
   Red: (i) star gravitational rung assignment + floor (pure fn, like I2); (ii)

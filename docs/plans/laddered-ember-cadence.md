@@ -830,11 +830,20 @@ against, exactly as the LBVH/G-series lineage did.
     Run early-killed at snap 40/61 (verdict unambiguous). **The QUICK 2.55× was a
     QUICK-only artifact** — QUICK never reaches the supersonic (Mach ~10) pericenter
     infall that triggers the flood. At FULL, `hydro+gravity` has NO perf benefit (floods
-    → slow). **This SHARPENS the M-cache causal picture: n=2 stale-tree configs now flood
-    (cached-hydro-only + hydro+gravity) from the same IC/seed while the one fresh-tree
-    config does not** — strongly implicating staleness as causal (not a chaotic one-off),
-    honest caveat that the two stale configs share the mechanism (reproducibility, not an
-    independent 2nd sample). **DECISION (user call surfaced): ship `hydro-only` fresh
+    → slow). **What this rules OUT: a cached-hydro-only WIRING artifact** — hydro+gravity
+    reaches the stale tree through a DIFFERENT code path (`subcycle_gravity`+`TreeGravity`,
+    not `cache_gravity_tree`), so the flood is a real property of walking a stale tree, not
+    a one-config bug. **It does NOT sharpen the root cause** (an earlier "n=2 ⇒ staleness
+    causal" note here was overstated, corrected): the two stale configs SHARE the gas-
+    gravity computation (same stale far-COMs, same one-block horizon; stars-kicked-
+    differently is 2nd-order on the gas field driving the flood), so this is the SAME
+    perturbation reproduced (n=1 with a minor variation), not two independent draws. It
+    cannot distinguish staleness-specific causation from chaos-generic-to-merger-pericenters
+    (any perturbation of this magnitude diverges into the flood); the discriminating control
+    is a NON-stale comparable-size perturbation (fresh seed ensemble / position jitter) that
+    does NOT flood — not run. First-principles sign hedge stands (naive staleness under-
+    attracts → higher dt, opposite of observed). Root cause remains unresolved. **DECISION
+    (user call surfaced): ship `hydro-only` fresh
     (1.71×) as default — now for a SECOND, stronger reason than the record gate's +6%:
     hydro+gravity is actively WORSE at FULL, not marginally better. Keep hydro+gravity as
     a droppable toggle for scaling/completeness; do NOT default to it.** Convergence/

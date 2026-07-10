@@ -266,6 +266,13 @@ fn full_res_gasrich_individual_completes_and_converges() {
 /// cheap prefix does NOT reach pericenter, so a passing convergence check means
 /// "early dynamics converge", NOT "no over-collapse" — the full-run CFL range is
 /// the over-collapse verdict.
+///
+/// HONEST CAVEAT: on the 2026-07-11 investigation run this floods at pericenter and
+/// was EARLY-KILLED at snap 40/61 once the verdict was in (see plan M-validate FULL /
+/// mcache_mechanism.md), so the completion + prefix-convergence assertions below have
+/// never actually run to green end-to-end. Low risk — the always-on QUICK
+/// hydro+gravity smoke and the structurally-identical hydro-only FULL test both pass,
+/// and the extra logic here is `eprintln!` — but it is unverified to completion.
 #[test]
 #[ignore = "M-validate FULL: full-res gasrich hydro+gravity is ~30 min–2.6 h; run with --release --ignored"]
 fn full_res_gasrich_hydrogravity_completes_and_converges() {

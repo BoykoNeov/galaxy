@@ -43,7 +43,10 @@ fn grav_rung_dt_is_monotone_decreasing_in_accel() {
     let mut prev = INF;
     for &a in &[0.01_f64, 0.1, 1.0, 10.0, 100.0] {
         let dt = grav_rung_dt(a, eps, eta);
-        assert!(dt < prev, "dt must strictly decrease as |a| grows: {dt} !< {prev}");
+        assert!(
+            dt < prev,
+            "dt must strictly decrease as |a| grows: {dt} !< {prev}"
+        );
         prev = dt;
     }
 }

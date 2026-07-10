@@ -106,6 +106,31 @@ pub fn density_adaptive_serial(
     density_impl(pos, mass, cfg, h_init, false)
 }
 
+/// Refresh `(rho, h)` for the `active` targets ONLY (I7 — the individual-timestep
+/// efficiency path), writing each result in place at its own index. The grid and
+/// per-particle bracket seeds are computed over ALL particles (density is a
+/// per-target function of positions, independent of which targets are active), so
+/// every active target's solve is **bit-identical** to what [`density_adaptive`]
+/// would produce — the active pass is a strict subset of the full pass, not an
+/// approximation. Inactive entries of `rho`/`h` are left untouched (the caller's
+/// persistent scratch, refreshed once per base block when all rungs synchronize).
+///
+/// The per-target bracket hint is `h[i]` (its previous converged value, a warm
+/// start); a non-finite or non-positive `h[i]` falls back to the occupancy seed,
+/// so a zero-initialized `h` on the first call reproduces the `h_init = None` path
+/// of [`density_adaptive`]. `rho`, `h`, `pos`, `mass` all have length `pos.len()`.
+pub fn density_adaptive_active(
+    pos: &[DVec3],
+    mass: &[f64],
+    cfg: &DensityConfig,
+    active: &[usize],
+    rho: &mut [f64],
+    h: &mut [f64],
+) {
+    let _ = (pos, mass, cfg, active, rho, h);
+    todo!("I7 green: build DensitySetup over all gas, solve_one over the active subset")
+}
+
 fn density_impl(
     pos: &[DVec3],
     mass: &[f64],

@@ -21,6 +21,37 @@ pub trait ForceSolver {
         dudt.fill(0.0);
     }
 
+    /// Active-subset acceleration pass (I7 — the individual-timestep efficiency
+    /// path). Fills `acc[i]` for the `active` targets (global indices) with the
+    /// same acceleration `accelerations` would produce; `acc` entries outside
+    /// `active` are left unspecified (the individual stepper only reads the ones
+    /// it is about to kick). A solver MAY reduce its per-call cost to the active
+    /// subset (SPH gathers only the active gas, reading persistent ρ/h for the
+    /// inactive neighbours it drifted). The default computes the FULL pass and
+    /// ignores `active`, so every existing solver is correct-but-unaccelerated for
+    /// free; `GravitySph` overrides it to gather hydro on the active gas only.
+    /// Requires `acc.len() == state.len()`.
+    fn accelerations_active(&mut self, state: &State, _active: &[usize], acc: &mut [DVec3]) {
+        self.accelerations(state, acc);
+    }
+
+    /// Fused active-subset acceleration + `du/dt` pass (I7, thermal arm): the
+    /// [`accel_and_dudt`](Self::accel_and_dudt) analogue of
+    /// [`accelerations_active`](Self::accelerations_active). Fills `acc[i]`/`dudt[i]`
+    /// for the `active` targets; entries outside `active` are unspecified. The
+    /// default computes the full fused pass and ignores `active`; `GravitySph`
+    /// overrides it to gather on the active gas only.
+    /// Requires `acc.len() == dudt.len() == state.len()`.
+    fn accel_and_dudt_active(
+        &mut self,
+        state: &State,
+        _active: &[usize],
+        acc: &mut [DVec3],
+        dudt: &mut [f64],
+    ) {
+        self.accel_and_dudt(state, acc, dudt);
+    }
+
     /// Total gravitational potential energy, using the SAME softened kernel as
     /// `accelerations` so energy diagnostics stay consistent with the forces.
     fn potential_energy(&self, state: &State) -> f64;

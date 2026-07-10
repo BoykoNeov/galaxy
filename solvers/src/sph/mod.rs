@@ -24,11 +24,12 @@ pub use cfl::{
     coupled_pairs, max_stable_dt, max_stable_dt_per_particle, validate_dt, CflViolation,
 };
 pub use density::{
-    density_adaptive, density_adaptive_serial, density_fixed, DensityConfig, DensityResult,
+    density_adaptive, density_adaptive_active, density_adaptive_serial, density_fixed,
+    DensityConfig, DensityResult,
 };
 pub use forces::{
-    hydro_accel_and_dudt, hydro_accel_and_dudt_serial, hydro_accelerations,
-    hydro_accelerations_serial, Eos, HydroParams,
+    hydro_accel_and_dudt, hydro_accel_and_dudt_active, hydro_accel_and_dudt_serial,
+    hydro_accelerations, hydro_accelerations_serial, Eos, HydroParams,
 };
 pub use gravity_sph::GravitySph;
 pub use grid::HashGrid;

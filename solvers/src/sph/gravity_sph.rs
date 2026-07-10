@@ -28,8 +28,16 @@ pub struct GravitySph<G: ForceSolver> {
     pub density_cfg: DensityConfig,
     /// Warm-start smoothing lengths for the gas subset (bracket hint only; the
     /// converged h is position-determined). `None` on the first call, or when
-    /// the gas count changes.
+    /// the gas count changes. On the I7 active path this doubles as the persistent
+    /// `h` scratch: active targets overwrite their entry each fine tick, inactive
+    /// ones keep their last-active value (read as stale neighbour `h`).
     h_hint: Option<Vec<f64>>,
+    /// Persistent gas-subset density scratch for the I7 active path (`accelerations_active`
+    /// / `accel_and_dudt_active`): active targets refresh their entry each fine tick,
+    /// inactive neighbours are read stale. Paired with `h_hint` as the (ρ, h) scratch.
+    /// `None` until the first active call (or after a gas-count change) initializes it
+    /// with a full over-all-gas refresh. Untouched by the full `accelerations` path.
+    rho_scratch: Option<Vec<f64>>,
 }
 
 impl<G: ForceSolver> GravitySph<G> {
@@ -40,6 +48,7 @@ impl<G: ForceSolver> GravitySph<G> {
             params,
             density_cfg,
             h_hint: None,
+            rho_scratch: None,
         }
     }
 
@@ -50,6 +59,7 @@ impl<G: ForceSolver> GravitySph<G> {
             params,
             density_cfg,
             h_hint: None,
+            rho_scratch: None,
         }
     }
 }
@@ -131,6 +141,22 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
             dudt[i] = dudt_hydro[k];
         }
         self.h_hint = Some(dens.h);
+    }
+
+    fn accelerations_active(&mut self, state: &State, active: &[usize], acc: &mut [DVec3]) {
+        let _ = (state, active, acc);
+        todo!("I7 green: gravity all-N + two-pass active-subset hydro on the (ρ,h) scratch")
+    }
+
+    fn accel_and_dudt_active(
+        &mut self,
+        state: &State,
+        active: &[usize],
+        acc: &mut [DVec3],
+        dudt: &mut [f64],
+    ) {
+        let _ = (state, active, acc, dudt);
+        todo!("I7 green: gravity all-N + two-pass active-subset fused hydro on the (ρ,h) scratch")
     }
 
     fn potential_energy(&self, state: &State) -> f64 {

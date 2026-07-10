@@ -162,6 +162,32 @@ pub fn hydro_accel_and_dudt_serial(
     hydro_accel_and_dudt_impl(pos, vel, mass, rho, h, u, params, false)
 }
 
+/// Active-subset fused hydro pass (I7 — the individual-timestep efficiency path):
+/// compute `(acc, du/dt)` for the `active` targets ONLY, returning a vector
+/// aligned to `active` (`result[k]` is the hydro contribution on target
+/// `active[k]`). The neighbour grid is built at the GLOBAL `SUPPORT·h_max` over the
+/// FULL `h` slice (all gas) exactly as the full pass does, and each active
+/// target's gather is the SAME per-target computation as [`hydro_accel_and_dudt`]
+/// — so with `active = 0..n` the result is **bit-identical** to the full pass,
+/// element for element. Neighbour `rho[j]`/`h[j]` are read from the caller's
+/// persistent scratch (the inactive ones are stale — the sole bounded I7
+/// approximation; positions `pos` are always exact because the stepper drifts
+/// all particles). Every slice has length `pos.len()`.
+#[allow(clippy::too_many_arguments)]
+pub fn hydro_accel_and_dudt_active(
+    pos: &[DVec3],
+    vel: &[DVec3],
+    mass: &[f64],
+    rho: &[f64],
+    h: &[f64],
+    u: &[f64],
+    params: &HydroParams,
+    active: &[usize],
+) -> Vec<(DVec3, f64)> {
+    let _ = (pos, vel, mass, rho, h, u, params, active);
+    todo!("I7 green: build HydroCtx over all gas, force_one over the active subset")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn hydro_accel_and_dudt_impl(
     pos: &[DVec3],

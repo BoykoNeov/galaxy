@@ -12,15 +12,17 @@
 //!
 //! GATE DESIGN:
 //!   * ANCHOR — a FRESH cache (rebuilt at the current state) walked over ALL targets
-//!     is BIT-IDENTICAL to `BarnesHut::accelerations`: `FlatTree::accel` reproduces
-//!     `Octree::accel_node` bit-for-bit and the fill is a pure per-target map, so
-//!     zero drift + all active ⇒ the walk IS the full solver.
+//!     reproduces `BarnesHut::accelerations` to REASSOCIATION precision (rel < 1e-11,
+//!     the same tolerance `flat_tree_traversal_matches_accel_node` uses): the flat
+//!     walk and the recursive `accel_node` associate their sums differently, so this
+//!     is not bit-for-bit, but the walk IS the full solver to f64 precision.
 //!   * SUBSET — on that fresh cache a subset walk equals the full accel at exactly
 //!     the active indices (picks the right targets; writes only them).
-//!   * CONVERGENCE — the load-bearing one: cache at p0, walk at p1 = p0 + v·δ (the
-//!     stale far-COMs, current near-field), vs a fresh rebuild at p1. The error → 0
-//!     as δ → 0 (exactly 0 at δ = 0) and shrinks with δ ⇒ far-COM staleness is a
-//!     converging approximation, not a fixed bias.
+//!   * CONVERGENCE — the load-bearing one: cache at p0, walk at p1 = p0 + v·δ (stale
+//!     far-COMs, current near-field), vs a FRESH FLAT walk rebuilt at p1 (flat-vs-flat
+//!     isolates the staleness from the flat-vs-recursive reassociation). The error is
+//!     EXACTLY 0 at δ = 0 and shrinks with δ ⇒ far-COM staleness is a converging
+//!     approximation, not a fixed bias.
 
 use galaxy_core::{DVec3, ForceSolver, State};
 use galaxy_solvers::{BarnesHut, TreeGravity};
@@ -65,8 +67,28 @@ fn full_accel(state: &State) -> Vec<DVec3> {
     a
 }
 
+/// A fresh flat walk over ALL targets: rebuild the cache at `state`, walk everyone.
+/// The flat-vs-flat reference for the convergence gate (bit-exact to the stale walk
+/// at zero drift, isolating far-COM staleness from flat-vs-recursive reassociation).
+fn fresh_flat_accel(state: &State) -> Vec<DVec3> {
+    let n = state.len();
+    let mut tg = TreeGravity::new(bh());
+    tg.rebuild_gravity_cache(state);
+    let all: Vec<usize> = (0..n).collect();
+    let mut a = vec![DVec3::ZERO; n];
+    tg.gravity_active_cached(state, &all, &mut a);
+    a
+}
+
+fn max_rel(a: &[DVec3], b: &[DVec3]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (*x - *y).length() / y.length().max(1e-300))
+        .fold(0.0_f64, f64::max)
+}
+
 #[test]
-fn fresh_cache_all_active_equals_barnes_hut_bit_identical() {
+fn fresh_cache_all_active_matches_barnes_hut_to_reassociation() {
     let state = cloud(1, 400);
     let n = state.len();
     let a_full = full_accel(&state);
@@ -77,9 +99,11 @@ fn fresh_cache_all_active_equals_barnes_hut_bit_identical() {
     let mut a_walk = vec![DVec3::ZERO; n];
     tg.gravity_active_cached(&state, &all, &mut a_walk);
 
-    assert_eq!(
-        a_walk, a_full,
-        "fresh-cache all-active walk must equal BarnesHut::accelerations bit-for-bit"
+    let rel = max_rel(&a_walk, &a_full);
+    assert!(
+        rel < 1e-11,
+        "fresh-cache all-active walk must reproduce BarnesHut::accelerations to \
+         reassociation precision: rel {rel:e}"
     );
 }
 
@@ -97,7 +121,11 @@ fn fresh_cache_subset_matches_full_at_active_indices() {
     let mut a = vec![sentinel; n];
     tg.gravity_active_cached(&state, &subset, &mut a);
     for &i in &subset {
-        assert_eq!(a[i], a_full[i], "subset walk differs from full at active {i}");
+        let rel = (a[i] - a_full[i]).length() / a_full[i].length().max(1e-300);
+        assert!(
+            rel < 1e-11,
+            "subset walk differs from full at active {i}: rel {rel:e}"
+        );
     }
 }
 
@@ -119,7 +147,7 @@ fn stale_walk_converges_to_the_rebuilt_reference_as_drift_shrinks() {
         }
         let mut a_stale = vec![DVec3::ZERO; n];
         tg.gravity_active_cached(&s, &all, &mut a_stale); // cached tree (p0) + current pos (p1)
-        let a_fresh = full_accel(&s); // rebuild-every-tick reference at p1
+        let a_fresh = fresh_flat_accel(&s); // rebuild-every-tick FLAT reference at p1
         a_stale
             .iter()
             .zip(&a_fresh)
@@ -128,11 +156,18 @@ fn stale_walk_converges_to_the_rebuilt_reference_as_drift_shrinks() {
     };
 
     // Zero drift: the stale walk IS the fresh walk (same positions) — exactly 0.
-    assert_eq!(err_at(&mut tg, 0.0), 0.0, "zero-drift stale walk must be exact");
+    assert_eq!(
+        err_at(&mut tg, 0.0),
+        0.0,
+        "zero-drift stale walk must be exact"
+    );
 
     let e_big = err_at(&mut tg, 0.02);
     let e_small = err_at(&mut tg, 0.01);
-    assert!(e_big > 0.0, "a real drift must produce a nonzero staleness error");
+    assert!(
+        e_big > 0.0,
+        "a real drift must produce a nonzero staleness error"
+    );
     assert!(
         e_small < e_big,
         "far-COM staleness must CONVERGE: err({:.3}) = {e_small:.3e} !< err({:.3}) = {e_big:.3e}",

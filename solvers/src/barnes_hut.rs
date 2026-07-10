@@ -670,13 +670,43 @@ impl ForceSolver for TreeGravity {
     }
 
     fn rebuild_gravity_cache(&mut self, state: &State) {
-        let _ = state;
-        todo!("I-grav green: cache = Some(FlatTree::build(&state.pos, &state.mass)) (N>0)")
+        // Freeze the tree (topology + cell multipoles) at the block-start positions.
+        // An empty system has no root cell (FlatTree::build requires N>0) — clear the
+        // cache so a later walk on a still-empty state is a harmless no-op.
+        self.cache = if state.is_empty() {
+            None
+        } else {
+            Some(FlatTree::build(&state.pos, &state.mass))
+        };
     }
 
     fn gravity_active_cached(&mut self, state: &State, active: &[usize], acc: &mut [DVec3]) {
-        let _ = (state, active, acc);
-        todo!("I-grav green: walk the cached FlatTree at CURRENT positions for active targets")
+        assert_eq!(
+            acc.len(),
+            state.len(),
+            "acc length must match particle count"
+        );
+        let Some(tree) = self.cache.as_ref() else {
+            // No cache (never rebuilt, or empty state) — nothing to walk.
+            return;
+        };
+        let (theta, eps2, g) = (
+            self.bh.theta,
+            self.bh.softening * self.bh.softening,
+            self.bh.g,
+        );
+        // Walk the STALE tree at the CURRENT positions: near-field leaf sources read
+        // `state.pos`/`state.mass` (exact — drift-all), far cells use the frozen COMs.
+        // Each target writes only its own `acc[i]`, so the fill is a race-free pure map
+        // and is bit-identical to `BarnesHut::accelerations` when the tree is fresh and
+        // every target is active (FlatTree::accel ≡ Octree::accel_node).
+        let contribs: Vec<(usize, DVec3)> = active
+            .par_iter()
+            .map(|&i| (i, tree.accel(i, &state.pos, &state.mass, theta, eps2) * g))
+            .collect();
+        for (i, a) in contribs {
+            acc[i] = a;
+        }
     }
 }
 

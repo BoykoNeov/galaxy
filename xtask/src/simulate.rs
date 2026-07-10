@@ -19,14 +19,14 @@ use galaxy_core::{LeapfrogKdk, State, StaticBackground};
 use galaxy_gpu::GpuResidentLeapfrog;
 use galaxy_io::Header;
 use galaxy_sim::{
-    plan_block, run, run_adaptive, AdaptiveConfig, DirectorySink, RunSummary, SimConfig,
-    SnapshotSink,
+    plan_block, run, run_adaptive, run_individual, AdaptiveConfig, DirectorySink, IndividualConfig,
+    RunSummary, SimConfig, SnapshotSink, ThermalArm,
 };
 use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
 use crate::cfl_guard::{CflGuard, C_CFL};
-use crate::spec::{AdaptiveSpec, Scenario};
+use crate::spec::{AdaptiveSpec, IndividualMode, IndividualSpec, Scenario};
 use crate::{G, THETA};
 
 /// Which force backend runs the gas-rich (`GravitySph`) branch of the simulate step.
@@ -85,6 +85,32 @@ pub fn simulate_snapshots(
                 ..HydroParams::default()
             };
             let density_cfg = DensityConfig::default();
+
+            // Individual (per-particle rung) timesteps take precedence when enabled at
+            // `mode = hydro-only` (plan laddered-ember-cadence, lever a). CPU-only per
+            // Scope; the parse-time mutual-exclusion keeps this from colliding with
+            // `[sim.adaptive]`, and `mode = fixed-dt` drops through to the fixed-dt path
+            // below (the layer under the toggle). No `CflGuard`: `run_individual` sizes
+            // `dt_base` from the per-particle CFL bound each base block, so an over-large
+            // fixed `dt` (now only the output cadence) can no longer make it unstable.
+            if let Some(ind) = &s.individual {
+                if ind.mode == IndividualMode::HydroOnly {
+                    if backend != Backend::Cpu {
+                        return Err("[sim.individual] timesteps are CPU-only; run the gas \
+                                    path on the CPU backend"
+                            .into());
+                    }
+                    let ind_cfg = build_individual_config(s, ind)?;
+                    let gravity = BarnesHut::new(G, s.eps, THETA);
+                    let mut solver = GravitySph::new(gravity, hydro, density_cfg);
+                    let mut sink = DirectorySink::new(snap_dir)?;
+                    let summary =
+                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?;
+                    return Ok(summary.run);
+                }
+                // `mode = fixed-dt`: fall through to the fixed-dt path below.
+            }
+
             match (backend, s.adaptive) {
                 // Fixed-dt CPU (adaptive off): the pre-A4 path. No separate t=0 pre-check
                 // — `run` emits the t=0 IC first and `CflGuard` validates before
@@ -175,6 +201,46 @@ fn build_adaptive_config(
         courant: a.courant,
         max_growth: a.max_growth,
         block_steps: a.block_steps,
+        output_dt: s.snapshot_every as f64 * s.dt,
+        n_outputs: s.n_steps / s.snapshot_every,
+        softening: s.eps,
+        rng_seed: s.seed,
+        config_hash: 0,
+        units: "nbody-G1".to_string(),
+    })
+}
+
+/// Build the [`IndividualConfig`] for a gas-rich scenario's individual-timestep run.
+/// Like [`build_adaptive_config`], the output cadence is derived so the run emits on the
+/// SAME time grid the fixed-dt path would (`output_dt = snapshot_every · dt`,
+/// `n_outputs = n_steps / snapshot_every`) — `dt` becomes purely the output cadence, the
+/// sub-steps are CFL-derived rungs. Requires `n_steps` a clean multiple of
+/// `snapshot_every` (a whole output grid); rejects otherwise.
+///
+/// The EOS arm is `Isothermal`: scenarios express only isothermal gas (a single global
+/// `c_s`); the adiabatic scenario wiring is deferred (E-series), so the adiabatic
+/// individual arm is reachable only from sim unit tests, not from a scenario.
+fn build_individual_config(
+    s: &Scenario,
+    ind: &IndividualSpec,
+) -> Result<IndividualConfig, Box<dyn std::error::Error>> {
+    if s.snapshot_every == 0 {
+        return Err("snapshot_every must be >= 1".into());
+    }
+    if !s.n_steps.is_multiple_of(s.snapshot_every) {
+        return Err(format!(
+            "individual dt needs a whole output grid: n_steps ({}) must be a multiple of \
+             snapshot_every ({})",
+            s.n_steps, s.snapshot_every
+        )
+        .into());
+    }
+    Ok(IndividualConfig {
+        courant: ind.courant,
+        dt_base_cap: ind.dt_base_cap,
+        r_max: ind.r_max,
+        n_limit: ind.n_limit,
+        eos: ThermalArm::Isothermal,
         output_dt: s.snapshot_every as f64 * s.dt,
         n_outputs: s.n_steps / s.snapshot_every,
         softening: s.eps,

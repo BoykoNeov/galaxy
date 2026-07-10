@@ -781,6 +781,47 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
         return Err("sim snapshot cadence must be positive".into());
     }
 
+    // Gas-driver toggles ([sim.adaptive] vs [sim.individual]): both size the gas dt, so
+    // declaring both is an ambiguous, contradictory intent — reject rather than silently
+    // pick one. (Independent of gas presence: a gas-free scenario ignores both, but the
+    // contradiction is still a config error worth catching early.)
+    if s.sim.adaptive.is_some() && s.sim.individual.is_some() {
+        return Err(
+            "sim declares both [sim.adaptive] and [sim.individual] — they both \
+                    size the gas timestep; pick one"
+                .into(),
+        );
+    }
+    if let Some(ind) = &s.sim.individual {
+        // The hydro+gravity layer (I-grav / lever b) is not yet implemented — fail loud
+        // instead of silently degrading to hydro-only.
+        if ind.mode == IndividualMode::HydroGravity {
+            return Err(
+                "[sim.individual] mode = \"hydro+gravity\" is not yet implemented \
+                        (the gravity-subcycling layer is unbuilt); use \"hydro-only\""
+                    .into(),
+            );
+        }
+        if !(ind.courant.is_finite() && ind.courant > 0.0 && ind.courant <= 1.0) {
+            return Err(format!(
+                "[sim.individual] courant must be in (0, 1], got {}",
+                ind.courant
+            ));
+        }
+        if !(1..=60).contains(&ind.r_max) {
+            return Err(format!(
+                "[sim.individual] r_max must be in [1, 60], got {}",
+                ind.r_max
+            ));
+        }
+        if ind.dt_base_cap.is_nan() || ind.dt_base_cap <= 0.0 {
+            return Err(format!(
+                "[sim.individual] dt_base_cap must be positive (may be inf), got {}",
+                ind.dt_base_cap
+            ));
+        }
+    }
+
     // Look: splat/framing knobs + palette/ramp lengths tied to the model.
     positive(f64::from(s.look.splat_size), "look splat_size")?;
     if !(s.look.frame_percentile > 0.0 && s.look.frame_percentile <= 1.0) {

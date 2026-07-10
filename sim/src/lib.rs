@@ -407,6 +407,29 @@ fn emit_adaptive(
 // arm is I5; `[sim.individual].mode` scenario/snapshot wiring is owed before I6.
 // ---------------------------------------------------------------------------
 
+/// Which equation-of-state arm [`run_individual`] steps the gas on — the physics
+/// stepper choice INSIDE the driver, orthogonal to the `mode` (which *driver path*)
+/// that the scenario layer selects. Derived from the scenario's gas EOS (the solver's
+/// [`Eos`](galaxy_solvers::sph::Eos)), NOT from `mode`: `Isothermal` routes to the
+/// [`ActiveSetKdk`](individual::ActiveSetKdk) mechanic (no `u` evolution — the frozen
+/// I3/I4a/I4b byte-path), `Adiabatic` routes to
+/// [`ActiveSetKdkThermal`](individual::ActiveSetKdkThermal), which evolves the
+/// per-particle internal energy `u` and applies the positive-`u` floor `u_min` (E4b).
+/// A single `run_individual` dispatches on this — there is no second driver.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ThermalArm {
+    /// Isothermal gas: step `vel`/`pos` only, `u` untouched (bit-identical to the
+    /// pre-thermal individual byte-path).
+    Isothermal,
+    /// Adiabatic gas: also evolve `u` via `du/dt`, flooring the just-kicked active
+    /// subset at `u_min` (`u_min = 0.0` is inert on any positive-`u` run).
+    Adiabatic {
+        /// Positive internal-energy floor `u ← max(u, u_min)`; the injected energy is
+        /// reported as [`IndividualSummary::u_floor_energy`].
+        u_min: f64,
+    },
+}
+
 /// Policy + schedule for [`run_individual`]. Timestep POLICY (`courant`, the base-dt
 /// cap, the rung depth) lives here in the loop's config, never in the solver — the
 /// solver reports only the per-particle physics CFL vector.
@@ -442,6 +465,10 @@ pub struct IndividualConfig {
     /// rungs are exactly the CFL assignment — the non-binding setting the fixed-dt-in-
     /// disguise gates (and I4a) run at, so those paths stay byte-identical.
     pub n_limit: u32,
+    /// Which EOS arm to step the gas on (isothermal vs adiabatic). Selects the
+    /// stepper INSIDE the driver; derived from the scenario's gas EOS, never from the
+    /// `mode`. `ThermalArm::Isothermal` keeps the frozen I3/I4a/I4b byte-path.
+    pub eos: ThermalArm,
     /// Sim-time between emitted snapshots (must be > 0). Snapshots land exactly on
     /// integer multiples of this via a per-interval final-block clamp (D3) — the
     /// only place all rungs are synchronized (pos+vel consistent).
@@ -474,6 +501,11 @@ pub struct IndividualSummary {
     /// is ≥ 3 on the convergence/momentum testbed — genuine active-subset stepping,
     /// not fixed-dt in disguise.
     pub distinct_rungs: usize,
+    /// Energy injected by the positive-`u` floor over the whole run: `Σ mᵢ(u_min −
+    /// u_raw)` summed over every clamp (≥ 0), the bounded reported non-conservation of
+    /// the adiabatic arm (E4b). Always `0.0` on the isothermal arm (no `u`) and on any
+    /// adiabatic run whose `u` stayed above `u_min`.
+    pub u_floor_energy: f64,
 }
 
 /// Run the individual-timestep stepping loop (plan: laddered-ember-cadence.md,
@@ -615,6 +647,9 @@ pub fn run_individual(
         },
         max_rung,
         distinct_rungs: seen_rungs.count_ones() as usize,
+        // I8 RED: hardcoded isothermal arm ⇒ no floor. GREEN wires this to the
+        // dispatched stepper's accumulated `u`-floor leak.
+        u_floor_energy: 0.0,
     })
 }
 

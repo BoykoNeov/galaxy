@@ -29,7 +29,9 @@
 use galaxy_core::{DVec3, ForceSolver, Species, State, StaticBackground};
 use galaxy_io::Header;
 use galaxy_sim::individual::base_dt;
-use galaxy_sim::{run_individual, IndividualConfig, IndividualSummary, SimError, SnapshotSink};
+use galaxy_sim::{
+    run_individual, IndividualConfig, IndividualSummary, SimError, SnapshotSink, ThermalArm,
+};
 use galaxy_solvers::sph::{density_adaptive, DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
@@ -118,7 +120,8 @@ fn cfg(courant: f64, n_limit: u32) -> IndividualConfig {
         dt_base_cap: f64::INFINITY, // non-binding ⇒ dt_base = courant·dt_coarsest
         r_max: R_MAX,
         n_limit,
-        output_dt: T_END, // one output interval ⇒ run to exactly T_END
+        eos: ThermalArm::Isothermal, // I4b limiter gates run on the isothermal arm
+        output_dt: T_END,            // one output interval ⇒ run to exactly T_END
         n_outputs: 1,
         softening: 0.05,
         rng_seed: 0,

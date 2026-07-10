@@ -32,7 +32,9 @@
 
 use galaxy_core::{diagnostics, DVec3, Species, State, StaticBackground};
 use galaxy_io::Header;
-use galaxy_sim::{run_individual, IndividualConfig, IndividualSummary, SimError, SnapshotSink};
+use galaxy_sim::{
+    run_individual, IndividualConfig, IndividualSummary, SimError, SnapshotSink, ThermalArm,
+};
 use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
@@ -109,6 +111,7 @@ fn cfg(courant: f64, output_dt: f64, n_outputs: u64) -> IndividualConfig {
         dt_base_cap: f64::INFINITY,
         r_max: 10,
         n_limit: 10, // == r_max ⇒ limiter non-binding (I4a is pure CFL rungs)
+        eos: ThermalArm::Isothermal, // I4a driver gates are the isothermal byte-path
         output_dt,
         n_outputs,
         softening: 0.05,

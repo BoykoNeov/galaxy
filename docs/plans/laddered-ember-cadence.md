@@ -761,16 +761,65 @@ against, exactly as the LBVH/G-series lineage did.
     budget"; the number says don't spend it. This REOPENS the 2026-07-09
     "build the gravity layer" scope call (which assumed FULL would widen) — a
     user decision, now informed by the real number.
-- **I-grav — gravity subcycling (`hydro+gravity` mode; the lever-b follow-on,
-  ONLY after I0b clears).** Gated behind `[sim.individual].mode="hydro+gravity"`.
-  Red: (i) star gravitational rung assignment + floor (pure fn, like I2); (ii)
-  stale-tree gravity walk over the active subset converges to a
-  rebuild-every-tick reference to tolerance (the I7 argument, gravity edition);
-  (iii) gravity prediction of inactive neighbours keeps the walk correct across a
-  base block (the I6 argument, gravity edition); (iv) full-res speedup validation
-  vs `hydro-only` — deliver the I0b-measured walk factor toward ~2.24× or explain
-  the gap. Sequenced AFTER I0b confirms the star gravitational-rung spread makes
-  it worth building. (I0b, I-grav)
+- **I-grav — gravity subcycling (`hydro+gravity` mode). BUILT 2026-07-10** (the
+  user chose to build it despite the FULL record gate's +6% / STOP verdict — for
+  scaling/completeness). Four milestones, each red→green:
+  - **M9 — gravitational rung criterion (pure fn). DONE (RED 5f9a001 / GREEN
+    ece636f).** `sim::individual::{grav_rung_dt = η·√(ε/|a|) (+∞ force-free),
+    combined_particle_dt = min(hydro CFL, grav)}` — the min-merge that gives
+    collisionless stars a finite rung. Gates: hand-derived η·√(ε/|a|), +∞ force-free
+    (inverted vs hydro +∞), min-merge semantics, monotonicity in |a|.
+  - **M10+M11 — stale-tree active gravity walk (MERGED per advisor). DONE (RED
+    <this batch> / GREEN).** Advisor's load-bearing catch: `FlatTree::accel`'s LEAF
+    branch reads the PASSED `pos`/`mass`, so passing CURRENT `state.pos` makes every
+    near-field source exact FOR FREE (drift-all IS the "predict inactive neighbours"
+    of the old piece-3) — only the far-field cell COMs are stale. So "predict" and
+    "walk" collapse into one. New: `ForceSolver::{rebuild_gravity_cache (default
+    no-op), gravity_active_cached (default → full)}` + a `TreeGravity` wrapper (holds
+    the `FlatTree` cache; `BarnesHut` is `Copy` and can't). Gates: fresh-cache
+    all-active ≡ `BarnesHut::accelerations` to REASSOCIATION precision (rel<1e-11 —
+    the flat left-fold ≠ recursive tree-of-sums bit-for-bit; the doc's "bit-for-bit"
+    is the GPU f32 mirror), subset ≡ full at active indices, and the CONVERGENCE gate
+    (cache at p0, walk at p1=p0+v·δ vs a fresh FLAT rebuild — err 0 at δ=0, shrinks
+    with δ ⇒ far-COM staleness converges; this is why stale-tree works for long-range
+    gravity where a stale grid failed for short-range hydro).
+  - **M12 — wire `hydro+gravity` + driver subcycling. DONE (GREEN <this batch>).**
+    Advisor simplifications: (fork a) NO new `gravity_accel_mag` method — the driver
+    gets |a_grav| from `gravity_active_cached(all)` on the fresh cache (gravity-only,
+    same tree/θ/ε as the fine-tick walk ⇒ rung–force consistency by construction);
+    the DRIVER owns the per-block rebuild (needs it for rungs, cache persists for
+    `step_block`), collapsing the block-boundary hook into existing per-block setup.
+    `GravitySph.subcycle_gravity` flips the active gravity from all-N to the cached
+    active walk; `IndividualConfig.{subcycle_gravity, grav_eta}` (η scales the grav
+    TIMESCALE, courant applies uniformly ⇒ courant-invariant rungs). xtask routes
+    `mode="hydro+gravity"` → `GravitySph<TreeGravity>` subcycling (η=1.0). **The gate
+    that CANNOT exist (advisor): no collapsed-rung-0 ≡ LeapfrogKdk bit-identity — even
+    all-rung-0 walks a block-start tree stale by a full step.** Run-level correctness
+    = CONVERGENCE only (err shrinks as courant halves); plus SUBCYCLE-ENGAGED (stars
+    reach strictly finer rungs than hydro-only — non-vacuous) and MOMENTUM drift
+    shrinks with courant (fork b: kick-active-only + stale-tree antisymmetry break,
+    both ∝ courant). The `hydro+gravity`→`hydro-only` fallback is NOT a byte-superset
+    (fresh all-N ≠ stale-tree gravity even gas-only) — "graceful" = hydro-only's gates
+    stay green, untouched.
+  - **M-validate — `hydro+gravity` vs `hydro-only` speedup. QUICK DONE 2026-07-10;
+    FULL pending (optional).** QUICK gasrich pericenter (7500 particles / 2500 gas,
+    T=2, throwaway `xtask/examples/igrav_timing.rs`, deleted): **hydro+gravity 9.43 s
+    vs hydro-only 24.06 s = 2.55× FASTER** (distinct_rungs 4→9, max_rung 8 both). This
+    BLOWS PAST the +6% record-gate reprojection and the advisor's "may be slower"
+    caution — but the MECHANISM is not the lever-(b) walk-reduction the record gate
+    measured. **`hydro-only` rebuilds the whole Barnes-Hut tree EVERY fine tick**
+    (`GravitySph::accelerations_active` → `g.accelerations` → fresh `Octree::build`,
+    ×2^r_max = ×256/block here), whereas `hydro+gravity` builds it ONCE per base block
+    (the driver's `rebuild_gravity_cache`) and walks the cached `FlatTree`. So most of
+    the 2.55× is **eliminating redundant per-tick tree BUILDS**, not the walk factor;
+    the pure lever-(b) walk-reduction is still the record gate's ~+6%. **Honest
+    attribution + a valuable spinoff: `hydro-only` leaves a large optimization on the
+    table — it could cache the tree the same way (build once/block, walk all-N each
+    tick) using the now-existing `TreeGravity` infra, WITHOUT star subcycling.** So
+    the I6 hydro-only 1.71× is itself improvable. FULL `hydro+gravity` validation is
+    OPTIONAL (the mechanism is structural ⇒ should hold/amplify at FULL); a same-N run
+    would confirm but is not load-bearing given the QUICK number + the clear mechanism.
+    Convergence/correctness already gated (M12). (I0b, I-grav)
 
 ---
 

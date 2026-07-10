@@ -240,6 +240,13 @@ pub struct SimSpec {
     /// constraint), keeping its fixed-dt byte-identity.
     #[serde(default)]
     pub adaptive: Option<AdaptiveSpec>,
+    /// Individual (per-particle rung) timestepping on the gas path (`[sim.individual]`,
+    /// plan laddered-ember-cadence). Its **presence** enables it at `mode = hydro-only`;
+    /// all knobs default. Mutually exclusive with `[sim.adaptive]` (both size the gas
+    /// dt). A gas-free scenario ignores it. When enabled on a gas-rich scenario, the
+    /// simulate step routes the gas path through `run_individual` (CPU only).
+    #[serde(default)]
+    pub individual: Option<IndividualSpec>,
 }
 
 /// Block-adaptive timestep policy (`[sim.adaptive]`). All fields default, so an empty
@@ -267,6 +274,71 @@ fn default_max_growth() -> f64 {
 }
 fn default_block_steps() -> u64 {
     16
+}
+
+/// Which driver path the individual-timestep toggle selects (`[sim.individual].mode`,
+/// plan laddered-ember-cadence). A LAYERED toggle: each mode is droppable to the one
+/// below, so gravity subcycling can be turned off independently of hydro rungs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IndividualMode {
+    /// No subcycling — the global fixed-dt `run` path (the layer below `hydro-only`);
+    /// lets a scenario keep the `[sim.individual]` table while disabling the toggle.
+    FixedDt,
+    /// Per-particle hydro (SPH-CFL) rungs — collisionless stars ride the coarsest rung
+    /// (lever a). The default: presence enables the primary lever, as `[sim.adaptive]`
+    /// enables adaptive at its defaults.
+    #[default]
+    HydroOnly,
+    /// `hydro-only` PLUS gravity subcycling (lever b, I-grav). **Not yet implemented** —
+    /// rejected at validation until the gravity layer lands.
+    #[serde(rename = "hydro+gravity")]
+    HydroGravity,
+}
+
+/// Individual (per-particle power-of-two rung) timestep policy (`[sim.individual]`,
+/// plan laddered-ember-cadence). All knobs default, so an empty `[sim.individual]`
+/// table enables the toggle at `mode = hydro-only` with the shipped defaults. Mutually
+/// exclusive with `[sim.adaptive]` (both size the gas dt — declaring both is rejected).
+/// A gas-free scenario ignores it (no hydro CFL constraint), keeping its fixed-dt path.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndividualSpec {
+    /// Which driver path (see [`IndividualMode`]). Default `hydro-only`.
+    #[serde(default)]
+    pub mode: IndividualMode,
+    /// Courant number applied to each particle's CFL limit (0, 1]. Default 0.25.
+    #[serde(default = "default_courant")]
+    pub courant: f64,
+    /// Maximum rung depth: the finest sub-step is `dt_base / 2^r_max`. A particle
+    /// needing a finer step CLAMPS here (bounded under-resolution, no red gate — the
+    /// tracked saturation hazard), so it caps the fine-tick count `2^r_max` per block
+    /// against a runaway deep rung. Default 10 (`≤ 1024` fine ticks/block). Must be in
+    /// [1, 60].
+    #[serde(default = "default_r_max")]
+    pub r_max: u32,
+    /// Saitoh–Makino limiter depth: no gas particle may sit more than `n_limit` rungs
+    /// coarser than a force-coupled neighbour (CORRECTNESS — a slow particle struck by
+    /// a shock from a fast neighbour must wake before mis-integrating it). Default 1
+    /// (the limiter is NOT optional on a showpiece). `n_limit >= r_max` disables it.
+    #[serde(default = "default_n_limit")]
+    pub n_limit: u32,
+    /// Cap on the base (coarsest-rung) timestep `dt_base` (> 0, may be `inf`). Default
+    /// `inf` (non-binding): `dt_base` is then sized by `courant·dt_coarsest` clamped to
+    /// the output interval. A finite cap keeps the diffuse majority's coarse step
+    /// bounded below a scenario ceiling.
+    #[serde(default = "default_dt_base_cap")]
+    pub dt_base_cap: f64,
+}
+
+fn default_r_max() -> u32 {
+    10
+}
+fn default_n_limit() -> u32 {
+    1
+}
+fn default_dt_base_cap() -> f64 {
+    f64::INFINITY
 }
 
 /// Splat look and framing.
@@ -1047,6 +1119,12 @@ pub struct Scenario {
     /// `None` = fixed-dt. When `Some` and the scenario is gas-rich, `simulate_snapshots`
     /// routes the gas path through the adaptive driver; a gas-free scenario ignores it.
     pub adaptive: Option<AdaptiveSpec>,
+    /// Individual-timestep policy (`[sim.individual]`, laddered-ember-cadence), `None` =
+    /// off. When `Some` with `mode = hydro-only` and the scenario is gas-rich,
+    /// `simulate_snapshots` routes the gas path through `run_individual` (CPU only); a
+    /// gas-free scenario ignores it. Mutually exclusive with `adaptive` (rejected at
+    /// parse if both are set).
+    pub individual: Option<IndividualSpec>,
     pub info: String,
 }
 
@@ -1318,6 +1396,10 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         // carried verbatim; `simulate_snapshots` acts on it only when the scenario is
         // gas-rich (a gas-free run has no hydro CFL constraint and ignores it).
         adaptive: spec.sim.adaptive,
+        // Individual-timestep policy ([sim.individual], laddered-ember-cadence): carried
+        // verbatim; `simulate_snapshots` acts on it only when the scenario is gas-rich
+        // and `mode = hydro-only`. Mutual exclusion with `adaptive` is enforced at parse.
+        individual: spec.sim.individual,
         info,
     }
 }
@@ -1553,6 +1635,7 @@ mod tests {
                 snapshot_every_quick: None,
                 eps: 0.05,
                 adaptive: None,
+                individual: None,
             },
             look: LookSpec {
                 splat_size: 0.12,
@@ -1610,6 +1693,7 @@ mod tests {
                 snapshot_every_quick: Some(400),
                 eps: 0.05,
                 adaptive: None,
+                individual: None,
             },
             look: LookSpec {
                 splat_size: 0.6,
@@ -1706,6 +1790,7 @@ mod tests {
                 snapshot_every_quick: None,
                 eps: 0.02,
                 adaptive: None,
+                individual: None,
             },
             look: LookSpec {
                 splat_size: 0.15,

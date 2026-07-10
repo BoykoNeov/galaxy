@@ -837,17 +837,39 @@ against, exactly as the LBVH/G-series lineage did.
     (7.6e-2→2.0e-2, ~3.8× per 4× courant — the stale-COM error is O(courant)). Plus a
     FALLBACK bit-identity gate: the cache FLAG on a non-caching `BarnesHut` is byte-identical
     to fresh (machinery adds zero error; all divergence is `TreeGravity`'s stale COMs).
-    Fresh path stays reachable in tests only (no scenario knob). **Numerics of the shipping
-    `hydro-only` CHANGED → the I6 1.71× and the retained `i6_individual` snapshots were
-    measured FRESH and need re-measuring / re-rendering.** Timing A/B (ignored test
-    `timing_fresh_vs_cached`, ~7000 particles / 3000 gas, courant 0.25, r_max CAPPED at 7
-    for runtime): **fresh 194.7 s vs cached 136.8 s = 1.42× FASTER** (both max_rung 7 =
-    clamped, so this is a LOWER BOUND — the shipping r_max=10 has deeper rungs ⇒ more
-    redundant per-tick fresh rebuilds ⇒ a larger win). Clears the ">1× / no QUICK
-    slowdown" bar the advisor flagged (unlike G6). More modest than the 2.55× hydro+gravity
-    number because that was a DIFFERENT comparison (hydro+gravity vs fresh hydro-only) and
-    the identical active-subset HYDRO cost (adaptive-h density) is unchanged here ⇒ Amdahl
-    caps the gravity-only win. FULL A/B to tighten the exact shipping figure is optional.
+    Fresh path stays reachable in tests only (no scenario knob). The small-scale timing
+    A/B (`timing_fresh_vs_cached`, r_max CAPPED at 7) showed a modest 1.42× — but that
+    cap was the trap: it structurally prevents the finest-rung flooding that the SHIPPING
+    r_max=14 permits, so 1.42× was NOT a lower bound (as first claimed) but a
+    failure-mode-suppressed number.
+  - **M-cache — REVERTED for `hydro-only` 2026-07-10 (full-res re-measure killed it).**
+    The M-validate QUICK A/B and the r_max=7 timing gate both said "small win"; the
+    FULL-res re-measure said the opposite. Re-running the I6 producibility test with the
+    shipped cached-tree `hydro-only`: **9334.5 s = 0.31× vs A5 (2868 s), i.e. 5.57×
+    SLOWER than the fresh-tree I6 (1675.9 s)**, CFL dynamic range 30.8×→**196.1×**.
+    Mechanism (post-hoc `rung-spread` over the retained cached snapshots +
+    advisor-vetted): the stale per-block tree drives the merger core into a **6.4× deeper
+    min stable dt** (5.98e-4 vs fresh ~3.8e-3) that is **SUSTAINED** (~20% of the run,
+    t≈19–28) and **BULK** (54% of gas on the two finest rungs at pericenter, no
+    numerical-h outlier) — v_sig-dominated (Mach ~10 supersonic infall), density
+    secondary (~6× denser). That floods the finest rungs ⇒ ~5.6× more per-particle work.
+    Root cause is CONSISTENT WITH stale-tree gravity but NOT isolated from chaotic
+    divergence (v_sig-dominated infall is generic to merger pericenters; single chaotic
+    trajectory; first-principles sign runs the other way) — so no confident causal arrow.
+    A controlled `core_and_stars` fresh-vs-cached A/B at r_max=14 (kept ignored test
+    `mechanism_fresh_vs_cached_rmax14`) came back NULL (cached 1.06× SHALLOWER, both
+    max_rung 9, cached 0.90× wall) — the quiescent synthetic core lacks the merger's
+    supersonic infall, so it does NOT exonerate caching; it DOES confirm the slowdown is
+    rung-flooding, not per-walk cost (caching is a small WIN when the trajectory doesn't
+    flood). **Decision: caching gives `hydro-only` zero speed upside and no accuracy
+    benefit ⇒ reverted to the FRESH walk. `hydro+gravity` KEEPS caching (it needs it —
+    subcycling walks the cache — and QUICK showed 2.55×; whether it also over-collapses
+    at FULL is a separate open risk).** The wiring change: `simulate.rs` builds bare
+    `GravitySph<BarnesHut>` for `hydro-only` and sets `cache_gravity_tree` only for
+    `hydro+gravity`; the caching machinery (`TreeGravity`, `with_gravity_cache`,
+    `cached_gravity_walk`) and its gate tests are KEPT (hydro+gravity uses them). Fresh
+    path is byte-identical to pre-M-cache (I3/I4a bit-identity), so shipping `hydro-only`
+    is back to the I6 1.71× fresh numerics. Writeup: `M:\claud_projects\temp\mcache_mechanism.md`.
     (I6, I-grav, M-validate)
 
 ---

@@ -28,7 +28,7 @@ use galaxy_io::Header;
 use galaxy_sim::{
     run_individual, IndividualConfig, IndividualSummary, SimError, SnapshotSink, ThermalArm,
 };
-use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
+use galaxy_solvers::sph::{max_stable_dt, DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::{BarnesHut, TreeGravity};
 
 struct NullSink;
@@ -311,5 +311,105 @@ fn timing_fresh_vs_cached() {
         s_cached.run.steps,
         s_cached.max_rung,
         fresh / cached,
+    );
+}
+
+// --------------------------------------------------------------------------
+// MECHANISM CAUSAL TEST (ignored) — does the stale cached tree drive the gas
+// core into a DEEPER min-dt / deeper rungs than fresh, on a controlled testbed?
+// This is the causal counterpart to the full-res post-hoc finding (cached full-res
+// hit a 6.4× deeper min-dt, sustained + bulk, → 5.6× slower). Same IC, ONLY tree
+// freshness differs; r_max=14 (un-capped, matching the shipped full-res run) so the
+// finest-rung flooding CAN manifest (the timing A/B above caps r_max=7, which
+// structurally suppresses it). Records the min stable dt at every output for BOTH
+// paths. A cached series that sinks below fresh isolates caching as the driver;
+// a NULL (both comparable) does NOT exonerate caching — the quiescent synthetic
+// core may simply lack the merger's supersonic infall. Run manually:
+//   cargo test -p galaxy-sim --test individual_hydro_cached --release mechanism -- --ignored --nocapture
+struct MinDtSink {
+    params: HydroParams,
+    cfg: DensityConfig,
+    dts: Vec<f64>,
+}
+impl SnapshotSink for MinDtSink {
+    fn emit(&mut self, _h: &Header, s: &State) -> Result<(), SimError> {
+        // c_cfl = 1.0: the raw stable bound (same convention as the rung-spread tool),
+        // identical for both arms so the fresh↔cached comparison is apples-to-apples.
+        self.dts
+            .push(max_stable_dt(s, &self.params, &self.cfg, 1.0));
+        Ok(())
+    }
+}
+
+#[test]
+#[ignore = "mechanism causal test — run with --release --ignored --nocapture"]
+fn mechanism_fresh_vs_cached_rmax14() {
+    use std::time::Instant;
+    // Enough gas for a real self-gravitating core (density held ~constant via the
+    // N^(1/3) radius scaling); gas starts at rest ⇒ it collapses under self-gravity
+    // vs c_s=0.3 pressure over the horizon. r_max=14 (from cfg) is NOT capped here.
+    let (n_gas, n_star) = (3000, 1000);
+    let (courant, output_dt, n_outputs) = (0.25, 0.2, 6); // horizon t = 1.2
+
+    let run = |cache: bool| -> (f64, Vec<f64>, IndividualSummary) {
+        let mut state = core_and_stars_sized(7, n_gas, n_star);
+        let bg = StaticBackground;
+        let mut sink = MinDtSink {
+            params: params(),
+            cfg: DensityConfig::default(),
+            dts: Vec::new(),
+        };
+        let conf = cfg(courant, cache, output_dt, n_outputs); // r_max = 14 (un-capped)
+        let t0 = Instant::now();
+        let summary = if cache {
+            let mut solver =
+                GravitySph::new(TreeGravity::new(bh()), params(), DensityConfig::default())
+                    .with_gravity_cache(true);
+            run_individual(&mut state, &mut solver, &bg, &conf, &mut sink).unwrap()
+        } else {
+            let mut solver = GravitySph::new(bh(), params(), DensityConfig::default());
+            run_individual(&mut state, &mut solver, &bg, &conf, &mut sink).unwrap()
+        };
+        (t0.elapsed().as_secs_f64(), sink.dts, summary)
+    };
+
+    let (t_fresh, dt_fresh, s_fresh) = run(false);
+    let (t_cached, dt_cached, s_cached) = run(true);
+
+    let series_min = |v: &[f64]| v.iter().copied().fold(f64::INFINITY, f64::min);
+    let (min_fresh, min_cached) = (series_min(&dt_fresh), series_min(&dt_cached));
+
+    eprintln!(
+        "MECHANISM fresh↔cached, n=({n_gas} gas, {n_star} star), r_max 14, courant {courant}, \
+         {n_outputs}×{output_dt} outputs (t={:.1})",
+        n_outputs as f64 * output_dt
+    );
+    eprintln!("  output  min_stable_dt(fresh)   min_stable_dt(cached)   cached/fresh");
+    for k in 0..dt_fresh.len().min(dt_cached.len()) {
+        eprintln!(
+            "  {k:>5}   {:>18.4e}   {:>20.4e}   {:>10.3}",
+            dt_fresh[k],
+            dt_cached[k],
+            dt_cached[k] / dt_fresh[k],
+        );
+    }
+    eprintln!(
+        "  series-min dt : fresh {min_fresh:.4e}   cached {min_cached:.4e}   \
+         cached is {:.2}× {} than fresh",
+        (min_fresh / min_cached).max(min_cached / min_fresh),
+        if min_cached < min_fresh {
+            "DEEPER (smaller dt)"
+        } else {
+            "shallower"
+        },
+    );
+    eprintln!(
+        "  max_rung : fresh {}  cached {}   |   blocks : fresh {}  cached {}   |   \
+         wall : fresh {t_fresh:.2}s  cached {t_cached:.2}s ({:.2}× fresh)",
+        s_fresh.max_rung,
+        s_cached.max_rung,
+        s_fresh.run.steps,
+        s_cached.run.steps,
+        t_cached / t_fresh,
     );
 }

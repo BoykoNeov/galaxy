@@ -106,15 +106,22 @@ pub fn simulate_snapshots(
                     let ind_cfg = build_individual_config(s, ind)?;
                     let bh = BarnesHut::new(G, s.eps, THETA);
                     let mut sink = DirectorySink::new(snap_dir)?;
-                    // BOTH toggle modes cache the gravity tree: wrap Barnes-Hut in
-                    // `TreeGravity` and enable the cached stale-tree walk. `hydro-only`
-                    // builds the tree once per base block (vs a fresh octree every fine
-                    // tick — the shipping speedup); `hydro+gravity` additionally subcycles
-                    // gravity onto finite star rungs (the `subcycle_gravity` config flag).
-                    let mut solver = GravitySph::new(TreeGravity::new(bh), hydro, density_cfg)
-                        .with_gravity_cache(true);
-                    let summary =
-                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?;
+                    // `hydro+gravity` subcycles gravity onto finite star rungs and MUST
+                    // walk a cached stale tree (built once per base block): wrap Barnes-Hut
+                    // in `TreeGravity` + enable the cached walk. `hydro-only` uses the
+                    // FRESH walk (a fresh octree every fine tick) — tree-caching was
+                    // REVERTED for hydro-only after the full-res re-measure showed the
+                    // stale tree drives the merger core into a sustained finest-rung flood
+                    // (6.4× deeper min-dt → 5.6× SLOWER, not the expected speedup); see
+                    // docs/plans/laddered-ember-cadence.md (M-cache reverted).
+                    let summary = if ind.mode == IndividualMode::HydroGravity {
+                        let mut solver = GravitySph::new(TreeGravity::new(bh), hydro, density_cfg)
+                            .with_gravity_cache(true);
+                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?
+                    } else {
+                        let mut solver = GravitySph::new(bh, hydro, density_cfg);
+                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?
+                    };
                     return Ok(summary.run);
                 }
                 // `mode = fixed-dt`: fall through to the fixed-dt path below.
@@ -256,14 +263,13 @@ fn build_individual_config(
         // which the convergence gate needs). `1.0` ⇒ the grav safe step is
         // `courant·√(ε/|a|)`, matching the hydro `courant·h/v_sig`. A scenario knob is
         // deferred until a run needs to tune it.
-        // Both toggle modes cache the gravity tree (built once per base block, walked
-        // stale): `hydro-only` for the shipping speedup (build once vs a fresh octree
-        // every fine tick), `hydro+gravity` because subcycling walks the cache. Only
-        // `hydro+gravity` additionally folds gravity into the rungs.
-        cache_gravity_tree: matches!(
-            ind.mode,
-            IndividualMode::HydroOnly | IndividualMode::HydroGravity
-        ),
+        // Only `hydro+gravity` caches the gravity tree (built once per base block,
+        // walked stale) — because subcycling gravity onto star rungs walks that cache.
+        // `hydro-only` was REVERTED to the FRESH walk (a fresh octree every fine tick):
+        // at full res the stale tree drove the merger core into a sustained finest-rung
+        // flood (6.4× deeper min-dt → 5.6× SLOWER); the build-once saving is swamped by
+        // the extra fine-tick work. See docs/plans/laddered-ember-cadence.md.
+        cache_gravity_tree: ind.mode == IndividualMode::HydroGravity,
         subcycle_gravity: ind.mode == IndividualMode::HydroGravity,
         grav_eta: 1.0,
         eos: ThermalArm::Isothermal,

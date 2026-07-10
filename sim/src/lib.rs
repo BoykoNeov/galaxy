@@ -584,11 +584,15 @@ pub fn run_individual(
     if config.n_outputs == 0 {
         return Err(SimError::Config("n_outputs must be >= 1".to_string()));
     }
-    // RED placeholder — hydro-only tree caching (cache_gravity_tree without gravity
-    // rung folding) is not yet wired into the driver; GREEN replaces this with the
-    // per-block cache rebuild + the subcycle⇒cache validation.
-    if config.cache_gravity_tree && !config.subcycle_gravity {
-        todo!("hydro-only tree caching (cache_gravity_tree) not yet wired into run_individual");
+    // Gravity subcycling folds `|a_grav|` (walked on the cached tree) into the rungs, so
+    // it REQUIRES the cache. `hydro-only` caching (cache without subcycle) is fine — it
+    // just walks the cache stale without folding. Reject the incoherent combination.
+    if config.subcycle_gravity && !config.cache_gravity_tree {
+        return Err(SimError::Config(
+            "subcycle_gravity requires cache_gravity_tree — gravity subcycling walks the \
+             cached tree for both |a_grav| and the fine-tick force"
+                .to_string(),
+        ));
     }
 
     // The individual path needs at least one finite per-particle CFL limit (gas
@@ -637,14 +641,22 @@ pub fn run_individual(
             // (I1 → I2). The bound moves and its spatial spread changes as the gas
             // evolves, so this is recomputed every base block.
             let mut dt_pp = solver.max_stable_dt_per_particle(state);
-            // I-grav (`hydro+gravity`): fold the gravitational criterion into the
-            // per-particle `dt` so collisionless stars get finite rungs. Rebuild the
-            // gravity tree ONCE here — the driver owns the block-boundary rebuild, and
-            // the SAME cache serves both |a_grav| (walked over ALL particles now, at
-            // block-start positions ⇒ fresh) AND the fine-tick active walk inside
-            // `step_block` (rung–force θ/ε consistency by construction).
-            if config.subcycle_gravity {
+            // Rebuild the gravity tree ONCE per base block (the driver owns the
+            // block-boundary rebuild) whenever a cached mode is active — `hydro-only`
+            // tree caching (the shipping speedup: build once vs a fresh octree every
+            // fine tick) AND `hydro+gravity`. The frozen cache then serves the fine-tick
+            // active walk inside `step_block` at the CURRENT (drifted) positions, with
+            // only the far-cell COMs stale (a bounded, convergence-gated approximation).
+            // With a non-caching solver this is a no-op and the walk falls back to fresh.
+            if config.cache_gravity_tree {
                 solver.rebuild_gravity_cache(state);
+            }
+            // I-grav (`hydro+gravity`): fold the gravitational criterion into the
+            // per-particle `dt` so collisionless stars get finite rungs. Reuses the SAME
+            // cache just rebuilt (validation guarantees `cache_gravity_tree` here), so
+            // |a_grav| (walked over ALL particles at block-start positions ⇒ fresh) is
+            // θ/ε-consistent with the fine-tick force by construction.
+            if config.subcycle_gravity {
                 let mut ag = vec![DVec3::ZERO; state.len()];
                 let all: Vec<usize> = (0..state.len()).collect();
                 solver.gravity_active_cached(state, &all, &mut ag);

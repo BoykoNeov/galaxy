@@ -202,6 +202,8 @@ fn cached_differs_from_fresh_and_converges_as_courant_falls() {
     };
     let (d_coarse, rung_coarse) = d(0.4);
     let (d_fine, _) = d(0.1);
+    // Measured: D(0.4) ≈ 7.6e-2, D(0.1) ≈ 2.0e-2 — the floor has ~5 orders of margin,
+    // and the gap shrinks ~3.8× as courant drops 4× (the stale-COM error is O(courant)).
 
     // NON-VACUOUS: the stale tree genuinely moves the trajectory. If the cache were
     // (accidentally) rebuilt every fine tick, cached ≡ fresh and this would be ~roundoff.

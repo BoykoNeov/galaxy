@@ -106,17 +106,15 @@ pub fn simulate_snapshots(
                     let ind_cfg = build_individual_config(s, ind)?;
                     let bh = BarnesHut::new(G, s.eps, THETA);
                     let mut sink = DirectorySink::new(snap_dir)?;
-                    // `hydro+gravity` subcycles gravity on a cached stale tree, so it wraps
-                    // the Barnes-Hut solver in `TreeGravity` (the tree cache) and flips the
-                    // subcycle flag; `hydro-only` walks gravity all-N every fine tick.
-                    let summary = if ind.mode == IndividualMode::HydroGravity {
-                        let mut solver = GravitySph::new(TreeGravity::new(bh), hydro, density_cfg)
-                            .with_gravity_cache(true);
-                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?
-                    } else {
-                        let mut solver = GravitySph::new(bh, hydro, density_cfg);
-                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?
-                    };
+                    // BOTH toggle modes cache the gravity tree: wrap Barnes-Hut in
+                    // `TreeGravity` and enable the cached stale-tree walk. `hydro-only`
+                    // builds the tree once per base block (vs a fresh octree every fine
+                    // tick — the shipping speedup); `hydro+gravity` additionally subcycles
+                    // gravity onto finite star rungs (the `subcycle_gravity` config flag).
+                    let mut solver = GravitySph::new(TreeGravity::new(bh), hydro, density_cfg)
+                        .with_gravity_cache(true);
+                    let summary =
+                        run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?;
                     return Ok(summary.run);
                 }
                 // `mode = fixed-dt`: fall through to the fixed-dt path below.
@@ -258,9 +256,14 @@ fn build_individual_config(
         // which the convergence gate needs). `1.0` ⇒ the grav safe step is
         // `courant·√(ε/|a|)`, matching the hydro `courant·h/v_sig`. A scenario knob is
         // deferred until a run needs to tune it.
-        // RED: shipping `hydro-only` still runs fresh gravity; GREEN flips it to the
-        // cached tree (and `hydro+gravity` requires the cache to subcycle).
-        cache_gravity_tree: ind.mode == IndividualMode::HydroGravity,
+        // Both toggle modes cache the gravity tree (built once per base block, walked
+        // stale): `hydro-only` for the shipping speedup (build once vs a fresh octree
+        // every fine tick), `hydro+gravity` because subcycling walks the cache. Only
+        // `hydro+gravity` additionally folds gravity into the rungs.
+        cache_gravity_tree: matches!(
+            ind.mode,
+            IndividualMode::HydroOnly | IndividualMode::HydroGravity
+        ),
         subcycle_gravity: ind.mode == IndividualMode::HydroGravity,
         grav_eta: 1.0,
         eos: ThermalArm::Isothermal,

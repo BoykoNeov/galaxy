@@ -40,13 +40,17 @@ pub struct GravitySph<G: ForceSolver> {
     /// `None` until the first active call (or after a gas-count change) initializes it
     /// with a full over-all-gas refresh. Untouched by the full `accelerations` path.
     rho_scratch: Option<Vec<f64>>,
-    /// I-grav (`hydro+gravity` mode): when `true`, the active path walks gravity on
-    /// the STALE cached tree (`gravity_active_cached`, active subset) instead of the
-    /// all-N fresh `accelerations`. The driver rebuilds the cache once per base block;
-    /// requires `G` to actually cache (e.g. `TreeGravity`) — with a non-caching `G`
-    /// the trait defaults fall back to a full walk (correct, unreduced). `false` =
-    /// `hydro-only` (gravity all-N every fine tick).
-    subcycle_gravity: bool,
+    /// When `true`, the active path walks gravity on the STALE cached tree
+    /// (`gravity_active_cached`, active subset) instead of the all-N fresh
+    /// `accelerations`. The driver MUST rebuild the cache once per base block
+    /// (`rebuild_gravity_cache`) for this to be correct; requires `G` to actually cache
+    /// (e.g. `TreeGravity`) — with a non-caching `G` the trait defaults fall back to a
+    /// full fresh walk (correct, unreduced). This is a property of the WALK ONLY, shared
+    /// by BOTH cached modes: `hydro+gravity` (I-grav, stars also get finite gravitational
+    /// rungs — the driver's `subcycle_gravity`) AND `hydro-only` with tree caching (stars
+    /// stay on rung 0, gravity walked stale once/block). `false` = the fresh path
+    /// (gravity all-N every fine tick, byte-identical to a bare `BarnesHut`).
+    cached_gravity_walk: bool,
 }
 
 impl<G: ForceSolver> GravitySph<G> {
@@ -58,15 +62,18 @@ impl<G: ForceSolver> GravitySph<G> {
             density_cfg,
             h_hint: None,
             rho_scratch: None,
-            subcycle_gravity: false,
+            cached_gravity_walk: false,
         }
     }
 
-    /// Enable I-grav `hydro+gravity` subcycling: the active path walks gravity on the
-    /// stale cached tree instead of all-N fresh. Requires the driver to rebuild the
-    /// cache each base block and `G` to cache (`TreeGravity`). Builder-style.
-    pub fn with_gravity_subcycling(mut self, on: bool) -> Self {
-        self.subcycle_gravity = on;
+    /// Enable the stale cached-tree gravity walk: the active path walks gravity on the
+    /// tree the driver rebuilds once per base block instead of all-N fresh every fine
+    /// tick. Shared by both cached modes (`hydro+gravity` subcycling AND `hydro-only`
+    /// with tree caching); the driver decides rung-folding independently. Requires the
+    /// driver to rebuild the cache each base block and `G` to cache (`TreeGravity`).
+    /// Builder-style.
+    pub fn with_gravity_cache(mut self, on: bool) -> Self {
+        self.cached_gravity_walk = on;
         self
     }
 
@@ -78,7 +85,7 @@ impl<G: ForceSolver> GravitySph<G> {
             density_cfg,
             h_hint: None,
             rho_scratch: None,
-            subcycle_gravity: false,
+            cached_gravity_walk: false,
         }
     }
 
@@ -240,13 +247,14 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
     fn accelerations_active(&mut self, state: &State, active: &[usize], acc: &mut [DVec3]) {
         let n = state.len();
         assert_eq!(acc.len(), n, "acc length must match particle count");
-        // Gravity fill. `hydro-only`: all-N fresh every fine tick (the unreduced
-        // non-rung fraction). `hydro+gravity` (I-grav): the ACTIVE-subset walk on the
-        // STALE cached tree (built once per base block by the driver) at current
-        // positions — writes only `active` (the stepper reads only those).
-        let subcycle = self.subcycle_gravity;
+        // Gravity fill. Fresh path: all-N fresh every fine tick (the unreduced non-rung
+        // fraction). Cached path (`hydro-only` tree caching OR `hydro+gravity`): the
+        // ACTIVE-subset walk on the STALE cached tree (built once per base block by the
+        // driver) at current positions — writes only `active` (the stepper reads only
+        // those).
+        let cached = self.cached_gravity_walk;
         match &mut self.gravity {
-            Some(g) if subcycle => g.gravity_active_cached(state, active, acc),
+            Some(g) if cached => g.gravity_active_cached(state, active, acc),
             Some(g) => g.accelerations(state, acc),
             None => acc.iter_mut().for_each(|a| *a = DVec3::ZERO),
         }
@@ -283,9 +291,9 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
         let n = state.len();
         assert_eq!(acc.len(), n, "acc length must match particle count");
         assert_eq!(dudt.len(), n, "dudt length must match particle count");
-        let subcycle = self.subcycle_gravity;
+        let cached = self.cached_gravity_walk;
         match &mut self.gravity {
-            Some(g) if subcycle => g.gravity_active_cached(state, active, acc),
+            Some(g) if cached => g.gravity_active_cached(state, active, acc),
             Some(g) => g.accelerations(state, acc),
             None => acc.iter_mut().for_each(|a| *a = DVec3::ZERO),
         }

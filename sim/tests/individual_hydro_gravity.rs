@@ -101,7 +101,7 @@ fn solver(subcycle: bool) -> GravitySph<TreeGravity> {
     };
     let bh = BarnesHut::new(1.0, 0.05, 0.5);
     GravitySph::new(TreeGravity::new(bh), params, DensityConfig::default())
-        .with_gravity_subcycling(subcycle)
+        .with_gravity_cache(subcycle)
 }
 
 fn cfg(courant: f64, subcycle: bool, output_dt: f64, n_outputs: u64) -> IndividualConfig {

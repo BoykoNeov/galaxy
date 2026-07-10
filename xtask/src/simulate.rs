@@ -111,7 +111,7 @@ pub fn simulate_snapshots(
                     // subcycle flag; `hydro-only` walks gravity all-N every fine tick.
                     let summary = if ind.mode == IndividualMode::HydroGravity {
                         let mut solver = GravitySph::new(TreeGravity::new(bh), hydro, density_cfg)
-                            .with_gravity_subcycling(true);
+                            .with_gravity_cache(true);
                         run_individual(&mut state, &mut solver, &bg, &ind_cfg, &mut sink)?
                     } else {
                         let mut solver = GravitySph::new(bh, hydro, density_cfg);

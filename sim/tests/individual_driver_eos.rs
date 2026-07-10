@@ -13,9 +13,11 @@
 //! isothermal solver through `eos:Adiabatic` would leave `u` flat and prove nothing.
 //! So every gate here uses a REAL ADIABATIC solver (`Eos::Adiabatic`, initial `u > 0`)
 //! and drives the SAME solver + IC through BOTH arms:
-//!   * `eos:Adiabatic`  ⇒ `u` MUST evolve (PdV work etc.) — the arm was reached.
-//!   * `eos:Isothermal` ⇒ `u` MUST stay byte-identical to the input — `ActiveSetKdk`
-//!     never touches `u`, so this is the isothermal-arm byte-identity guard.
+//!
+//! * `eos:Adiabatic`  ⇒ `u` MUST evolve (PdV work etc.) — the arm was reached.
+//! * `eos:Isothermal` ⇒ `u` MUST stay byte-identical to the input — `ActiveSetKdk`
+//!   never touches `u`, so this is the isothermal-arm byte-identity guard.
+//!
 //! The IC is multi-rung (a dense core + diffuse halo ⇒ an `h` gradient ⇒ a real rung
 //! spread), so the active-set mechanic is genuinely exercised, not fixed-dt in
 //! disguise. These gate DISPATCH only — stepper correctness is the six I5 gates in

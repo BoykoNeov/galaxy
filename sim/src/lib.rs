@@ -579,7 +579,14 @@ pub fn run_individual(
     // cached accelerations carry across base blocks (the closing kick becomes the next
     // opening kick) even as `dt_base` changes block to block — velocity-Verlet, so no
     // reprime, exactly as `run_adaptive` reuses the cached accel across a dt change.
-    let mut stepper = individual::ActiveSetKdk::new();
+    // Dispatch the EOS arm behind one `BlockStepper` seam: isothermal keeps the frozen
+    // `ActiveSetKdk` byte-path; adiabatic uses the `u`-evolving `ActiveSetKdkThermal`.
+    let mut stepper: Box<dyn individual::BlockStepper> = match config.eos {
+        ThermalArm::Isothermal => Box::new(individual::ActiveSetKdk::new()),
+        ThermalArm::Adiabatic { u_min } => {
+            Box::new(individual::ActiveSetKdkThermal::with_u_floor(u_min))
+        }
+    };
 
     // Rung diagnostics for the summary (the convergence/momentum gates prove the run
     // genuinely engaged the multi-rung machinery). `seen` bit `r` set ⇒ rung `r` used.
@@ -647,9 +654,8 @@ pub fn run_individual(
         },
         max_rung,
         distinct_rungs: seen_rungs.count_ones() as usize,
-        // I8 RED: hardcoded isothermal arm ⇒ no floor. GREEN wires this to the
-        // dispatched stepper's accumulated `u`-floor leak.
-        u_floor_energy: 0.0,
+        // The dispatched stepper's accumulated positive-`u` floor leak (0 isothermal).
+        u_floor_energy: stepper.u_floor_energy(),
     })
 }
 

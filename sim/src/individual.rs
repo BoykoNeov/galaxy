@@ -14,6 +14,61 @@
 
 use galaxy_core::{Background, DVec3, ForceSolver, State};
 
+/// One base block of the individual-timestep rung hierarchy, abstracted so
+/// [`run_individual`](crate::run_individual) can dispatch over the isothermal
+/// ([`ActiveSetKdk`]) and adiabatic ([`ActiveSetKdkThermal`]) arms behind a SINGLE
+/// driver (the `IndividualConfig.eos` seam) rather than a duplicated loop. Both
+/// steppers already expose an inherent `step_block` with this exact shape; the trait
+/// just makes the choice dynamic. Per-block dynamic dispatch is free — one virtual
+/// call per base block, not per particle or per fine tick.
+pub trait BlockStepper {
+    /// Advance one base block of size `dt_base`, each particle on rung `rungs[i]`.
+    fn step_block(
+        &mut self,
+        state: &mut State,
+        solver: &mut dyn ForceSolver,
+        bg: &dyn Background,
+        dt_base: f64,
+        rungs: &[u32],
+    );
+
+    /// Energy injected by the positive-`u` floor so far (≥ 0). Defaults to `0.0` for
+    /// arms with no `u` channel (the isothermal [`ActiveSetKdk`]).
+    fn u_floor_energy(&self) -> f64 {
+        0.0
+    }
+}
+
+impl BlockStepper for ActiveSetKdk {
+    fn step_block(
+        &mut self,
+        state: &mut State,
+        solver: &mut dyn ForceSolver,
+        bg: &dyn Background,
+        dt_base: f64,
+        rungs: &[u32],
+    ) {
+        // Inherent method wins name resolution — the qualified path pins it explicitly.
+        ActiveSetKdk::step_block(self, state, solver, bg, dt_base, rungs)
+    }
+}
+
+impl BlockStepper for ActiveSetKdkThermal {
+    fn step_block(
+        &mut self,
+        state: &mut State,
+        solver: &mut dyn ForceSolver,
+        bg: &dyn Background,
+        dt_base: f64,
+        rungs: &[u32],
+    ) {
+        ActiveSetKdkThermal::step_block(self, state, solver, bg, dt_base, rungs)
+    }
+    fn u_floor_energy(&self) -> f64 {
+        ActiveSetKdkThermal::u_floor_energy(self)
+    }
+}
+
 /// The sub-step for rung `r` below `dt_base`: `dt_base / 2^r`. Rung 0 is the
 /// coarsest (the full base step); each higher rung halves it.
 #[inline]

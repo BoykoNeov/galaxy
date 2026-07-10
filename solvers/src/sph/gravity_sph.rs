@@ -14,8 +14,10 @@
 
 use galaxy_core::{DVec3, ForceSolver, Species, State};
 
-use super::density::{density_adaptive, DensityConfig};
-use super::forces::{hydro_accel_and_dudt, hydro_accelerations, HydroParams};
+use super::density::{density_adaptive, density_adaptive_active, DensityConfig};
+use super::forces::{
+    hydro_accel_and_dudt, hydro_accel_and_dudt_active, hydro_accelerations, HydroParams,
+};
 
 /// Gravity + SPH composite solver. `G` is the wrapped gravity solver (any
 /// `ForceSolver`); `None` disables gravity for pure-hydro runs.
@@ -61,6 +63,81 @@ impl<G: ForceSolver> GravitySph<G> {
             h_hint: None,
             rho_scratch: None,
         }
+    }
+
+    /// Shared setup for the I7 active paths ([`accelerations_active`](ForceSolver::accelerations_active)
+    /// / [`accel_and_dudt_active`](ForceSolver::accel_and_dudt_active)): extract the
+    /// gas subset and its position/velocity/mass/`u` columns (positions are exact —
+    /// the stepper drifts every particle at the fine cadence), size the persistent
+    /// `(ρ, h)` scratch, and map the global `active` indices to gas-local ones.
+    /// Returns `None` (clearing the scratch) when the state has no gas.
+    ///
+    /// Warm-start discipline — the load-bearing bit for the I3 collapsed
+    /// bit-identity gate: the density solve warm-starts each target's bracket from
+    /// `h_hint`. An already-sized `h_hint` (left by a prior full `accelerations`
+    /// prime, or a previous active tick) is KEPT — zeroing it would cold-start the
+    /// bisection to a within-tolerance-but-different `h`, breaking bit-identity vs
+    /// the full path. Only a missing/mis-sized `h_hint` is (re)allocated to zeros
+    /// (⇒ the occupancy seed, matching the full path's `h_init = None` first call).
+    /// Whenever EITHER scratch is (re)allocated the returned `active_local` is FORCED
+    /// to all gas, so the full over-all refresh populates every ρ entry (valid for
+    /// later stale-neighbour reads) — warm-started from the preserved `h_hint`.
+    #[allow(clippy::type_complexity)]
+    fn active_gas(
+        &mut self,
+        state: &State,
+        active: &[usize],
+    ) -> Option<(
+        Vec<usize>,
+        Vec<DVec3>,
+        Vec<DVec3>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<usize>,
+    )> {
+        let n = state.len();
+        let gas: Vec<usize> = (0..n).filter(|&i| state.kind[i] == Species::Gas).collect();
+        if gas.is_empty() {
+            self.h_hint = None;
+            self.rho_scratch = None;
+            return None;
+        }
+        let gpos: Vec<DVec3> = gas.iter().map(|&i| state.pos[i]).collect();
+        let gvel: Vec<DVec3> = gas.iter().map(|&i| state.vel[i]).collect();
+        let gmass: Vec<f64> = gas.iter().map(|&i| state.mass[i]).collect();
+        let gu: Vec<f64> = gas.iter().map(|&i| state.u[i]).collect();
+
+        let h_needs_init = self.h_hint.as_ref().is_none_or(|hh| hh.len() != gas.len());
+        let rho_needs_init = self
+            .rho_scratch
+            .as_ref()
+            .is_none_or(|r| r.len() != gas.len());
+        if h_needs_init {
+            self.h_hint = Some(vec![0.0; gas.len()]);
+        }
+        if rho_needs_init {
+            self.rho_scratch = Some(vec![0.0; gas.len()]);
+        }
+
+        let active_local: Vec<usize> = if h_needs_init || rho_needs_init {
+            // A (re)allocated scratch must be fully populated before any stale read.
+            (0..gas.len()).collect()
+        } else {
+            // Global → gas-local map; non-gas `active` entries carry no hydro rung
+            // and are dropped (their gas-local index is absent).
+            let mut g2l = vec![usize::MAX; n];
+            for (loc, &g) in gas.iter().enumerate() {
+                g2l[g] = loc;
+            }
+            active
+                .iter()
+                .filter_map(|&i| {
+                    let loc = g2l[i];
+                    (loc != usize::MAX).then_some(loc)
+                })
+                .collect()
+        };
+        Some((gas, gpos, gvel, gmass, gu, active_local))
     }
 }
 
@@ -144,8 +221,36 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
     }
 
     fn accelerations_active(&mut self, state: &State, active: &[usize], acc: &mut [DVec3]) {
-        let _ = (state, active, acc);
-        todo!("I7 green: gravity all-N + two-pass active-subset hydro on the (ρ,h) scratch")
+        let n = state.len();
+        assert_eq!(acc.len(), n, "acc length must match particle count");
+        // Gravity over ALL particles every fine tick (UNREDUCED — the `hydro-only`
+        // non-rung fraction; subcycling gravity is `hydro+gravity` / I-grav), exactly
+        // as `accelerations` does. Only the hydro gather below reduces to the subset.
+        match &mut self.gravity {
+            Some(g) => g.accelerations(state, acc),
+            None => acc.iter_mut().for_each(|a| *a = DVec3::ZERO),
+        }
+        let Some((gas, gpos, gvel, gmass, gu, active_local)) = self.active_gas(state, active)
+        else {
+            return;
+        };
+        // Own the (Clone) config / (Copy) params so the persistent scratch can be
+        // borrowed mutably below without a self-field aliasing conflict.
+        let cfg = self.density_cfg.clone();
+        let params = self.params;
+        let rho = self.rho_scratch.as_mut().unwrap();
+        let h = self.h_hint.as_mut().unwrap();
+        // PASS 1: refresh (ρ, h) for the active gas targets into the persistent
+        // scratch (inactive entries keep their last-active value).
+        density_adaptive_active(&gpos, &gmass, &cfg, &active_local, rho, h);
+        // PASS 2: hydro accel on the active targets, reading neighbour ρ/h from the
+        // scratch (inactive neighbours stale — the sole bounded I7 approximation;
+        // positions are exact). Add to the gravity already in `acc`.
+        let contribs =
+            hydro_accel_and_dudt_active(&gpos, &gvel, &gmass, rho, h, &gu, &params, &active_local);
+        for (k, &loc) in active_local.iter().enumerate() {
+            acc[gas[loc]] += contribs[k].0;
+        }
     }
 
     fn accel_and_dudt_active(
@@ -155,8 +260,31 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
         acc: &mut [DVec3],
         dudt: &mut [f64],
     ) {
-        let _ = (state, active, acc, dudt);
-        todo!("I7 green: gravity all-N + two-pass active-subset fused hydro on the (ρ,h) scratch")
+        let n = state.len();
+        assert_eq!(acc.len(), n, "acc length must match particle count");
+        assert_eq!(dudt.len(), n, "dudt length must match particle count");
+        match &mut self.gravity {
+            Some(g) => g.accelerations(state, acc),
+            None => acc.iter_mut().for_each(|a| *a = DVec3::ZERO),
+        }
+        // Zero-fill `dudt` exactly as `accel_and_dudt` does (non-gas rows stay 0);
+        // active gas rows are overwritten with their PdV+heating rate below.
+        dudt.iter_mut().for_each(|d| *d = 0.0);
+        let Some((gas, gpos, gvel, gmass, gu, active_local)) = self.active_gas(state, active)
+        else {
+            return;
+        };
+        let cfg = self.density_cfg.clone();
+        let params = self.params;
+        let rho = self.rho_scratch.as_mut().unwrap();
+        let h = self.h_hint.as_mut().unwrap();
+        density_adaptive_active(&gpos, &gmass, &cfg, &active_local, rho, h);
+        let contribs =
+            hydro_accel_and_dudt_active(&gpos, &gvel, &gmass, rho, h, &gu, &params, &active_local);
+        for (k, &loc) in active_local.iter().enumerate() {
+            acc[gas[loc]] += contribs[k].0;
+            dudt[gas[loc]] = contribs[k].1;
+        }
     }
 
     fn potential_energy(&self, state: &State) -> f64 {

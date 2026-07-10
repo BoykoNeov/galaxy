@@ -184,8 +184,175 @@ pub fn hydro_accel_and_dudt_active(
     params: &HydroParams,
     active: &[usize],
 ) -> Vec<(DVec3, f64)> {
-    let _ = (pos, vel, mass, rho, h, u, params, active);
-    todo!("I7 green: build HydroCtx over all gas, force_one over the active subset")
+    if pos.is_empty() {
+        return Vec::new();
+    }
+    let ctx = HydroCtx::new(pos, vel, mass, rho, h, u, params);
+    // `force_one` is a pure per-target function (no cross-target coupling), so the
+    // ordered rayon collect is bit-identical to the full pass at each active index.
+    active.par_iter().map(|&i| ctx.force_one(i)).collect()
+}
+
+/// Per-EOS pressure closure, precomputed once in [`HydroCtx::new`] (never per
+/// neighbour). Isothermal stores `cs2 = c_s²` and `c_s`; adiabatic stores γ and
+/// the per-particle sound speeds `c_s,i = √(γ(γ−1)uᵢ)`.
+enum HydroEos {
+    Isothermal { cs2: f64, c_s: f64 },
+    Adiabatic { gamma: f64, cs: Vec<f64> },
+}
+
+/// Shared setup for the SPH force / du-dt gather: the neighbour grid (built at the
+/// global `SUPPORT·h_max`) and per-EOS pressure data, plus the borrowed inputs. A
+/// per-target [`force_one`](Self::force_one) restricted to any subset produces
+/// **bit-identical** `(acc, du/dt)` to the full pass — the grid and EOS data are
+/// independent of the active set, and the gather reads only positions, velocities,
+/// and the (persistent) ρ/h scratch. Both the full impl (over `0..n`) and
+/// [`hydro_accel_and_dudt_active`] (over the active subset) run through it, so the
+/// two paths cannot drift.
+///
+/// NOTE (E1b scope guard): the isothermal arm is kept textually EQUIVALENT to the
+/// pre-E1b implementation (same `cs2`, same per-pair op order; the shared `c_bar`
+/// is `c_s` exactly on the isothermal branch) so byte-identity is structural — see
+/// the frozen-bits regression test.
+struct HydroCtx<'a> {
+    pos: &'a [DVec3],
+    vel: &'a [DVec3],
+    mass: &'a [f64],
+    rho: &'a [f64],
+    h: &'a [f64],
+    u: &'a [f64],
+    params: &'a HydroParams,
+    h_max: f64,
+    grid: HashGrid,
+    eos: HydroEos,
+}
+
+impl<'a> HydroCtx<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        pos: &'a [DVec3],
+        vel: &'a [DVec3],
+        mass: &'a [f64],
+        rho: &'a [f64],
+        h: &'a [f64],
+        u: &'a [f64],
+        params: &'a HydroParams,
+    ) -> Self {
+        let n = pos.len();
+        let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+        assert!(
+            h_max.is_finite() && h_max > 0.0,
+            "hydro_accelerations needs positive finite smoothing lengths"
+        );
+        // Gather at the GLOBAL max support (not per-target 2·h_i): the averaged
+        // kernel W̄ = ½(W(h_i)+W(h_j)) is nonzero for r < 2·max(h_i,h_j), so a pair
+        // with 2h_i < r < 2h_j contributes force to BOTH i and j. Querying only
+        // 2·h_i would give i's force to j but not j's to i — Newton's third law and
+        // momentum conservation would break. So this radius is load-bearing, not
+        // just a "don't miss a neighbor" convenience.
+        //
+        // PERF (flagged for M7c): under a wide adaptive-h range (a
+        // centrally-concentrated gas disk/merger) h_max is a far-outskirts value, so
+        // this global-radius gather goes quadratic — the same trap the M7d density
+        // deposition hit. The bit-exactness-preserving fix is the M7d scatter-by-
+        // plane template: gather at 2·h_i, then SCATTER each pair's contribution to
+        // both i and j over the h_j-reach in ascending index. Deferred: the M7b
+        // shock tube has near-uniform h (h_max ≈ h_typical), so it stays cheap here.
+        let grid = HashGrid::build(pos, SUPPORT * h_max);
+
+        let eos = match params.eos {
+            Eos::Isothermal { c_s } => HydroEos::Isothermal {
+                cs2: c_s * c_s,
+                c_s,
+            },
+            Eos::Adiabatic { gamma } => HydroEos::Adiabatic {
+                gamma,
+                // `sound_speed_of` is the shared adiabatic c_s formula (also used by
+                // cfl.rs) — bit-identical to the inlined `√(γ(γ−1)u)` it replaced.
+                cs: (0..n).map(|k| params.eos.sound_speed_of(u[k])).collect(),
+            },
+        };
+
+        HydroCtx {
+            pos,
+            vel,
+            mass,
+            rho,
+            h,
+            u,
+            params,
+            h_max,
+            grid,
+            eos,
+        }
+    }
+
+    /// `term_k = P_k/ρ_k²`: `cs2/ρ_k` (isothermal) or `(γ−1)u_k/ρ_k` (adiabatic).
+    #[inline]
+    fn term(&self, k: usize) -> f64 {
+        match &self.eos {
+            HydroEos::Isothermal { cs2, .. } => cs2 / self.rho[k],
+            HydroEos::Adiabatic { gamma, .. } => (gamma - 1.0) * self.u[k] / self.rho[k],
+        }
+    }
+
+    /// Viscosity mean sound speed `c̄`: the constant `c_s` (isothermal) or the
+    /// pair average `½(c_s,i+c_s,j)` (adiabatic).
+    #[inline]
+    fn c_bar(&self, i: usize, j: usize) -> f64 {
+        match &self.eos {
+            HydroEos::Isothermal { c_s, .. } => *c_s,
+            HydroEos::Adiabatic { cs, .. } => 0.5 * (cs[i] + cs[j]),
+        }
+    }
+
+    /// Acceleration + du/dt on target `i`: gather neighbours in ascending index
+    /// (fixed order ⇒ parallel ≡ serial bit-exact), sum the symmetric pressure
+    /// term and Monaghan viscosity against the exactly-negated grad-average.
+    /// `dudt_i` accumulates the PdV work ALONE (`term_i`, not `term_i+term_j+visc`)
+    /// — the exact energy-conserving partner of the symmetric momentum term — plus
+    /// the ½·Π viscous-heating partner (E3); it reuses `v_ij`/`grad_avg` already
+    /// computed for the accel sum, so accel's ops/order are untouched.
+    fn force_one(&self, i: usize) -> (DVec3, f64) {
+        let (pos, vel, mass, rho, h, params) =
+            (self.pos, self.vel, self.mass, self.rho, self.h, self.params);
+        let xi = pos[i];
+        let term_i = self.term(i);
+        let ngb = self.grid.neighbours_within(pos, xi, SUPPORT * self.h_max);
+        let mut a = DVec3::ZERO;
+        let mut dudt_i = 0.0;
+        for &j in &ngb {
+            if j == i {
+                continue;
+            }
+            let r_ij = xi - pos[j];
+            let r = r_ij.length();
+            // W̄ = ½(W(h_i)+W(h_j)); ∇_j W̄_ji is the exact negation of this.
+            let grad_avg = (grad_w(r_ij, h[i]) + grad_w(r_ij, h[j])) * 0.5;
+            let term_j = self.term(j);
+            // Monaghan artificial viscosity, active only on approach.
+            let v_ij = vel[i] - vel[j];
+            let vr = v_ij.dot(r_ij);
+            let visc = if vr < 0.0 {
+                let h_bar = 0.5 * (h[i] + h[j]);
+                let rho_bar = 0.5 * (rho[i] + rho[j]);
+                let mu = h_bar * vr / (r * r + params.visc_eps2 * h_bar * h_bar);
+                let c_bar = self.c_bar(i, j);
+                (-params.alpha * c_bar * mu + params.beta * mu * mu) / rho_bar
+            } else {
+                0.0
+            };
+            let coeff = term_i + term_j + visc;
+            // a_i += −m_j·coeff·∇_i W̄. Structured so the equal-mass pair term is the
+            // exact negation of particle j's (coeff bit-identical by commutativity,
+            // grad_avg exactly negated).
+            a += grad_avg * (-mass[j] * coeff);
+            // du_i/dt = Σ_j m_j (term_i + ½·Π_ij)(v_ij·∇W̄): PdV work + the
+            // viscous-heating partner (E3), ≥ 0 on approach (the entropy source).
+            dudt_i += mass[j] * (term_i + 0.5 * visc) * v_ij.dot(grad_avg);
+        }
+        (a, dudt_i)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,140 +370,10 @@ fn hydro_accel_and_dudt_impl(
     if n == 0 {
         return (Vec::new(), Vec::new());
     }
-    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
-    assert!(
-        h_max.is_finite() && h_max > 0.0,
-        "hydro_accelerations needs positive finite smoothing lengths"
-    );
-    // Gather at the GLOBAL max support (not per-target 2·h_i): the averaged
-    // kernel W̄ = ½(W(h_i)+W(h_j)) is nonzero for r < 2·max(h_i,h_j), so a pair
-    // with 2h_i < r < 2h_j contributes force to BOTH i and j. Querying only
-    // 2·h_i would give i's force to j but not j's to i — Newton's third law and
-    // momentum conservation would break. So this radius is load-bearing, not
-    // just a "don't miss a neighbor" convenience.
-    //
-    // PERF (flagged for M7c): under a wide adaptive-h range (a
-    // centrally-concentrated gas disk/merger) h_max is a far-outskirts value, so
-    // this global-radius gather goes quadratic — the same trap the M7d density
-    // deposition hit. The bit-exactness-preserving fix is the M7d scatter-by-
-    // plane template: gather at 2·h_i, then SCATTER each pair's contribution to
-    // both i and j over the h_j-reach in ascending index. Deferred: the M7b
-    // shock tube has near-uniform h (h_max ≈ h_typical), so it stays cheap here.
-    let grid = HashGrid::build(pos, SUPPORT * h_max);
-
-    // NOTE (E1b scope guard): the isothermal arm below is kept textually
-    // VERBATIM against the pre-E1b implementation (same `cs2`, same per-pair
-    // operation order, `c̄ = c_s`) so byte-identity is structural, not
-    // incidental — see the frozen-bits regression test.
-    match params.eos {
-        Eos::Isothermal { c_s } => {
-            let cs2 = c_s * c_s;
-
-            // Acceleration + du/dt on target `i`: gather neighbors in ascending
-            // index (fixed order ⇒ parallel ≡ serial bit-exact), sum the
-            // symmetric pressure term and Monaghan viscosity against the
-            // exactly-negated grad-average. `dudt_i` accumulates the PdV work
-            // ALONE (`term_i`, not `term_i+term_j+visc`) — the exact
-            // energy-conserving partner of the symmetric momentum term
-            // (viscous heating is E3); reuses `v_ij`/`grad_avg` already
-            // computed for the accel sum, so accel's ops/order are untouched.
-            let one = |i: usize| -> (DVec3, f64) {
-                let xi = pos[i];
-                let term_i = cs2 / rho[i]; // P_i/ρ_i² for the isothermal EOS
-                let ngb = grid.neighbours_within(pos, xi, SUPPORT * h_max);
-                let mut a = DVec3::ZERO;
-                let mut dudt_i = 0.0;
-                for &j in &ngb {
-                    if j == i {
-                        continue;
-                    }
-                    let r_ij = xi - pos[j];
-                    let r = r_ij.length();
-                    // W̄ = ½(W(h_i)+W(h_j)); ∇_j W̄_ji is the exact negation of this.
-                    let grad_avg = (grad_w(r_ij, h[i]) + grad_w(r_ij, h[j])) * 0.5;
-                    let term_j = cs2 / rho[j];
-                    // Monaghan artificial viscosity, active only on approach.
-                    let v_ij = vel[i] - vel[j];
-                    let vr = v_ij.dot(r_ij);
-                    let visc = if vr < 0.0 {
-                        let h_bar = 0.5 * (h[i] + h[j]);
-                        let rho_bar = 0.5 * (rho[i] + rho[j]);
-                        let mu = h_bar * vr / (r * r + params.visc_eps2 * h_bar * h_bar);
-                        // Isothermal: c̄ = c_s (constant sound speed).
-                        (-params.alpha * c_s * mu + params.beta * mu * mu) / rho_bar
-                    } else {
-                        0.0
-                    };
-                    let coeff = term_i + term_j + visc;
-                    // a_i += −m_j·coeff·∇_i W̄. Structured so the equal-mass pair term is
-                    // the exact negation of particle j's (coeff bit-identical by
-                    // commutativity, grad_avg exactly negated).
-                    a += grad_avg * (-mass[j] * coeff);
-                    // du_i/dt = Σ_j m_j (term_i + ½·Π_ij)(v_ij·∇W̄): PdV work +
-                    // the viscous-heating partner (E3). The ½ makes it the exact
-                    // energy-conserving mate of the momentum viscosity (pairwise
-                    // KE↔U cancellation, mod time integration) and it is ≥0 on
-                    // approach — the entropy source. Accel path above is untouched
-                    // (byte-identity of `hydro_accelerations` holds).
-                    dudt_i += mass[j] * (term_i + 0.5 * visc) * v_ij.dot(grad_avg);
-                }
-                (a, dudt_i)
-            };
-
-            if parallel {
-                (0..n).into_par_iter().map(one).unzip()
-            } else {
-                (0..n).map(one).unzip()
-            }
-        }
-        Eos::Adiabatic { gamma } => {
-            // Per-particle P_i=(γ−1)ρ_i u_i ⇒ term_i = P_i/ρ_i² = (γ−1)u_i/ρ_i.
-            // Precomputed once (not per neighbor) since both i and j read it.
-            // `sound_speed_of` is the shared adiabatic c_s formula (also used by
-            // cfl.rs) — bit-identical to the inlined `√(γ(γ−1)u)` it replaced.
-            let cs: Vec<f64> = (0..n).map(|k| params.eos.sound_speed_of(u[k])).collect();
-
-            let one = |i: usize| -> (DVec3, f64) {
-                let xi = pos[i];
-                let term_i = (gamma - 1.0) * u[i] / rho[i];
-                let ngb = grid.neighbours_within(pos, xi, SUPPORT * h_max);
-                let mut a = DVec3::ZERO;
-                let mut dudt_i = 0.0;
-                for &j in &ngb {
-                    if j == i {
-                        continue;
-                    }
-                    let r_ij = xi - pos[j];
-                    let r = r_ij.length();
-                    let grad_avg = (grad_w(r_ij, h[i]) + grad_w(r_ij, h[j])) * 0.5;
-                    let term_j = (gamma - 1.0) * u[j] / rho[j];
-                    let v_ij = vel[i] - vel[j];
-                    let vr = v_ij.dot(r_ij);
-                    let visc = if vr < 0.0 {
-                        let h_bar = 0.5 * (h[i] + h[j]);
-                        let rho_bar = 0.5 * (rho[i] + rho[j]);
-                        let mu = h_bar * vr / (r * r + params.visc_eps2 * h_bar * h_bar);
-                        // Adiabatic: c̄ = ½(c_s,i+c_s,j) (pair-averaged, unlike the
-                        // isothermal constant c_s).
-                        let c_bar = 0.5 * (cs[i] + cs[j]);
-                        (-params.alpha * c_bar * mu + params.beta * mu * mu) / rho_bar
-                    } else {
-                        0.0
-                    };
-                    let coeff = term_i + term_j + visc;
-                    a += grad_avg * (-mass[j] * coeff);
-                    // du_i/dt = Σ_j m_j (term_i + ½·Π_ij)(v_ij·∇W̄) — see the
-                    // isothermal branch above; c̄=½(c_s,i+c_s,j) here.
-                    dudt_i += mass[j] * (term_i + 0.5 * visc) * v_ij.dot(grad_avg);
-                }
-                (a, dudt_i)
-            };
-
-            if parallel {
-                (0..n).into_par_iter().map(one).unzip()
-            } else {
-                (0..n).map(one).unzip()
-            }
-        }
+    let ctx = HydroCtx::new(pos, vel, mass, rho, h, u, params);
+    if parallel {
+        (0..n).into_par_iter().map(|i| ctx.force_one(i)).unzip()
+    } else {
+        (0..n).map(|i| ctx.force_one(i)).unzip()
     }
 }

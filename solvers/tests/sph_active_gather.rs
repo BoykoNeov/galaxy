@@ -52,7 +52,10 @@ fn gas_cloud(seed: u64, n: usize, radius: f64) -> (Vec<DVec3>, Vec<DVec3>, Vec<f
             pos.push(p);
         }
     }
-    let vel: Vec<DVec3> = pos.iter().map(|&p| DVec3::new(-p.y, p.x, 0.0) * 0.3).collect();
+    let vel: Vec<DVec3> = pos
+        .iter()
+        .map(|&p| DVec3::new(-p.y, p.x, 0.0) * 0.3)
+        .collect();
     let mass = vec![1.0; n];
     let u = vec![0.5; n]; // used only by the adiabatic arm
     (pos, vel, mass, u)
@@ -98,8 +101,14 @@ fn density_active_all_equals_full_bit_identical() {
     let mut h = vec![0.0; pos.len()];
     density_adaptive_active(&pos, &mass, &cfg, &all, &mut rho, &mut h);
 
-    assert_eq!(rho, full.rho, "active-all density ρ must be bit-identical to full");
-    assert_eq!(h, full.h, "active-all density h must be bit-identical to full");
+    assert_eq!(
+        rho, full.rho,
+        "active-all density ρ must be bit-identical to full"
+    );
+    assert_eq!(
+        h, full.h,
+        "active-all density h must be bit-identical to full"
+    );
 }
 
 #[test]
@@ -117,8 +126,14 @@ fn forces_active_all_equals_full_bit_identical() {
 
     assert_eq!(contribs.len(), pos.len());
     for i in 0..pos.len() {
-        assert_eq!(contribs[i].0, acc_full[i], "active-all accel differs at {i}");
-        assert_eq!(contribs[i].1, dudt_full[i], "active-all du/dt differs at {i}");
+        assert_eq!(
+            contribs[i].0, acc_full[i],
+            "active-all accel differs at {i}"
+        );
+        assert_eq!(
+            contribs[i].1, dudt_full[i],
+            "active-all du/dt differs at {i}"
+        );
     }
 }
 
@@ -147,7 +162,10 @@ fn density_active_subset_matches_full_at_active_indices() {
     }
     density_adaptive_active(&pos, &mass, &cfg, &subset, &mut rho, &mut h);
     for &i in &subset {
-        assert_eq!(rho[i], full.rho[i], "subset density ρ differs at active {i}");
+        assert_eq!(
+            rho[i], full.rho[i],
+            "subset density ρ differs at active {i}"
+        );
         assert_eq!(h[i], full.h[i], "subset density h differs at active {i}");
     }
 }
@@ -168,8 +186,14 @@ fn forces_active_subset_matches_full_at_active_indices() {
         hydro_accel_and_dudt_active(&pos, &vel, &mass, &dens.rho, &dens.h, &u, &params, &subset);
     assert_eq!(contribs.len(), subset.len());
     for (k, &i) in subset.iter().enumerate() {
-        assert_eq!(contribs[k].0, acc_full[i], "subset accel differs at active {i}");
-        assert_eq!(contribs[k].1, dudt_full[i], "subset du/dt differs at active {i}");
+        assert_eq!(
+            contribs[k].0, acc_full[i],
+            "subset accel differs at active {i}"
+        );
+        assert_eq!(
+            contribs[k].1, dudt_full[i],
+            "subset du/dt differs at active {i}"
+        );
     }
 }
 
@@ -222,7 +246,13 @@ fn gravity_sph_accel_and_dudt_active_all_equals_full_twice() {
         let (mut a_active, mut d_active) = (vec![DVec3::ZERO; n], vec![0.0; n]);
         full.accel_and_dudt(&state, &mut a_full, &mut d_full);
         active.accel_and_dudt_active(&state, &all, &mut a_active, &mut d_active);
-        assert_eq!(a_active, a_full, "active fused accel differs (round {round})");
-        assert_eq!(d_active, d_full, "active fused du/dt differs (round {round})");
+        assert_eq!(
+            a_active, a_full,
+            "active fused accel differs (round {round})"
+        );
+        assert_eq!(
+            d_active, d_full,
+            "active fused du/dt differs (round {round})"
+        );
     }
 }

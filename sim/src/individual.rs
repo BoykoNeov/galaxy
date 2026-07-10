@@ -282,19 +282,21 @@ impl ActiveSetKdk {
             for (x, v) in state.pos.iter_mut().zip(&state.vel) {
                 *x += *v * d;
             }
-            // Fresh force at the new positions (the caching POLICY — fresh vs a
-            // stale tree — is the driver's choice at I4/I6, not this mechanic's:
-            // it takes forces through the ForceSolver seam).
-            solver.accelerations(state, &mut self.acc);
-
             let ticks_done = k + 1; // fine ticks completed this block, in units of d
             let block_end = ticks_done == n_fine;
-            #[allow(clippy::needless_range_loop)] // parallel SoA columns, as above
-            for i in 0..n {
-                let period: u64 = 1 << (r_max - rungs[i]); // active every `period` ticks
-                if ticks_done % period != 0 {
-                    continue;
-                }
+            // The ACTIVE subset this tick: exactly the particles whose rung is due
+            // (about to be kicked ⇒ they need a fresh force). Collecting it once and
+            // asking the solver for forces on only these is the I7 efficiency win —
+            // a rung-`r` particle appears in `2^r` of the `2^r_max` ticks, so the
+            // block does `Σ_i 2^r_i` force evals, not `N·2^r_max`. Positions are
+            // exact (drifted above), so an active target's SPH gather reads exact
+            // neighbour positions and persistent (slowly-varying) neighbour ρ/h.
+            let active: Vec<usize> = (0..n)
+                .filter(|&i| ticks_done % (1u64 << (r_max - rungs[i])) == 0)
+                .collect();
+            solver.accelerations_active(state, &active, &mut self.acc);
+
+            for &i in &active {
                 let step_i = dt_base / (1u64 << rungs[i]) as f64;
                 if block_end {
                     // Closing half-kick: the particle's step ends at the block
@@ -466,17 +468,16 @@ impl ActiveSetKdkThermal {
             for (x, v) in state.pos.iter_mut().zip(&state.vel) {
                 *x += *v * d;
             }
-            // Fresh fused force at the new positions.
-            solver.accel_and_dudt(state, &mut self.acc, &mut self.dudt);
-
             let ticks_done = k + 1;
             let block_end = ticks_done == n_fine;
-            #[allow(clippy::needless_range_loop)] // parallel SoA columns
-            for i in 0..n {
-                let period: u64 = 1 << (r_max - rungs[i]);
-                if ticks_done % period != 0 {
-                    continue;
-                }
+            // The ACTIVE subset this tick (about to be kicked ⇒ needs a fresh fused
+            // force) — the I7 efficiency subset, identical to the isothermal arm's.
+            let active: Vec<usize> = (0..n)
+                .filter(|&i| ticks_done % (1u64 << (r_max - rungs[i])) == 0)
+                .collect();
+            solver.accel_and_dudt_active(state, &active, &mut self.acc, &mut self.dudt);
+
+            for &i in &active {
                 let step_i = dt_base / (1u64 << rungs[i]) as f64;
                 // Closing half-kick at the block boundary; a full-step kick at an
                 // interior boundary (the KDK half-kick merge). Kicks vel AND u.

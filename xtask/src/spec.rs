@@ -290,8 +290,19 @@ pub enum IndividualMode {
     /// enables adaptive at its defaults.
     #[default]
     HydroOnly,
-    /// `hydro-only` PLUS gravity subcycling (lever b, I-grav). **Not yet implemented** —
-    /// rejected at validation until the gravity layer lands.
+    /// `hydro-only` PLUS gravity subcycling (lever b, I-grav): collisionless stars get
+    /// finite gravitational rungs and the gravity WALK runs against a once-per-base-block
+    /// cached (stale) tree. Built (M9–M12) and wired.
+    ///
+    /// ⚠ **FLOODS at full res — no perf benefit at today's N.** The FULL M-validate
+    /// (2026-07-11) found the stale tree drives the merger core into a sustained
+    /// finest-rung flood (min-dt below the fresh-hydro-only floor, CFL range ballooning
+    /// past 100× toward the cached-flood 196×) → SLOWER than `hydro-only`, not faster.
+    /// The QUICK 2.55× speedup was a QUICK-only artifact (QUICK never reaches the
+    /// supersonic pericenter infall). The flooded trajectory is convergent-but-coarse
+    /// (O(courant) stale-COM error) — slow-and-imprecise, not incorrect. Retained as an
+    /// opt-in toggle for scaling/completeness; **prefer `hydro-only` for production runs.**
+    /// See docs/plans/laddered-ember-cadence.md (M-validate FULL).
     #[serde(rename = "hydro+gravity")]
     HydroGravity,
 }

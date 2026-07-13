@@ -28,7 +28,8 @@ pub use density::{
 };
 pub use frame::{FrameData, FrameError, FrameHeader};
 pub use gasgrid::{
-    deposit_fixed, deposit_fixed_serial, deposit_gas, sample_mix, GasGrid, GasGridConfig,
+    deposit_fixed, deposit_fixed_serial, deposit_gas, deposit_gas_with_temperature,
+    deposit_moment_fixed, deposit_moment_fixed_serial, sample_mix, GasGrid, GasGridConfig,
 };
 pub use interp::{subframe, HermiteSpan, InterpError};
 pub use prepare::{prepare, ColorMode, CompressionHue, DispersionColoring, PrepConfig};

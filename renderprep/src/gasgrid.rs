@@ -192,17 +192,56 @@ pub fn deposit_fixed_serial(
     deposit_impl(pos, mass, h, dims, bounds_min, bounds_max, false)
 }
 
+/// Deposit the internal-energy MOMENT `N = Σ_j (m_j·u_j)·W(|x_cell − x_j|, h_j)`
+/// — the identical scatter-by-plane deposition as [`deposit_fixed`] but with the
+/// per-particle weight `m_j·u_j` instead of `m_j`. Divided by the co-registered
+/// density grid, `ū = N/ρ` is the SPH mass-weighted specific internal energy at
+/// each cell — the temperature field (`T ∝ u`) the raymarcher colors by (plan
+/// `incandescent-nebular-veil`). The result is a `GasGrid` (a scalar field at
+/// cell centers, sampled by the same [`GasGrid::sample`]); only its physical
+/// meaning differs from a density grid.
+///
+/// Bit-exact `parallel ≡ serial` holds for `N` by the same `+0.0`
+/// scatter-by-plane argument as ρ. Panics on the same malformed inputs as
+/// [`deposit_fixed`], plus a `u` length mismatch.
+pub fn deposit_moment_fixed(
+    pos: &[DVec3],
+    mass: &[f64],
+    u: &[f64],
+    h: &[f64],
+    dims: [u32; 3],
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+) -> GasGrid {
+    let _ = (pos, mass, u, h, dims, bounds_min, bounds_max);
+    todo!("H1: deposit N = Σ (m_j·u_j)·W via the weighted deposit_impl")
+}
+
+/// Serial twin of [`deposit_moment_fixed`] for the parallel ≡ serial gate.
+pub fn deposit_moment_fixed_serial(
+    pos: &[DVec3],
+    mass: &[f64],
+    u: &[f64],
+    h: &[f64],
+    dims: [u32; 3],
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+) -> GasGrid {
+    let _ = (pos, mass, u, h, dims, bounds_min, bounds_max);
+    todo!("H1: serial N deposition")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn deposit_impl(
     pos: &[DVec3],
-    mass: &[f64],
+    weight: &[f64],
     h: &[f64],
     dims: [u32; 3],
     bounds_min: Vec3,
     bounds_max: Vec3,
     parallel: bool,
 ) -> GasGrid {
-    assert_eq!(mass.len(), pos.len(), "mass length must match pos");
+    assert_eq!(weight.len(), pos.len(), "weight length must match pos");
     assert_eq!(h.len(), pos.len(), "h length must match pos");
     assert!(
         dims.iter().all(|&d| d >= 1),
@@ -274,7 +313,7 @@ fn deposit_impl(
                 for ix in x_lo..=x_hi {
                     let cx = bmin.x + (ix as f64 + 0.5) * cell.x;
                     let d = DVec3::new(cx, cy, cz) - pos[j];
-                    acc[row + ix as usize] += mass[j] * w(d.length(), h[j]);
+                    acc[row + ix as usize] += weight[j] * w(d.length(), h[j]);
                 }
             }
         }
@@ -342,4 +381,19 @@ pub fn deposit_gas(state: &State, cfg: &GasGridConfig) -> Option<GasGrid> {
     Some(deposit_fixed(
         &pos, &mass, &h, cfg.dims, bounds_min, bounds_max,
     ))
+}
+
+/// Voxelize BOTH the gas density ρ and the internal-energy moment
+/// `N = Σ (m_j·u_j)·W` with ONE shared adaptive-h solve and identical geometry,
+/// returning `(rho, moment)`. The two grids are co-registered (same `dims`,
+/// `bounds`, and per-particle `h`), so `moment.sample(p) / rho.sample(p)` is the
+/// SPH mass-weighted specific internal energy `ū` at `p` — the temperature field
+/// the raymarcher colors by. `rho` is bit-identical to [`deposit_gas`]'s grid
+/// (same inputs, same deposition). `None` when the state holds no gas.
+pub fn deposit_gas_with_temperature(
+    state: &State,
+    cfg: &GasGridConfig,
+) -> Option<(GasGrid, GasGrid)> {
+    let _ = (state, cfg);
+    todo!("H1: co-registered (rho, u-moment) deposition sharing one h-solve")
 }

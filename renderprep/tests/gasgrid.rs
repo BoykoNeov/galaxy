@@ -10,7 +10,8 @@
 
 use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 use galaxy_renderprep::gasgrid::{
-    deposit_fixed, deposit_fixed_serial, deposit_gas, sample_mix, GasGrid, GasGridConfig,
+    deposit_fixed, deposit_fixed_serial, deposit_gas, deposit_gas_with_temperature,
+    deposit_moment_fixed, deposit_moment_fixed_serial, sample_mix, GasGrid, GasGridConfig,
 };
 use galaxy_solvers::sph::{density_adaptive, w, DensityConfig, SUPPORT};
 use glam::Vec3;
@@ -41,14 +42,21 @@ fn random_cloud(n: usize, r: f64, seed: u64) -> Vec<DVec3> {
 
 /// An all-gas `State` at the given positions with unit masses.
 fn gas_state(pos: Vec<DVec3>) -> State {
+    gas_state_u(pos.clone(), vec![0.0; pos.len()])
+}
+
+/// An all-gas `State` with per-particle specific internal energy `u` (unit
+/// masses) — the temperature-channel fixtures.
+fn gas_state_u(pos: Vec<DVec3>, u: Vec<f64>) -> State {
     let n = pos.len();
+    assert_eq!(u.len(), n);
     State {
         vel: vec![DVec3::ZERO; n],
         mass: vec![1.0; n],
         id: (0..n as u64).map(ParticleId).collect(),
         progenitor: vec![Progenitor(4); n],
         kind: vec![Species::Gas; n],
-        u: vec![0.0; n],
+        u,
         time: 0.0,
         a: 1.0,
         pos,
@@ -523,4 +531,138 @@ fn sample_mix_endpoints_reproduce_the_grids_bit_exact() {
         assert_eq!(sample_mix(&g0, &g1, 0.0, p), g0.sample(p));
         assert_eq!(sample_mix(&g0, &g1, 1.0, p), g1.sample(p));
     }
+}
+
+// ---------- internal-energy moment (temperature channel, plan H1) ----------
+//
+// The moment grid deposits N = Σ (m_j·u_j)·W with the SAME scatter-by-plane
+// machinery as ρ, so it inherits the kernel-exactness and parallel≡serial
+// oracles. Divided by the co-registered ρ grid, ū = N/ρ is the mass-weighted
+// specific internal energy (T ∝ u) the raymarcher colors by.
+
+#[test]
+fn moment_single_particle_reproduces_the_weighted_kernel() {
+    // One particle (mass m, energy u) at a cell center: N must equal the kernel
+    // scaled by the deposit weight m·u at EVERY cell center, exactly (a one-term
+    // sum, no tolerance) — the moment twin of the density single-particle gate.
+    let dims = [8, 8, 8];
+    let (bmin, bmax) = (Vec3::splat(-2.0), Vec3::splat(2.0));
+    let p = DVec3::new(0.25, 0.25, 0.25); // cell (4,4,4) center
+    let (h, m, u) = (0.8, 1.5, 3.0);
+    let mom = deposit_moment_fixed(&[p], &[m], &[u], &[h], dims, bmin, bmax);
+
+    let weight = m * u;
+    for iz in 0..dims[2] {
+        for iy in 0..dims[1] {
+            for ix in 0..dims[0] {
+                let c = mom.cell_center(ix, iy, iz);
+                let expect = (weight * w((c - p).length(), h)) as f32;
+                assert_eq!(
+                    mom.data[mom.index(ix, iy, iz)],
+                    expect,
+                    "moment cell ({ix},{iy},{iz}) is not the weighted kernel"
+                );
+            }
+        }
+    }
+    // The self cell: m·u·W(0).
+    let self_cell = mom.data[mom.index(4, 4, 4)];
+    assert_eq!(
+        self_cell,
+        (weight / (std::f64::consts::PI * h * h * h)) as f32
+    );
+}
+
+#[test]
+fn moment_energy_linearity_is_exact() {
+    // Doubling every particle's u doubles every moment cell bit-exactly (×2 is
+    // exact in IEEE and commutes with the fixed-order sum) — while ρ is untouched.
+    let pos = random_cloud(200, 3.0, 11);
+    let h = vec![0.9; 200];
+    let mass = vec![1.5; 200];
+    let u1 = vec![2.0; 200];
+    let u2 = vec![4.0; 200];
+    let dims = [16, 16, 16];
+    let (bmin, bmax) = (Vec3::splat(-5.0), Vec3::splat(5.0));
+    let n1 = deposit_moment_fixed(&pos, &mass, &u1, &h, dims, bmin, bmax);
+    let n2 = deposit_moment_fixed(&pos, &mass, &u2, &h, dims, bmin, bmax);
+    for (a, b) in n1.data.iter().zip(&n2.data) {
+        assert_eq!(*b, 2.0 * *a);
+    }
+}
+
+#[test]
+fn moment_parallel_matches_serial_bit_exact() {
+    // The N deposition inherits the ρ path's fixed per-cell gather order, so
+    // parallel ≡ serial holds bit-for-bit with varied h and per-particle u.
+    let mut pos = random_cloud(400, 2.0, 42);
+    pos.extend(random_cloud(400, 0.3, 43)); // dense knot
+    let n = pos.len();
+    let mut seed = 7u64;
+    let h: Vec<f64> = (0..n).map(|_| 0.2 + 0.6 * splitmix(&mut seed)).collect();
+    let mass: Vec<f64> = (0..n).map(|_| 0.5 + splitmix(&mut seed)).collect();
+    let u: Vec<f64> = (0..n).map(|_| 0.1 + 5.0 * splitmix(&mut seed)).collect();
+    let dims = [20, 17, 23];
+    let (bmin, bmax) = (Vec3::splat(-3.0), Vec3::splat(3.0));
+
+    let par = deposit_moment_fixed(&pos, &mass, &u, &h, dims, bmin, bmax);
+    let ser = deposit_moment_fixed_serial(&pos, &mass, &u, &h, dims, bmin, bmax);
+    assert_eq!(par, ser, "parallel and serial moment deposition disagree");
+}
+
+#[test]
+fn uniform_energy_field_recovers_u_exactly() {
+    // A cloud with constant u = 2.0 (a power of two): m_j·2 is exact, so N = 2·ρ
+    // bit-for-bit through the whole sum, and ū = N/ρ = 2.0 EXACTLY wherever the
+    // gas is present. This is the isothermal sanity — flat u ⇒ flat temperature.
+    let pos = random_cloud(300, 3.0, 71);
+    let mass: Vec<f64> = {
+        let mut s = 9u64;
+        (0..pos.len()).map(|_| 0.5 + splitmix(&mut s)).collect()
+    };
+    let u = vec![2.0; pos.len()];
+    let h = vec![0.8; pos.len()];
+    let dims = [16, 16, 16];
+    let (bmin, bmax) = (Vec3::splat(-5.0), Vec3::splat(5.0));
+    let rho = deposit_fixed(&pos, &mass, &h, dims, bmin, bmax);
+    let mom = deposit_moment_fixed(&pos, &mass, &u, &h, dims, bmin, bmax);
+    for i in 0..rho.data.len() {
+        if rho.data[i] > 0.0 {
+            assert_eq!(mom.data[i], 2.0 * rho.data[i], "cell {i}: N != 2·ρ");
+            // ū = N/ρ at the cell center (sample is exact at centers).
+            assert_eq!(mom.data[i] / rho.data[i], 2.0, "cell {i}: ū != 2.0");
+        }
+    }
+}
+
+#[test]
+fn deposit_gas_with_temperature_coregisters_and_matches_deposit_gas() {
+    // The paired (ρ, moment) deposition must reuse ONE h-solve and geometry: the
+    // ρ grid is bit-identical to deposit_gas, and the moment grid shares dims and
+    // bounds. With a uniform u = 2.0, ū = N/ρ recovers 2.0 in every occupied cell.
+    let pos = random_cloud(500, 4.0, 33);
+    let state = gas_state_u(pos, vec![2.0; 500]);
+    let cfg = GasGridConfig {
+        dims: [32; 3],
+        ..Default::default()
+    };
+    let rho_only = deposit_gas(&state, &cfg).expect("gas present");
+    let (rho, mom) = deposit_gas_with_temperature(&state, &cfg).expect("gas present");
+
+    assert_eq!(rho, rho_only, "paired ρ diverged from deposit_gas");
+    assert_eq!(mom.dims, rho.dims, "moment grid dims not co-registered");
+    assert_eq!(mom.bounds_min, rho.bounds_min, "moment bounds_min diverged");
+    assert_eq!(mom.bounds_max, rho.bounds_max, "moment bounds_max diverged");
+    for i in 0..rho.data.len() {
+        if rho.data[i] > 0.0 {
+            assert_eq!(mom.data[i] / rho.data[i], 2.0, "cell {i}: ū != 2.0");
+        }
+    }
+}
+
+#[test]
+fn deposit_gas_with_temperature_returns_none_without_gas() {
+    let mut state = gas_state(random_cloud(50, 1.0, 9));
+    state.kind = vec![Species::Collisionless; state.len()];
+    assert!(deposit_gas_with_temperature(&state, &GasGridConfig::default()).is_none());
 }

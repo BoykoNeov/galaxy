@@ -17,7 +17,7 @@
 
 use serde::Deserialize;
 
-use galaxy_core::State;
+use galaxy_core::{Species, State};
 use galaxy_grade::LocalToneConfig;
 use galaxy_ic::{
     DiskCollision, ExponentialDisk, Nfw, NfwCollision, Orientation, Plummer, SphericalHalo,
@@ -154,6 +154,22 @@ pub struct GasSpec {
     pub fraction: f64,
     /// Isothermal sound speed c_s (also the solver's `HydroParams.sound_speed`).
     pub sound_speed: f64,
+    /// Adiabatic index γ (incandescent-nebular-veil, H5-C). `None` = isothermal
+    /// (`P = c_s²ρ`, the M7c default — byte-unchanged). `Some(γ > 1)` switches the
+    /// gas to the ideal-gas adiabatic EOS `P = (γ−1)ρu`, evolving each gas
+    /// particle's internal energy so shock heating (e.g. at pericenter) shows up
+    /// as temperature. `sound_speed` then seeds the initial `u = c_s²/(γ−1)`, so
+    /// the t=0 pressure `(γ−1)ρu` equals the isothermal equilibrium `c_s²ρ` the
+    /// sampler bakes — the disk starts in true force balance (no spurious startup
+    /// contraction/heating), only real shocks light up.
+    #[serde(default)]
+    pub gamma: Option<f64>,
+    /// Positive internal-energy floor `u_min` for the adiabatic thermal integrator
+    /// (`u ← max(u, u_min)` after each half-kick), guarding a rarefaction
+    /// undershoot into negative `u`/NaN `c_s` on a strong merger. `None` = 0.0
+    /// (inert). Meaningful only with `gamma`.
+    #[serde(default)]
+    pub u_floor: Option<f64>,
 }
 
 /// Full-resolution vs QUICK-preview particle counts.
@@ -1192,6 +1208,15 @@ pub struct Scenario {
     /// value into both the IC's pressure equilibrium (already baked into `state`)
     /// and the force solver's `HydroParams`, so the two cannot diverge.
     pub sound_speed: Option<f64>,
+    /// Adiabatic index γ when the gas is adiabatic (`[model.gas].gamma`), else
+    /// `None` (isothermal). `Some` implies [`sound_speed`](Self::sound_speed) is
+    /// `Some` (adiabatic ⇒ gas-rich). Routes `simulate_snapshots` to the
+    /// `LeapfrogKdkThermal` + `Eos::Adiabatic` block-adaptive path; the IC's gas
+    /// `u` is seeded from `sound_speed` so the disk starts in pressure equilibrium.
+    pub gamma: Option<f64>,
+    /// Positive-`u` floor for the adiabatic thermal integrator (`[model.gas].u_floor`),
+    /// `0.0` when unset or isothermal (inert).
+    pub u_floor: f64,
     /// Volumetric gas look (M7f) when the scenario is gas-rich, else `None`.
     /// `Some` **iff** [`sound_speed`](Self::sound_speed) is `Some` (both are
     /// gas-only): the movie pipeline builds a `galaxy_render::GasLook` from it,
@@ -1457,6 +1482,10 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         ramp: spec.look.ramps.iter().map(|r| (r.inner, r.outer)).collect(),
         sf_progenitors: spec.look.sf_progenitors.clone(),
         sound_speed,
+        // RED: not yet threaded from `[model.gas]` — hardcoded so the workspace
+        // compiles; the H5-C green step derives these from the gas spec.
+        gamma: None,
+        u_floor: 0.0,
         // Gas look (M7f): `Some` iff the scenario is gas-rich (tied to `sound_speed`,
         // the other gas-only field), taking the declared `[look.gas]` or the neutral
         // default the renderer falls back to when the model has gas but omits it.
@@ -2158,6 +2187,71 @@ mod tests {
             (format!("{base}bogus = 1.0\n"), "unknown temperature key"),
         ] {
             assert!(parse_scenario_toml(&bad).is_err(), "should reject: {why}");
+        }
+    }
+
+    // --- adiabatic gas EOS ([model.gas].gamma, incandescent-nebular-veil H5-C) ---
+
+    /// gasrich with an adiabatic EOS spliced into `[model.gas]` (γ = 5/3 monatomic),
+    /// injected right after the existing `sound_speed` line so it lands in that table.
+    fn adiabatic_gasrich_toml() -> String {
+        preset("gasrich").unwrap().replace(
+            "sound_speed = 0.1",
+            "sound_speed = 0.1\ngamma = 1.6666666666666667",
+        )
+    }
+
+    #[test]
+    fn adiabatic_gamma_threads_and_seeds_gas_internal_energy() {
+        let spec = parse_scenario_toml(&adiabatic_gasrich_toml()).expect("valid adiabatic gas");
+        let s = build_scenario(&spec, true);
+        let gamma = s.gamma.expect("adiabatic scenario carries γ");
+        assert!((gamma - 5.0 / 3.0).abs() < 1e-12, "γ threads verbatim");
+        let c_s = s.sound_speed.expect("gas-rich ⇒ sound_speed");
+        // Each gas particle seeds `u` so the t=0 pressure equals the isothermal
+        // equilibrium the sampler baked: `P=(γ−1)ρu = c_s²ρ ⇒ (γ−1)u = c_s²`. Gate
+        // the PRESSURE invariant, not the rearranged formula — it discriminates
+        // pressure-match (passes) from sound-speed-match (`c_s²/γ ≠ c_s²`, fails).
+        let cs2 = c_s * c_s;
+        let mut gas_seen = 0usize;
+        for (&u, k) in s.state.u.iter().zip(&s.state.kind) {
+            match k {
+                Species::Gas => {
+                    assert!(
+                        ((gamma - 1.0) * u - cs2).abs() < 1e-12,
+                        "gas u must satisfy (γ−1)u = c_s²: u={u}, (γ−1)u={}, c_s²={cs2}",
+                        (gamma - 1.0) * u
+                    );
+                    gas_seen += 1;
+                }
+                Species::Collisionless => assert_eq!(u, 0.0, "non-gas u stays 0"),
+            }
+        }
+        assert!(gas_seen > 0, "adiabatic gasrich must carry gas particles");
+    }
+
+    #[test]
+    fn isothermal_gasrich_leaves_gamma_none_and_u_zero() {
+        // No `[model.gas].gamma` ⇒ isothermal: γ None, all u = 0 (byte-unchanged path).
+        let s = build_scenario(&parse_preset("gasrich"), true);
+        assert!(s.gamma.is_none(), "isothermal gasrich carries no γ");
+        assert!(
+            s.state.u.iter().all(|&u| u == 0.0),
+            "isothermal ⇒ u = 0 everywhere"
+        );
+    }
+
+    #[test]
+    fn adiabatic_validation_rejects_gamma_at_or_below_one() {
+        for bad_gamma in ["1.0", "0.5", "-1.0"] {
+            let text = preset("gasrich").unwrap().replace(
+                "sound_speed = 0.1",
+                &format!("sound_speed = 0.1\ngamma = {bad_gamma}"),
+            );
+            assert!(
+                parse_scenario_toml(&text).is_err(),
+                "γ = {bad_gamma} must be rejected (adiabatic index must exceed 1)"
+            );
         }
     }
 

@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use galaxy_core::{LeapfrogKdk, State, StaticBackground};
+use galaxy_core::{LeapfrogKdk, LeapfrogKdkThermal, State, StaticBackground};
 use galaxy_gpu::GpuResidentLeapfrog;
 use galaxy_io::Header;
 use galaxy_sim::{
@@ -80,6 +80,31 @@ pub fn simulate_snapshots(
         // diverge. `backend` picks the CPU composite (guarded by the CFL sentinel)
         // or the GPU-resident stepper (G6).
         Some(sound_speed) => {
+            // Adiabatic gas (`[model.gas].gamma`, H5-C) is wired only on the CPU
+            // block-adaptive path: the fixed-dt `CflGuard` calls
+            // `HydroParams::sound_speed()` (panics on `Eos::Adiabatic`), the individual
+            // arm hardcodes `ThermalArm::Isothermal`, and GPU adiabatic is deferred.
+            // Reject the unsupported compositions loud — otherwise they run *silently
+            // isothermal* (the IC seeds `u` but the isothermal integrator ignores it),
+            // which is a black temperature render, not an error.
+            if s.gamma.is_some() {
+                if backend != Backend::Cpu {
+                    return Err(
+                        "adiabatic gas is CPU-only (the GPU adiabatic EOS is deferred)".into(),
+                    );
+                }
+                if s.individual.is_some() {
+                    return Err("adiabatic gas is not supported with [sim.individual] \
+                                (the individual thermal arm is isothermal-only)"
+                        .into());
+                }
+                if s.adaptive.is_none() {
+                    return Err("adiabatic gas requires [sim.adaptive] (the fixed-dt CFL \
+                                guard assumes a single isothermal c_s)"
+                        .into());
+                }
+            }
+
             let hydro = HydroParams {
                 eos: Eos::Isothermal { c_s: sound_speed },
                 ..HydroParams::default()
@@ -152,16 +177,41 @@ pub fn simulate_snapshots(
                 (Backend::Cpu, Some(a)) => {
                     let adaptive_cfg = build_adaptive_config(s, &a)?;
                     let gravity = BarnesHut::new(G, s.eps, THETA);
-                    let mut solver = GravitySph::new(gravity, hydro, density_cfg);
                     let mut sink = DirectorySink::new(snap_dir)?;
-                    Ok(run_adaptive(
-                        &mut state,
-                        &mut solver,
-                        &mut integ,
-                        &bg,
-                        &adaptive_cfg,
-                        &mut sink,
-                    )?)
+                    match s.gamma {
+                        // Adiabatic (H5-C): evolved-`u` EOS `P=(γ−1)ρu` + the thermal
+                        // integrator (E2/E3), sized by the per-particle adiabatic CFL arm
+                        // (E4a) reading `c_s=√(γ(γ−1)u)`. The `with_u_floor` guards a
+                        // rarefaction undershoot into negative `u`/NaN `c_s`.
+                        Some(gamma) => {
+                            let hydro_ad = HydroParams {
+                                eos: Eos::Adiabatic { gamma },
+                                ..hydro
+                            };
+                            let mut solver = GravitySph::new(gravity, hydro_ad, density_cfg);
+                            let mut integ_t = LeapfrogKdkThermal::with_u_floor(s.u_floor);
+                            Ok(run_adaptive(
+                                &mut state,
+                                &mut solver,
+                                &mut integ_t,
+                                &bg,
+                                &adaptive_cfg,
+                                &mut sink,
+                            )?)
+                        }
+                        // Isothermal: the pre-H5-C path, byte-unchanged.
+                        None => {
+                            let mut solver = GravitySph::new(gravity, hydro, density_cfg);
+                            Ok(run_adaptive(
+                                &mut state,
+                                &mut solver,
+                                &mut integ,
+                                &bg,
+                                &adaptive_cfg,
+                                &mut sink,
+                            )?)
+                        }
+                    }
                 }
                 // Fixed-dt GPU-resident SPH (G6, adaptive off).
                 (Backend::Gpu, None) => {

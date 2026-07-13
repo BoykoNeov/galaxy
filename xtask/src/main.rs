@@ -32,6 +32,14 @@
 //!     gas (emission + absorption) over a star field with per-star
 //!     transmittance, plus the attenuation-off A/B twin and a stars-only
 //!     reference — no sim.
+//!   * `temp-demo [out_dir] [--n N] [--stars N] [--res R] [--seed S]
+//!     [--incline DEG] [--kappa K] [--emissivity J] [--exposure E]
+//!     [--u-cold U] [--u-hot U] [--r-core R] [--u-lo U] [--u-hi U]
+//!     [--cold R,G,B] [--hot R,G,B]` (H5-B) paints a synthetic hot-core /
+//!     cold-outskirts internal-energy field on the volume-demo gas and renders
+//!     it through the temperature colormap (ū = N/ρ → cold→hot lerp over a fixed
+//!     `[u_lo, u_hi]` band), plus a flat-tint A/B control and a stars-only
+//!     reference — the offline colormap look-dev before the adiabatic sim; no sim.
 //!   * Set `GALAXY_MOVIE_QUICK=1` for a fast low-N, low-res preview (same physical
 //!     time and dt, so the trajectory is faithful — only particle count, frame size,
 //!     and frame cadence are reduced). Use it to sanity-check a scenario before a
@@ -146,6 +154,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // per-star attenuation) on static synthetic data — no sim.
     if args.first().map(String::as_str) == Some("volume-demo") {
         return volume_demo(&args[1..]);
+    }
+
+    // `temp-demo` (H5-B) is the temperature-color look-dev demo: a synthetic
+    // hot-core/cold-outskirts internal-energy field over the volume-demo scene,
+    // rendered through the H1-H4 temperature colormap plus a flat-tint A/B twin —
+    // proves the moment→ū→color path end-to-end and tunes the band offline; no sim.
+    if args.first().map(String::as_str) == Some("temp-demo") {
+        return temp_demo(&args[1..]);
     }
 
     // `rung-spread` is the I0 go/no-go measurement (docs/plans/laddered-ember-
@@ -800,6 +816,216 @@ fn volume_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     emit("stars_only", None)?;
     println!("A/B pair: composite.png (attenuation ON) vs no_absorption.png (κ = 0)");
+    Ok(())
+}
+
+/// Temperature-color look-dev demo (H5 phase B). Takes the `volume-demo` scene
+/// (synthetic sech² gas disk + star field) and paints a synthetic internal-energy
+/// field on the gas — a hot Gaussian core fading to cold outskirts,
+/// `u(r) = u_cold + (u_hot − u_cold)·exp(−(r/r_core)²)` — then renders it through
+/// the H1-H4 temperature colormap (deposit the ρ + energy-moment pair, map ū = N/ρ
+/// across a fixed `[u_lo, u_hi]` band to a cold→hot lerp). Emits three PNGs into
+/// `out`: `temperature` (the colored gas), `flat` (the same geometry with a flat
+/// tint — the A/B control proving the colormap is what changes the look), and
+/// `stars_only` (reference). No sim: the field is synthetic, so the whole cold/hot/
+/// band/color surface is tunable from the CLI at render cost (~seconds), which is
+/// the point of doing this before wiring the adiabatic front-end (phase C).
+///
+/// Usage: `temp-demo [out_dir] [--n N] [--stars N] [--res R] [--seed S]
+///         [--incline DEG] [--kappa K] [--emissivity J] [--exposure E]
+///         [--u-cold U] [--u-hot U] [--r-core R] [--u-lo U] [--u-hi U]
+///         [--cold R,G,B] [--hot R,G,B]`. The band defaults to `[u_cold, u_hot]`.
+fn temp_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use galaxy_render::{GasFrame, GasLook, TempColor};
+    use galaxy_renderprep::{deposit_gas_with_temperature, GasGridConfig};
+    use std::time::Instant;
+
+    const USAGE: &str = "usage: temp-demo [out_dir] [--n N] [--stars N] [--res R] [--seed S] \
+                         [--incline DEG] [--kappa K] [--emissivity J] [--exposure E] \
+                         [--u-cold U] [--u-hot U] [--r-core R] [--u-lo U] [--u-hi U] \
+                         [--cold R,G,B] [--hot R,G,B]";
+    let mut out: Option<PathBuf> = None;
+    let mut n: usize = 60_000;
+    let mut n_stars: usize = 90_000;
+    let mut res: u32 = 128;
+    let mut seed: u64 = 42;
+    let mut incline_deg: f64 = 78.0;
+    let mut kappa: f32 = 6.0;
+    let mut emissivity: f32 = 0.05;
+    let mut exposure: f32 = 1.0;
+    let mut u_cold: f64 = 0.02;
+    let mut u_hot: f64 = 1.0;
+    let mut r_core: f64 = 1.0;
+    let mut u_lo: Option<f32> = None;
+    let mut u_hi: Option<f32> = None;
+    // Cold = deep blue (cool diffuse gas), hot = warm white-orange (shocked core).
+    let mut cold: [f32; 3] = [0.25, 0.45, 1.0];
+    let mut hot: [f32; 3] = [1.0, 0.72, 0.32];
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let mut val = |flag: &str| -> Result<String, String> {
+            it.next().cloned().ok_or(format!("{flag} needs a value"))
+        };
+        let bad = |flag: &str| format!("{flag} must be a number");
+        let rgb = |flag: &str, s: &str| -> Result<[f32; 3], String> {
+            let v: Vec<f32> = s.split(',').filter_map(|c| c.trim().parse().ok()).collect();
+            match v.as_slice() {
+                [r, g, b] => Ok([*r, *g, *b]),
+                _ => Err(format!(
+                    "{flag} must be R,G,B (three comma-separated numbers)"
+                )),
+            }
+        };
+        match arg.as_str() {
+            "--n" => n = val("--n")?.parse().map_err(|_| bad("--n"))?,
+            "--stars" => n_stars = val("--stars")?.parse().map_err(|_| bad("--stars"))?,
+            "--res" => res = val("--res")?.parse().map_err(|_| bad("--res"))?,
+            "--seed" => seed = val("--seed")?.parse().map_err(|_| bad("--seed"))?,
+            "--incline" => incline_deg = val("--incline")?.parse().map_err(|_| bad("--incline"))?,
+            "--kappa" => kappa = val("--kappa")?.parse().map_err(|_| bad("--kappa"))?,
+            "--emissivity" => {
+                emissivity = val("--emissivity")?
+                    .parse()
+                    .map_err(|_| bad("--emissivity"))?
+            }
+            "--exposure" => exposure = val("--exposure")?.parse().map_err(|_| bad("--exposure"))?,
+            "--u-cold" => u_cold = val("--u-cold")?.parse().map_err(|_| bad("--u-cold"))?,
+            "--u-hot" => u_hot = val("--u-hot")?.parse().map_err(|_| bad("--u-hot"))?,
+            "--r-core" => r_core = val("--r-core")?.parse().map_err(|_| bad("--r-core"))?,
+            "--u-lo" => u_lo = Some(val("--u-lo")?.parse().map_err(|_| bad("--u-lo"))?),
+            "--u-hi" => u_hi = Some(val("--u-hi")?.parse().map_err(|_| bad("--u-hi"))?),
+            "--cold" => cold = rgb("--cold", &val("--cold")?)?,
+            "--hot" => hot = rgb("--hot", &val("--hot")?)?,
+            other if out.is_none() => out = Some(PathBuf::from(other)),
+            other => return Err(format!("unexpected argument `{other}`\n{USAGE}").into()),
+        }
+    }
+    if r_core <= 0.0 {
+        return Err("--r-core must be positive".into());
+    }
+    let out = out.unwrap_or_else(|| std::env::temp_dir().join("galaxy_temp_demo"));
+    std::fs::create_dir_all(&out)?;
+    let u_lo = u_lo.unwrap_or(u_cold as f32);
+    let u_hi = u_hi.unwrap_or(u_hot as f32);
+
+    // 1. Gas: the synthetic disk, then paint the synthetic hot-core energy field.
+    let mut state = synthetic_gas_disk(n, seed, incline_deg.to_radians());
+    for (u, &p) in state.u.iter_mut().zip(state.pos.iter()) {
+        let r = p.length();
+        *u = u_cold + (u_hot - u_cold) * (-(r / r_core).powi(2)).exp();
+    }
+    let t0 = Instant::now();
+    let (rho, moment) = deposit_gas_with_temperature(
+        &state,
+        &GasGridConfig {
+            dims: [res; 3],
+            ..Default::default()
+        },
+    )
+    .expect("all particles are gas");
+    println!(
+        "gas: {n} particles, incline {incline_deg}° → {res}³ ρ+moment grids in {:.1} ms \
+         (u ∈ [{u_cold}, {u_hot}], r_core {r_core})",
+        ms(t0.elapsed())
+    );
+
+    // 2. Stars: disk + bulge in the same geometry (context for the dust lane).
+    let stars = synthetic_star_frame(n_stars, seed, incline_deg.to_radians());
+    println!("stars: {} splats (disk + bulge)", stars.len());
+
+    // 3. Render: temperature-colored, flat-tint control, stars-only reference.
+    let rcfg = RenderConfig {
+        width: 1920,
+        height: 1080,
+        falloff: FALLOFF,
+        ..RenderConfig::default()
+    };
+    let (bmin, bmax) = stars.bounds();
+    let camera = Camera::frame_bounds(
+        bmin,
+        bmax,
+        Vec3::NEG_Z,
+        Vec3::Y,
+        DEFAULT_MARGIN,
+        rcfg.aspect(),
+    );
+    let renderer = Renderer::new()?;
+    let gcfg = GradeConfig {
+        exposure,
+        tonemap: TONEMAP,
+        bloom: Some(BloomConfig {
+            strength: BLOOM_STRENGTH,
+            levels: DEFAULT_BLOOM_LEVELS,
+            radius: DEFAULT_BLOOM_RADIUS,
+        }),
+        ..GradeConfig::default()
+    };
+    // Flat control uses the band midpoint color so the A/B isolates the *colormap*,
+    // not overall brightness — same emissivity/κ, one tint vs the ū-driven ramp.
+    let flat_color = [
+        0.5 * (cold[0] + hot[0]),
+        0.5 * (cold[1] + hot[1]),
+        0.5 * (cold[2] + hot[2]),
+    ];
+    let look = |color: [f32; 3]| GasLook {
+        color,
+        emissivity,
+        opacity: kappa,
+        scatter: None,
+    };
+    let emit = |name: &str, gas: Option<&GasFrame>| -> Result<(), Box<dyn std::error::Error>> {
+        let t0 = Instant::now();
+        let img = renderer.render_frame_with_gas(&stars, gas, &camera, &rcfg)?;
+        let dt = t0.elapsed();
+        let exr = out.join(format!("{name}.exr"));
+        let png = out.join(format!("{name}.png"));
+        write_exr(&exr, &img)?;
+        grade_file(&exr, &png, &gcfg)?;
+        let flux = img.total_flux();
+        println!(
+            "{name}: {:.1} ms render, flux [{:.0}, {:.0}, {:.0}] → {}",
+            ms(dt),
+            flux[0],
+            flux[1],
+            flux[2],
+            png.display()
+        );
+        Ok(())
+    };
+
+    emit(
+        "temperature",
+        Some(&GasFrame {
+            grid0: &rho,
+            grid1: &rho,
+            temperature: Some(TempColor {
+                moment0: &moment,
+                moment1: &moment,
+                cold,
+                hot,
+                u_lo,
+                u_hi,
+            }),
+            mix: 0.0,
+            lights: &[],
+            look: look(flat_color),
+        }),
+    )?;
+    emit(
+        "flat",
+        Some(&GasFrame {
+            grid0: &rho,
+            grid1: &rho,
+            temperature: None,
+            mix: 0.0,
+            lights: &[],
+            look: look(flat_color),
+        }),
+    )?;
+    emit("stars_only", None)?;
+    println!(
+        "A/B pair: temperature.png (ū→color, band [{u_lo}, {u_hi}]) vs flat.png (single tint)"
+    );
     Ok(())
 }
 

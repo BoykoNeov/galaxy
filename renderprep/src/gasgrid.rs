@@ -213,8 +213,15 @@ pub fn deposit_moment_fixed(
     bounds_min: Vec3,
     bounds_max: Vec3,
 ) -> GasGrid {
-    let _ = (pos, mass, u, h, dims, bounds_min, bounds_max);
-    todo!("H1: deposit N = Σ (m_j·u_j)·W via the weighted deposit_impl")
+    deposit_impl(
+        pos,
+        &moment_weights(pos, mass, u),
+        h,
+        dims,
+        bounds_min,
+        bounds_max,
+        true,
+    )
 }
 
 /// Serial twin of [`deposit_moment_fixed`] for the parallel ≡ serial gate.
@@ -227,8 +234,24 @@ pub fn deposit_moment_fixed_serial(
     bounds_min: Vec3,
     bounds_max: Vec3,
 ) -> GasGrid {
-    let _ = (pos, mass, u, h, dims, bounds_min, bounds_max);
-    todo!("H1: serial N deposition")
+    deposit_impl(
+        pos,
+        &moment_weights(pos, mass, u),
+        h,
+        dims,
+        bounds_min,
+        bounds_max,
+        false,
+    )
+}
+
+/// Per-particle deposit weight for the internal-energy moment: `m_j·u_j`. The
+/// product is formed once, before deposition, so `N = Σ (m_j·u_j)·W` associates
+/// in the same fixed per-cell order as ρ (⇒ parallel ≡ serial bit-exact).
+fn moment_weights(pos: &[DVec3], mass: &[f64], u: &[f64]) -> Vec<f64> {
+    assert_eq!(mass.len(), pos.len(), "mass length must match pos");
+    assert_eq!(u.len(), pos.len(), "u length must match pos");
+    mass.iter().zip(u).map(|(&m, &e)| m * e).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -339,12 +362,71 @@ fn deposit_impl(
 /// Returns `None` when the state holds no gas — a gas-free run has no grid and
 /// its frame-data v2 carries no gas block.
 pub fn deposit_gas(state: &State, cfg: &GasGridConfig) -> Option<GasGrid> {
+    let inp = gas_deposition_inputs(state, cfg)?;
+    Some(deposit_fixed(
+        &inp.pos,
+        &inp.mass,
+        &inp.h,
+        cfg.dims,
+        inp.bounds_min,
+        inp.bounds_max,
+    ))
+}
+
+/// Voxelize BOTH the gas density ρ and the internal-energy moment
+/// `N = Σ (m_j·u_j)·W` with ONE shared adaptive-h solve and identical geometry,
+/// returning `(rho, moment)`. The two grids are co-registered (same `dims`,
+/// `bounds`, and per-particle `h`), so `moment.sample(p) / rho.sample(p)` is the
+/// SPH mass-weighted specific internal energy `ū` at `p` — the temperature field
+/// the raymarcher colors by. `rho` is bit-identical to [`deposit_gas`]'s grid
+/// (same inputs, same deposition). `None` when the state holds no gas.
+pub fn deposit_gas_with_temperature(
+    state: &State,
+    cfg: &GasGridConfig,
+) -> Option<(GasGrid, GasGrid)> {
+    let inp = gas_deposition_inputs(state, cfg)?;
+    let rho = deposit_fixed(
+        &inp.pos,
+        &inp.mass,
+        &inp.h,
+        cfg.dims,
+        inp.bounds_min,
+        inp.bounds_max,
+    );
+    let moment = deposit_moment_fixed(
+        &inp.pos,
+        &inp.mass,
+        &inp.u,
+        &inp.h,
+        cfg.dims,
+        inp.bounds_min,
+        inp.bounds_max,
+    );
+    Some((rho, moment))
+}
+
+/// The gas-population deposition inputs shared by [`deposit_gas`] and
+/// [`deposit_gas_with_temperature`]: the selected `Species::Gas` rows (positions,
+/// masses, and specific internal energies `u`), their adaptive smoothing lengths,
+/// and the cubic camera-independent bounds. `None` when the state holds no gas.
+struct GasInputs {
+    pos: Vec<DVec3>,
+    mass: Vec<f64>,
+    u: Vec<f64>,
+    h: Vec<f64>,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
+}
+
+fn gas_deposition_inputs(state: &State, cfg: &GasGridConfig) -> Option<GasInputs> {
     let mut pos = Vec::new();
     let mut mass = Vec::new();
+    let mut u = Vec::new();
     for i in 0..state.len() {
         if state.kind[i] == Species::Gas {
             pos.push(state.pos[i]);
             mass.push(state.mass[i]);
+            u.push(state.u[i]);
         }
     }
     if pos.is_empty() {
@@ -378,22 +460,12 @@ pub fn deposit_gas(state: &State, cfg: &GasGridConfig) -> Option<GasGrid> {
     let bounds_min = (centroid - DVec3::splat(half)).as_vec3();
     let bounds_max = (centroid + DVec3::splat(half)).as_vec3();
 
-    Some(deposit_fixed(
-        &pos, &mass, &h, cfg.dims, bounds_min, bounds_max,
-    ))
-}
-
-/// Voxelize BOTH the gas density ρ and the internal-energy moment
-/// `N = Σ (m_j·u_j)·W` with ONE shared adaptive-h solve and identical geometry,
-/// returning `(rho, moment)`. The two grids are co-registered (same `dims`,
-/// `bounds`, and per-particle `h`), so `moment.sample(p) / rho.sample(p)` is the
-/// SPH mass-weighted specific internal energy `ū` at `p` — the temperature field
-/// the raymarcher colors by. `rho` is bit-identical to [`deposit_gas`]'s grid
-/// (same inputs, same deposition). `None` when the state holds no gas.
-pub fn deposit_gas_with_temperature(
-    state: &State,
-    cfg: &GasGridConfig,
-) -> Option<(GasGrid, GasGrid)> {
-    let _ = (state, cfg);
-    todo!("H1: co-registered (rho, u-moment) deposition sharing one h-solve")
+    Some(GasInputs {
+        pos,
+        mass,
+        u,
+        h,
+        bounds_min,
+        bounds_max,
+    })
 }

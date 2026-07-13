@@ -768,6 +768,23 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                     disk.check_gas(gas.fraction, gas.sound_speed)
                         .map_err(|e| format!("{which} gas: {e}"))?;
                 }
+                // Adiabatic EOS (H5-C): γ must exceed 1 (the ideal-gas index; γ ≤ 1
+                // gives a non-physical / non-positive `(γ−1)` pressure coefficient and
+                // a degenerate `u = c_s²/(γ−1)`). `u_floor`, when set, must be a finite
+                // `≥ 0` energy.
+                if let Some(g) = gas.gamma {
+                    if !(g.is_finite() && g > 1.0) {
+                        return Err(format!(
+                            "gas gamma must be a finite number > 1 (ideal-gas adiabatic \
+                             index), got {g}"
+                        ));
+                    }
+                }
+                if let Some(uf) = gas.u_floor {
+                    if !(uf.is_finite() && uf >= 0.0) {
+                        return Err(format!("gas u_floor must be a finite number >= 0, got {uf}"));
+                    }
+                }
             }
             4 // gas is not a splat, so the palette stays 4 stellar progenitors
         }
@@ -1324,7 +1341,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
     // `unit_mass` is the mass whose particle carries PEAK_BRIGHTNESS: the disk
     // particle for disk models (disk flux is set by disk MASS, not count), the
     // (equal-by-design) halo particle for the merger.
-    let (state, unit_mass, info, sound_speed) = match &spec.model {
+    let (mut state, unit_mass, info, sound_speed) = match &spec.model {
         ModelSpec::DiskPlummer {
             galaxy1,
             galaxy2,
@@ -1411,6 +1428,28 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         }
     };
 
+    // Adiabatic gas EOS ([model.gas].gamma, H5-C): only a `disk-plummer` with a
+    // `[model.gas]` table can be adiabatic; every other model is isothermal/gas-free.
+    let (gamma, u_floor) = match &spec.model {
+        ModelSpec::DiskPlummer {
+            gas: Some(gas), ..
+        } => (gas.gamma, gas.u_floor.unwrap_or(0.0)),
+        _ => (None, 0.0),
+    };
+    // Seed each gas particle's internal energy so the t=0 pressure `(γ−1)ρu`
+    // equals the isothermal equilibrium `c_s²ρ` the sampler baked ⇒ `u = c_s²/(γ−1)`.
+    // The disk starts in true force balance (no spurious startup contraction/heating
+    // that would manufacture fake temperature), so only real shocks light up. Non-gas
+    // `u` stays 0; isothermal (`gamma` None) leaves all `u = 0` — byte-unchanged.
+    if let (Some(c_s), Some(g)) = (sound_speed, gamma) {
+        let u_init = c_s * c_s / (g - 1.0);
+        for (u, k) in state.u.iter_mut().zip(&state.kind) {
+            if *k == Species::Gas {
+                *u = u_init;
+            }
+        }
+    }
+
     let eps = spec.sim.eps;
     let (width, height) = if quick {
         (QUICK_W, QUICK_H)
@@ -1482,10 +1521,11 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         ramp: spec.look.ramps.iter().map(|r| (r.inner, r.outer)).collect(),
         sf_progenitors: spec.look.sf_progenitors.clone(),
         sound_speed,
-        // RED: not yet threaded from `[model.gas]` — hardcoded so the workspace
-        // compiles; the H5-C green step derives these from the gas spec.
-        gamma: None,
-        u_floor: 0.0,
+        // Adiabatic EOS (H5-C): `Some(γ)` iff `[model.gas].gamma` is set (⇒
+        // gas-rich); routes the sim to the thermal + adaptive path. `u_floor`
+        // is the thermal integrator's positive-`u` floor (0.0 = inert).
+        gamma,
+        u_floor,
         // Gas look (M7f): `Some` iff the scenario is gas-rich (tied to `sound_speed`,
         // the other gas-only field), taking the declared `[look.gas]` or the neutral
         // default the renderer falls back to when the model has gas but omits it.

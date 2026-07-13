@@ -839,10 +839,24 @@ against, exactly as the LBVH/G-series lineage did.
     differently is 2nd-order on the gas field driving the flood), so this is the SAME
     perturbation reproduced (n=1 with a minor variation), not two independent draws. It
     cannot distinguish staleness-specific causation from chaos-generic-to-merger-pericenters
-    (any perturbation of this magnitude diverges into the flood); the discriminating control
-    is a NON-stale comparable-size perturbation (fresh seed ensemble / position jitter) that
-    does NOT flood — not run. First-principles sign hedge stands (naive staleness under-
-    attracts → higher dt, opposite of observed). Root cause remains unresolved. **DECISION
+    (any perturbation of this magnitude diverges into the flood). **ROOT-CAUSE
+    INVESTIGATION 2026-07-13 (two throwaway probes, since deleted): instantaneous
+    force-injection controls are STRUCTURALLY confounded ⇒ root cause STILL UNRESOLVED.**
+    Probe 1 (`flood_dalpha_probe`, post-hoc on the fresh snapshots) measured the staleness
+    error δa=a_stale−a_fresh: it is a ~30% coherent OUTWARD (under-attracting, coh_core
+    −0.27…−0.65) and neighbour-COHERENT (ρ≈0.70) force error ⇒ its direct v_sig kick is
+    ~20–30× too small ⇒ the flood is secular/cross-block, not a one-shot kick — AND the
+    naive sign argument (under-attract → higher dt) predicts NO flood, yet it floods (the
+    one robust, still-UNEXPLAINED finding). Probe 2 (`flood_signflip`, one full-res re-sim
+    injecting 2·a_fresh−a_stale = the sign-flipped δa, preserving ‖δa‖ + neighbour-relative
+    content bit-for-bit) is a CONFOUNDED NULL, not a lean: it floods (153.7× range) but its
+    deepest point (7.62e-4) is EARLY (t=7) where FRESH sails through (1.17e-2) — sustained
+    over-attraction manufactured its own early collapse, a different epoch/channel, not a
+    sign-mirror of the pericenter flood; and over-attraction flooding is the mundane
+    direction (consistent with both hypotheses). So an instantaneous control CANNOT isolate
+    staleness here. The confound-free discriminator (fresh-path IC-jitter ensemble) is
+    unrun and imperfect anyway (one-time IC kick ≠ sustained per-tick force error). Root
+    cause remains unresolved. **DECISION
     (user call surfaced): ship `hydro-only` fresh
     (1.71×) as default — now for a SECOND, stronger reason than the record gate's +6%:
     hydro+gravity is actively WORSE at FULL, not marginally better. Keep hydro+gravity as

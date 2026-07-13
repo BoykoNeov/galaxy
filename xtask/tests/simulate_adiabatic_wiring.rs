@@ -150,8 +150,8 @@ fn adiabatic_without_adaptive_is_rejected() {
 fn adiabatic_on_gpu_is_rejected() {
     let s = adia_scenario();
     let dir = tempdir("gpu");
-    let err = simulate_snapshots(&s, &dir, Backend::Gpu)
-        .expect_err("adiabatic + GPU must be rejected");
+    let err =
+        simulate_snapshots(&s, &dir, Backend::Gpu).expect_err("adiabatic + GPU must be rejected");
     let msg = err.to_string();
     assert!(
         msg.contains("CPU"),

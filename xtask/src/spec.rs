@@ -786,7 +786,9 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                 }
                 if let Some(uf) = gas.u_floor {
                     if !(uf.is_finite() && uf >= 0.0) {
-                        return Err(format!("gas u_floor must be a finite number >= 0, got {uf}"));
+                        return Err(format!(
+                            "gas u_floor must be a finite number >= 0, got {uf}"
+                        ));
                     }
                 }
             }
@@ -1435,9 +1437,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
     // Adiabatic gas EOS ([model.gas].gamma, H5-C): only a `disk-plummer` with a
     // `[model.gas]` table can be adiabatic; every other model is isothermal/gas-free.
     let (gamma, u_floor) = match &spec.model {
-        ModelSpec::DiskPlummer {
-            gas: Some(gas), ..
-        } => (gas.gamma, gas.u_floor.unwrap_or(0.0)),
+        ModelSpec::DiskPlummer { gas: Some(gas), .. } => (gas.gamma, gas.u_floor.unwrap_or(0.0)),
         _ => (None, 0.0),
     };
     // Seed each gas particle's internal energy so the t=0 pressure `(γ−1)ρu`

@@ -251,6 +251,7 @@ fn gas_scenario_carries_a_declared_look_gas() {
             shadows: false,
             scatter_tint: [1.0; 3],
             scatter_softening: None,
+            temperature: None,
         })
     );
 }
@@ -276,6 +277,7 @@ fn look_gas_scatter_knobs_thread_onto_the_scenario() {
             shadows: false,
             scatter_tint: [1.0; 3],
             scatter_softening: None,
+            temperature: None,
         })
     );
 }
@@ -300,6 +302,7 @@ fn look_gas_shadows_knob_threads_onto_the_scenario() {
             shadows: true,
             scatter_tint: [1.0; 3],
             scatter_softening: None,
+            temperature: None,
         })
     );
 }
@@ -387,6 +390,7 @@ fn look_gas_scatter_tint_knob_threads_onto_the_scenario() {
             shadows: false,
             scatter_tint: [0.6, 0.8, 1.3],
             scatter_softening: None,
+            temperature: None,
         })
     );
 }

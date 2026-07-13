@@ -1767,11 +1767,25 @@ fn run_movie(
         dims: [if quick { 64 } else { 128 }; 3],
         ..Default::default()
     };
+    // Temperature colormap (incandescent-nebular-veil): when the scenario asks
+    // for it, deposit the internal-energy moment N alongside ρ (one shared
+    // h-solve), so the raymarcher can color by ū = N/ρ. Off ⇒ ρ only, moments
+    // all `None` (the bit-compat flat-tint path).
+    let temp_params = s.gas_look.as_ref().and_then(|gl| gl.temperature);
     let t_gas = std::time::Instant::now();
-    let gas_grids: Vec<Option<galaxy_renderprep::GasGrid>> = states
+    let (gas_grids, gas_moments): (
+        Vec<Option<galaxy_renderprep::GasGrid>>,
+        Vec<Option<galaxy_renderprep::GasGrid>>,
+    ) = states
         .iter()
-        .map(|st| galaxy_renderprep::deposit_gas(st, &gas_cfg))
-        .collect();
+        .map(|st| match temp_params {
+            Some(_) => match galaxy_renderprep::deposit_gas_with_temperature(st, &gas_cfg) {
+                Some((rho, mom)) => (Some(rho), Some(mom)),
+                None => (None, None),
+            },
+            None => (galaxy_renderprep::deposit_gas(st, &gas_cfg), None),
+        })
+        .unzip();
     // The volumetric gas look is scenario data ([look.gas], M7f): `Some` iff the
     // scenario is gas-rich, else the neutral default (inert — a gas-free run has no
     // grids for it to touch).
@@ -1962,7 +1976,20 @@ fn run_movie(
                 (Some(g0), Some(g1)) => Some(galaxy_render::GasFrame {
                     grid0: g0,
                     grid1: g1,
-                    temperature: None,
+                    // Temperature colormap: the co-registered moment endpoints
+                    // (present iff the scenario asked for it and both endpoints
+                    // carry gas), else the flat-tint march.
+                    temperature: match (temp_params, &gas_moments[w], &gas_moments[w + 1]) {
+                        (Some(t), Some(m0), Some(m1)) => Some(galaxy_render::TempColor {
+                            moment0: m0,
+                            moment1: m1,
+                            cold: t.cold,
+                            hot: t.hot,
+                            u_lo: t.u_lo,
+                            u_hi: t.u_hi,
+                        }),
+                        _ => None,
+                    },
                     mix: u as f32,
                     lights: &lights,
                     look: gas_look,
@@ -1987,7 +2014,18 @@ fn run_movie(
             .map(|g| galaxy_render::GasFrame {
                 grid0: g,
                 grid1: g,
-                temperature: None,
+                // Static last frame: one moment grid, mixed with itself (mix 0).
+                temperature: match (temp_params, gas_moments.last().and_then(Option::as_ref)) {
+                    (Some(t), Some(m)) => Some(galaxy_render::TempColor {
+                        moment0: m,
+                        moment1: m,
+                        cold: t.cold,
+                        hot: t.hot,
+                        u_lo: t.u_lo,
+                        u_hi: t.u_hi,
+                    }),
+                    _ => None,
+                },
                 mix: 0.0,
                 lights: &lights,
                 look: gas_look,

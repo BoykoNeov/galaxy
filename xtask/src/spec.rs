@@ -468,6 +468,33 @@ pub struct GasLookSpec {
     /// without it is a dead knob and is rejected loud.
     #[serde(default)]
     pub shadow_bake: Option<ShadowBakeSpec>,
+    /// Temperature-dependent gas color (incandescent-nebular-veil): `Some`
+    /// colors the gas emission by local temperature `T ∝ u` (the evolved
+    /// internal energy) through a fixed cold→hot colormap, instead of the flat
+    /// `color`. Self-contained (no scattering dependency); on ISOTHERMAL gas it
+    /// renders a correct flat tint (all `u` equal), so it is meaningful only on
+    /// an adiabatic run but never rejected on an isothermal one. Omitted = the
+    /// flat-`color` emission, bit-identical.
+    #[serde(default)]
+    pub temperature: Option<TemperatureSpec>,
+}
+
+/// The `[look.gas.temperature]` colormap (incandescent-nebular-veil): the gas
+/// emission color is a cold→hot lerp of `ū = N/ρ` (the SPH mass-weighted
+/// specific internal energy) over the fixed band `[u_lo, u_hi]`. The band is a
+/// temporally-constant reference (a per-frame max would flicker), in the same
+/// code units as the solver's `u`.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemperatureSpec {
+    /// Linear-RGB emission color of the coldest gas (`ū ≤ u_lo`).
+    pub cold: [f32; 3],
+    /// Linear-RGB emission color of the hottest gas (`ū ≥ u_hi`).
+    pub hot: [f32; 3],
+    /// Lower edge of the colormap band (specific internal energy `u`).
+    pub u_lo: f32,
+    /// Upper edge of the colormap band; must exceed `u_lo`.
+    pub u_hi: f32,
 }
 
 /// TOML spelling of [`galaxy_render::ShadowBake`] (`shadow_bake = "brute" |
@@ -976,6 +1003,31 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
                     );
                 }
             }
+            // Temperature colormap (incandescent-nebular-veil): the cold/hot
+            // endpoints are linear RGB (finite, ≥ 0) and the band must have a
+            // direction (finite u_lo < u_hi). Self-contained — NOT gated on
+            // scattering; on isothermal gas it renders a correct flat tint, so
+            // it is never a dead knob to declare.
+            if let Some(t) = gl.temperature {
+                if !t
+                    .cold
+                    .iter()
+                    .chain(&t.hot)
+                    .all(|c| c.is_finite() && *c >= 0.0)
+                {
+                    return Err(format!(
+                        "look.gas temperature cold/hot components must be finite and \
+                         non-negative, got cold {:?} hot {:?}",
+                        t.cold, t.hot
+                    ));
+                }
+                if !(t.u_lo.is_finite() && t.u_hi.is_finite() && t.u_lo < t.u_hi) {
+                    return Err(format!(
+                        "look.gas temperature needs finite u_lo < u_hi, got u_lo {} u_hi {}",
+                        t.u_lo, t.u_hi
+                    ));
+                }
+            }
         }
         (None, _) => {}
     }
@@ -1194,6 +1246,10 @@ pub struct GasLookValues {
     /// Fixed scatter softening ε; `None` = v1 per-cluster radius softening
     /// (bit-compat). Meaningful only with `scattering > 0`.
     pub scatter_softening: Option<f32>,
+    /// Temperature colormap (incandescent-nebular-veil): `None` = flat-`color`
+    /// emission. `Some` colors the gas by `ū = N/ρ` (`T ∝ u`). The renderer
+    /// builds a `TempColor` from this plus the per-frame moment grids.
+    pub temperature: Option<TemperatureSpec>,
 }
 
 impl Default for GasLookValues {
@@ -1207,6 +1263,7 @@ impl Default for GasLookValues {
             shadows: false,
             scatter_tint: [1.0; 3],
             scatter_softening: None,
+            temperature: None,
         }
     }
 }
@@ -1415,6 +1472,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                     shadows: g.shadows.unwrap_or(false),
                     scatter_tint: g.scatter_tint.unwrap_or([1.0; 3]),
                     scatter_softening: g.scatter_softening,
+                    temperature: g.temperature,
                 })
                 .unwrap_or_default()
         }),
@@ -2043,6 +2101,64 @@ mod tests {
         let gl = s.gas_look.expect("gasrich threads its [look.gas]");
         // The declared look, not the neutral default.
         assert_ne!(gl, GasLookValues::default());
+    }
+
+    // --- temperature colormap ([look.gas.temperature], incandescent-nebular-veil) ---
+
+    // Appended to a gas-rich preset ([look.gas] already present), a new sub-table.
+    const TEMP_BLOCK: &str =
+        "\n[look.gas.temperature]\ncold = [0.0, 0.1, 0.8]\nhot = [1.0, 0.3, 0.05]\nu_lo = 0.05\nu_hi = 0.5\n";
+
+    #[test]
+    fn look_gas_temperature_parses_and_threads() {
+        let text = format!("{}{}", preset("gasrich").unwrap(), TEMP_BLOCK);
+        let spec = parse_scenario_toml(&text).expect("valid temperature block");
+        let s = build_scenario(&spec, true);
+        let t = s
+            .gas_look
+            .expect("gasrich threads [look.gas]")
+            .temperature
+            .expect("temperature threaded into GasLookValues");
+        assert_eq!(t.cold, [0.0, 0.1, 0.8]);
+        assert_eq!(t.hot, [1.0, 0.3, 0.05]);
+        assert_eq!(t.u_lo, 0.05);
+        assert_eq!(t.u_hi, 0.5);
+    }
+
+    #[test]
+    fn gasrich_without_temperature_threads_none() {
+        let s = build_scenario(&parse_preset("gasrich"), true);
+        assert!(
+            s.gas_look.unwrap().temperature.is_none(),
+            "no [look.gas.temperature] ⇒ None (flat-tint path)"
+        );
+    }
+
+    #[test]
+    fn temperature_validation_rejects_bad_bands_colors_and_typos() {
+        let base = format!("{}{}", preset("gasrich").unwrap(), TEMP_BLOCK);
+        for (bad, why) in [
+            (
+                base.replace("u_hi = 0.5", "u_hi = 0.05"),
+                "degenerate band u_lo == u_hi",
+            ),
+            (base.replace("u_lo = 0.05", "u_lo = 0.9"), "u_lo > u_hi"),
+            (
+                base.replace("u_hi = 0.5", "u_hi = nan"),
+                "non-finite band edge",
+            ),
+            (
+                base.replace("hot = [1.0, 0.3, 0.05]", "hot = [-1.0, 0.3, 0.05]"),
+                "negative color component",
+            ),
+            (
+                base.replace("cold = [0.0, 0.1, 0.8]", "cold = [0.0, nan, 0.8]"),
+                "non-finite color component",
+            ),
+            (format!("{base}bogus = 1.0\n"), "unknown temperature key"),
+        ] {
+            assert!(parse_scenario_toml(&bad).is_err(), "should reject: {why}");
+        }
     }
 
     // --- registry + validation --------------------------------------------------

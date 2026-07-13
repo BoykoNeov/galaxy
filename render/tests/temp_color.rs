@@ -9,9 +9,13 @@
 //! a uniform temperature field renders as a flat tint of the mapped color; and a
 //! temperature gradient colors hot and cold regions differently.
 
-use galaxy_render::volume::{march_gas, temperature_color, GasFrame, GasLook, TempColor};
-use galaxy_renderprep::GasGrid;
-use glam::Vec3;
+use galaxy_render::camera::Camera;
+use galaxy_render::render::{RenderConfig, Renderer};
+use galaxy_render::volume::{
+    march_gas, render_gas_cpu, temperature_color, GasFrame, GasLook, TempColor,
+};
+use galaxy_renderprep::{FrameData, GasGrid};
+use glam::{Vec2, Vec3};
 
 // ---------- helpers ----------
 
@@ -241,4 +245,167 @@ fn empty_cells_are_guarded_against_zero_over_zero() {
     assert!(c.iter().all(|v| v.is_finite()), "NaN/Inf radiance: {c:?}");
     assert_eq!(c, [0.0, 0.0, 0.0], "zero gas emitted radiance");
     assert_eq!(t, 1.0, "zero gas attenuated light");
+}
+
+// ---------- GPU ≡ CPU parity (plan H3) ----------
+//
+// The WGSL march must mirror temperature_color op-for-op: sample the moment
+// grids, divide by ρ, and lerp cold→hot — matching the CPU reference within the
+// established volume tolerance (1e-3 rel + 1e-5 abs per channel). The off path
+// (temperature = None) is already pinned bit-identical by the M6g golden gate.
+
+fn renderer() -> Renderer {
+    Renderer::new().expect("wgpu adapter required for temperature GPU gates")
+}
+
+/// A deterministic strictly-positive pattern grid (mirrors volume.rs's helper),
+/// used for both ρ and — scaled — the internal-energy moment N.
+fn pattern(bounds_min: Vec3, bounds_max: Vec3, dims: [u32; 3], phase: f32, scale: f32) -> GasGrid {
+    let mut data = Vec::with_capacity((dims[0] * dims[1] * dims[2]) as usize);
+    for iz in 0..dims[2] {
+        for iy in 0..dims[1] {
+            for ix in 0..dims[0] {
+                let v = 0.45
+                    + 0.35
+                        * (0.7 * ix as f32 + 1.3 * iy as f32 + phase).sin()
+                        * (0.5 * iz as f32 + 0.4).cos();
+                data.push(scale * v);
+            }
+        }
+    }
+    GasGrid {
+        dims,
+        bounds_min,
+        bounds_max,
+        data,
+    }
+}
+
+/// The parity scene: two different-bounds ρ grids, CO-REGISTERED moment grids (a
+/// distinct pattern per endpoint so ū = N/ρ varies spatially), an oblique view,
+/// a non-trivial mix, and a colormap whose cold/hot differ from look.color (so a
+/// GPU that ignored temperature — flat look.color — fails the parity).
+fn parity_gas<'a>(
+    g0: &'a GasGrid,
+    g1: &'a GasGrid,
+    m0: &'a GasGrid,
+    m1: &'a GasGrid,
+) -> GasFrame<'a> {
+    GasFrame {
+        grid0: g0,
+        grid1: g1,
+        mix: 0.37,
+        look: GasLook {
+            color: [0.2, 0.8, 0.3], // deliberately unlike cold/hot
+            emissivity: 1.7,
+            opacity: 2.1,
+            scatter: None,
+        },
+        lights: &[],
+        temperature: Some(TempColor {
+            moment0: m0,
+            moment1: m1,
+            cold: [0.1, 0.2, 0.9],
+            hot: [1.0, 0.35, 0.05],
+            u_lo: 0.4,
+            u_hi: 1.6,
+        }),
+    }
+}
+
+fn assert_gpu_matches_cpu(gas: &GasFrame, cam: &Camera, cfg: &RenderConfig) {
+    let r = renderer();
+    let gpu = r
+        .render_frame_with_gas(&FrameData::default(), Some(gas), cam, cfg)
+        .unwrap();
+    let cpu = render_gas_cpu(gas, cam, cfg.width, cfg.height);
+    let mut nonzero = false;
+    for y in 0..cfg.height {
+        for x in 0..cfg.width {
+            let (g, c) = (gpu.pixel(x, y), cpu.pixel(x, y));
+            nonzero |= c[0] > 0.0;
+            for k in 0..4 {
+                let tol = 1e-3 * c[k].abs() + 1e-5;
+                assert!(
+                    (g[k] - c[k]).abs() <= tol,
+                    "pixel ({x},{y}) channel {k}: GPU {} vs CPU {}",
+                    g[k],
+                    c[k]
+                );
+            }
+        }
+    }
+    assert!(nonzero, "reference image is all black — degenerate gate");
+}
+
+#[test]
+fn gpu_temperature_matches_cpu_reference_ortho() {
+    let g0 = pattern(
+        Vec3::new(-1.2, -1.0, -0.8),
+        Vec3::new(1.0, 1.1, 0.9),
+        [12, 10, 9],
+        0.0,
+        1.0,
+    );
+    let g1 = pattern(
+        Vec3::new(-0.9, -1.1, -1.0),
+        Vec3::new(1.2, 0.9, 1.1),
+        [8, 14, 11],
+        1.7,
+        1.0,
+    );
+    // Moment grids: co-registered with their ρ endpoint, scaled ⇒ ū ≈ scale·(N/ρ)
+    // sweeps across [u_lo, u_hi] and beyond, exercising both clamp arms.
+    let m0 = pattern(g0.bounds_min, g0.bounds_max, g0.dims, 0.9, 1.3);
+    let m1 = pattern(g1.bounds_min, g1.bounds_max, g1.dims, 2.4, 0.7);
+    let gas = parity_gas(&g0, &g1, &m0, &m1);
+    let cam = Camera::orthographic(
+        Vec3::new(0.1, -0.05, 0.0),
+        Vec3::new(0.3, -0.2, -1.0),
+        Vec3::Y,
+        Vec2::new(1.4, 1.05),
+    );
+    let cfg = RenderConfig {
+        width: 64,
+        height: 48,
+        falloff: 6.0,
+        ..RenderConfig::default()
+    };
+    assert_gpu_matches_cpu(&gas, &cam, &cfg);
+}
+
+#[test]
+fn gpu_temperature_matches_cpu_reference_perspective() {
+    let g0 = pattern(
+        Vec3::new(-1.2, -1.0, -0.8),
+        Vec3::new(1.0, 1.1, 0.9),
+        [12, 10, 9],
+        0.0,
+        1.0,
+    );
+    let g1 = pattern(
+        Vec3::new(-0.9, -1.1, -1.0),
+        Vec3::new(1.2, 0.9, 1.1),
+        [8, 14, 11],
+        1.7,
+        1.0,
+    );
+    let m0 = pattern(g0.bounds_min, g0.bounds_max, g0.dims, 0.9, 1.3);
+    let m1 = pattern(g1.bounds_min, g1.bounds_max, g1.dims, 2.4, 0.7);
+    let gas = parity_gas(&g0, &g1, &m0, &m1);
+    let cam = Camera::perspective(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.2, 0.1, -1.0),
+        Vec3::Y,
+        Vec2::new(1.2, 0.9),
+        4.0,
+        0.1,
+    );
+    let cfg = RenderConfig {
+        width: 64,
+        height: 48,
+        falloff: 6.0,
+        ..RenderConfig::default()
+    };
+    assert_gpu_matches_cpu(&gas, &cam, &cfg);
 }

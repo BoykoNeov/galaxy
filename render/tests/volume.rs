@@ -219,6 +219,7 @@ fn star_transmittance_uniform_slab_analytic() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look: absorb_look(SLAB_KAPPA),
@@ -274,6 +275,7 @@ fn march_uniform_slab_radiance_analytic() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look,
@@ -321,6 +323,7 @@ fn march_emission_only_kappa_zero_exact() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look,
@@ -364,6 +367,7 @@ fn march_high_tau_early_exit_bounded() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look,
@@ -412,6 +416,7 @@ fn march_mix_endpoints_bit_exact() {
             &GasFrame {
                 grid0: g0,
                 grid1: g1,
+                temperature: None,
                 mix: u,
                 lights: &[],
                 look,
@@ -446,6 +451,7 @@ fn march_emissivity_linear_exact() {
     let mk = |e: f32| GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look: GasLook {
@@ -485,6 +491,7 @@ fn march_single_cell_grid() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look,
@@ -541,6 +548,7 @@ fn gas_off_matches_m6g_golden() {
     let inert = GasFrame {
         grid0: &inert_grid,
         grid1: &inert_grid,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look: GasLook {
@@ -599,6 +607,7 @@ fn gpu_star_attenuation_matches_slab_transmittance() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look: absorb_look(SLAB_KAPPA),
@@ -642,6 +651,7 @@ fn gpu_two_star_depth_ordering_swaps_with_camera() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look: absorb_look(SLAB_KAPPA),
@@ -701,6 +711,7 @@ fn gpu_march_matches_cpu_reference_ortho() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &[],
         look: GasLook {
@@ -766,6 +777,7 @@ fn gpu_march_matches_cpu_reference_perspective() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &[],
         look: GasLook {
@@ -835,6 +847,7 @@ fn gpu_emission_linearity_exact() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights: &[],
             look: mk(e),
@@ -884,6 +897,7 @@ fn gpu_mix_endpoint_grids_bit_exact() {
             Some(&GasFrame {
                 grid0: g0,
                 grid1: g1,
+                temperature: None,
                 mix: u,
                 lights: &[],
                 look,
@@ -926,6 +940,7 @@ fn gpu_same_scene_bit_identical() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &[],
         look: GasLook {
@@ -978,6 +993,7 @@ fn gpu_gas_outside_view_adds_nothing() {
     let gas = GasFrame {
         grid0: &far,
         grid1: &far,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look,
@@ -1001,6 +1017,7 @@ fn gpu_gas_outside_view_adds_nothing() {
     let gas = GasFrame {
         grid0: &behind,
         grid1: &behind,
+        temperature: None,
         mix: 0.0,
         lights: &[],
         look,

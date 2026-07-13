@@ -100,6 +100,7 @@ fn dda_default_and_brute_agree() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: look(0.7),
@@ -133,6 +134,7 @@ fn dda_matches_brute_on_a_dense_slab() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: look(0.6),
@@ -156,6 +158,7 @@ fn dda_matches_brute_on_an_empty_frame() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: look(1.0),
@@ -196,6 +199,7 @@ fn dda_matches_brute_single_occupied_cell() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: look(2.0),
@@ -237,6 +241,7 @@ fn dda_matches_brute_on_a_sparse_blob() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: look(1.5),
@@ -282,6 +287,7 @@ fn dda_matches_brute_on_a_two_grid_mix() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &lights,
         look: look(1.8),
@@ -358,6 +364,7 @@ proptest! {
         let gas = GasFrame {
             grid0: &g0,
             grid1: &g1,
+            temperature: None,
             mix,
             lights: &lights,
             look: look(opacity),
@@ -438,6 +445,7 @@ fn gpu_gas<'a>(g0: &'a GasGrid, g1: &'a GasGrid, lights: &'a [Light]) -> GasFram
     GasFrame {
         grid0: g0,
         grid1: g1,
+        temperature: None,
         mix: 0.37,
         lights,
         look: GasLook {

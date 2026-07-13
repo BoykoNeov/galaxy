@@ -199,6 +199,7 @@ fn scatter_far_field_slab_analytic() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights: std::slice::from_ref(&light),
             look: GasLook {
@@ -253,6 +254,7 @@ fn scatter_inverse_square() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights: std::slice::from_ref(&light),
             look: GasLook {
@@ -307,6 +309,7 @@ fn scatter_off_is_bit_identical() {
             &GasFrame {
                 grid0: &g,
                 grid1: &g,
+                temperature: None,
                 mix: 0.0,
                 lights,
                 look: GasLook {
@@ -376,6 +379,7 @@ fn scatter_strength_linear_exact() {
             &GasFrame {
                 grid0: &g,
                 grid1: &g,
+                temperature: None,
                 mix: 0.0,
                 lights: &lights,
                 look: GasLook {
@@ -430,6 +434,7 @@ fn scatter_forward_anisotropy_backlights() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights: std::slice::from_ref(&light),
             look: GasLook {
@@ -512,6 +517,7 @@ fn gpu_scatter_matches_cpu_reference_ortho() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &lights,
         look: GasLook {
@@ -603,6 +609,7 @@ fn gpu_scatter_fixed_epsilon_matches_cpu_reference() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &lights,
         look: GasLook {
@@ -686,6 +693,7 @@ fn gpu_scatter_matches_cpu_reference_perspective() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &lights,
         look: GasLook {
@@ -763,6 +771,7 @@ fn gpu_scatter_off_bit_identical() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights,
             look: GasLook {
@@ -833,6 +842,7 @@ fn gpu_scatter_strength_linear_exact() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights: &lights,
             look: GasLook {
@@ -866,6 +876,7 @@ fn gpu_scatter_strength_linear_exact() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: GasLook {
@@ -927,6 +938,7 @@ fn scatter_tint_neutral_matches_analytic_oracle() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights: std::slice::from_ref(&light),
             look: GasLook {
@@ -990,6 +1002,7 @@ fn scatter_tint_per_channel_linear_exact() {
             &GasFrame {
                 grid0: &g,
                 grid1: &g,
+                temperature: None,
                 mix: 0.0,
                 lights: &lights,
                 look: GasLook {
@@ -1044,6 +1057,7 @@ fn scatter_tint_zero_equals_scatter_none() {
             &GasFrame {
                 grid0: &g,
                 grid1: &g,
+                temperature: None,
                 mix: 0.0,
                 lights: std::slice::from_ref(&light),
                 look: GasLook {
@@ -1142,6 +1156,7 @@ fn gpu_scatter_tint_matches_cpu_reference() {
         let gas = GasFrame {
             grid0: &g0,
             grid1: &g1,
+            temperature: None,
             mix: 0.37,
             lights: &lights,
             look: make(ScatterLook {
@@ -1213,6 +1228,7 @@ fn gpu_scatter_tint_off_paths_intact() {
             Some(&GasFrame {
                 grid0: &g,
                 grid1: &g,
+                temperature: None,
                 mix: 0.0,
                 lights: &[],
                 look: GasLook {
@@ -1234,6 +1250,7 @@ fn gpu_scatter_tint_off_paths_intact() {
             Some(&GasFrame {
                 grid0: &g,
                 grid1: &g,
+                temperature: None,
                 mix: 0.0,
                 lights: &lights,
                 look: GasLook {
@@ -1268,6 +1285,7 @@ fn gpu_scatter_tint_off_paths_intact() {
     let neutral = GasFrame {
         grid0: &og,
         grid1: &og,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: GasLook {

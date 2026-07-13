@@ -105,6 +105,7 @@ fn total_scatter(grid: &GasGrid, softening: Option<f32>, aniso: f32, lights: &[L
     let gas = GasFrame {
         grid0: grid,
         grid1: grid,
+        temperature: None,
         mix: 0.0,
         lights,
         look: look(Some(ScatterLook {
@@ -218,6 +219,7 @@ fn single_light_epsilon_matches_radius_arithmetic() {
         let gas = GasFrame {
             grid0: &grid,
             grid1: &grid,
+            temperature: None,
             mix: 0.0,
             lights: std::slice::from_ref(&light),
             look: look(Some(ScatterLook {

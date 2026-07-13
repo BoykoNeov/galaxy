@@ -154,6 +154,7 @@ fn bake_shadows_matches_hand_chords_on_the_uniform_slab() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: GasLook {
@@ -240,6 +241,7 @@ fn bake_shadows_exact_ones() {
     let gas0 = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: look(0.0),
@@ -254,6 +256,7 @@ fn bake_shadows_exact_ones() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: look(SLAB_KAPPA),
@@ -343,6 +346,7 @@ fn shadowed_march_matches_backlit_slab_closed_form() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights: std::slice::from_ref(&light),
             look: GasLook {
@@ -409,6 +413,7 @@ fn shadowed_march_is_strictly_below_unshadowed() {
     let gas = GasFrame {
         grid0: &g,
         grid1: &g,
+        temperature: None,
         mix: 0.0,
         lights: &lights,
         look: GasLook {
@@ -459,6 +464,7 @@ fn shadowed_march_off_is_bit_identical() {
             &GasFrame {
                 grid0: &g,
                 grid1: &g,
+                temperature: None,
                 mix: 0.0,
                 lights,
                 look: GasLook {
@@ -557,6 +563,7 @@ fn gpu_shadowed_scatter_matches_cpu_reference_ortho() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &lights,
         look: GasLook {
@@ -639,6 +646,7 @@ fn gpu_shadowed_scatter_matches_cpu_reference_perspective() {
     let gas = GasFrame {
         grid0: &g0,
         grid1: &g1,
+        temperature: None,
         mix: 0.37,
         lights: &lights,
         look: GasLook {
@@ -716,6 +724,7 @@ fn gpu_shadow_flag_with_inactive_scatter_stays_bit_identical() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights,
             look: GasLook {
@@ -783,6 +792,7 @@ fn gpu_shadowed_strength_linear_and_shadows_bite() {
         let gas = GasFrame {
             grid0: &g,
             grid1: &g,
+            temperature: None,
             mix: 0.0,
             lights: &lights,
             look: GasLook {

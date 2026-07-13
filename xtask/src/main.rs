@@ -771,6 +771,7 @@ fn volume_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Some(&GasFrame {
             grid0: &grid,
             grid1: &grid,
+            temperature: None,
             mix: 0.0,
             lights: &[],
             look: GasLook {
@@ -786,6 +787,7 @@ fn volume_demo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Some(&GasFrame {
             grid0: &grid,
             grid1: &grid,
+            temperature: None,
             mix: 0.0,
             lights: &[],
             look: GasLook {
@@ -1960,6 +1962,7 @@ fn run_movie(
                 (Some(g0), Some(g1)) => Some(galaxy_render::GasFrame {
                     grid0: g0,
                     grid1: g1,
+                    temperature: None,
                     mix: u as f32,
                     lights: &lights,
                     look: gas_look,
@@ -1984,6 +1987,7 @@ fn run_movie(
             .map(|g| galaxy_render::GasFrame {
                 grid0: g,
                 grid1: g,
+                temperature: None,
                 mix: 0.0,
                 lights: &lights,
                 look: gas_look,

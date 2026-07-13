@@ -943,6 +943,52 @@ pub struct GasFrame<'a> {
     /// output), camera-independent per-frame data. Empty when scattering is
     /// off — an empty list is bit-compatible with `scatter: None`.
     pub lights: &'a [Light],
+    /// Temperature-coloring input (plan `incandescent-nebular-veil`): `Some`
+    /// carries the internal-energy moment grids and the colormap, driving the
+    /// gas emission color from `ū = N/ρ` (`T ∝ u`) instead of the flat
+    /// [`GasLook::color`]. `None` is the flat-tint march, bit-identical to the
+    /// pre-temperature renderer.
+    pub temperature: Option<TempColor<'a>>,
+}
+
+/// Per-frame temperature-coloring input (plan `incandescent-nebular-veil`, H2):
+/// the two internal-energy MOMENT grids (`N = Σ mⱼ·uⱼ·W`, deposited alongside ρ
+/// on identical geometry, plan H1) plus the FIXED colormap. At each sample
+/// `ū = mix(N)/mix(ρ)` is the SPH mass-weighted specific internal energy
+/// (`T ∝ u`), mapped to a cold→hot lerp over the reference band `[u_lo, u_hi]`.
+/// The band is a temporally-constant render uniform, NOT a per-frame data max,
+/// so the color does not flicker frame-to-frame. This is per-frame render input
+/// (the moment grids are prep output, the colormap a look uniform), so a look
+/// change re-renders without re-depositing (plan D8 renegotiated).
+#[derive(Clone, Copy, Debug)]
+pub struct TempColor<'a> {
+    /// Internal-energy moment grid at the earlier snapshot endpoint.
+    pub moment0: &'a GasGrid,
+    /// Internal-energy moment grid at the later snapshot endpoint.
+    pub moment1: &'a GasGrid,
+    /// Linear RGB at/below `u_lo` (cold gas).
+    pub cold: [f32; 3],
+    /// Linear RGB at/above `u_hi` (hot gas).
+    pub hot: [f32; 3],
+    /// Lower edge of the colormap band: `ū ≤ u_lo ⇒ cold`.
+    pub u_lo: f32,
+    /// Upper edge of the colormap band: `ū ≥ u_hi ⇒ hot`.
+    pub u_hi: f32,
+}
+
+/// Denominator floor for `ū = N/ρ`: cells with ρ below this contribute
+/// essentially no emission (`e ∝ ρ`), so their color is multiplied by ~0 and
+/// the exact floor is immaterial — it only guards the division against `0/0`.
+/// Shared verbatim by the WGSL march so GPU ≡ CPU.
+pub const TEMP_RHO_FLOOR: f32 = 1e-20;
+
+/// The cold→hot temperature colormap: `t = clamp((ū − u_lo)/(u_hi − u_lo), 0, 1)`
+/// then the two-product lerp `(1−t)·cold + t·hot` per channel (bit-exact at
+/// `t = 0` and `t = 1`). A degenerate band (`u_hi ≤ u_lo`) maps everything to
+/// `cold`. The CPU reference the WGSL march mirrors op-for-op.
+pub fn temperature_color(tc: &TempColor, ubar: f32) -> [f32; 3] {
+    let _ = (tc, ubar);
+    todo!("H2: cold→hot lerp over the fixed [u_lo, u_hi] band")
 }
 
 /// The shared nominal step: half the smallest cell edge over BOTH endpoint
@@ -1081,12 +1127,23 @@ pub fn march_gas(
         let s = t0 + (i as f32 + 0.5) * ds;
         let p = origin + dir * s;
         let rho = density_at(gas, p);
+        // Emission color: the flat look tint, OR — when temperature coloring is
+        // on — the cold→hot colormap of ū = mix(N)/mix(ρ) at this sample. `None`
+        // takes `gas.look.color` verbatim, so the arithmetic below is
+        // bit-identical to the pre-temperature march.
+        let emit_color = match gas.temperature {
+            Some(tc) => {
+                let n = sample_mix(tc.moment0, tc.moment1, gas.mix, p);
+                temperature_color(&tc, n / rho.max(TEMP_RHO_FLOOR))
+            }
+            None => gas.look.color,
+        };
         // Emit THEN attenuate (module-doc quadrature rule), the exact operation
         // order of the WGSL march.
         let e = t * gas.look.emissivity * rho * ds;
-        c[0] += e * gas.look.color[0];
-        c[1] += e * gas.look.color[1];
-        c[2] += e * gas.look.color[2];
+        c[0] += e * emit_color[0];
+        c[1] += e * emit_color[1];
+        c[2] += e * emit_color[2];
         if let Some(sl) = scatter {
             // Unshadowed single scatter: incident intensity L/(4π(d²+r²)) per
             // light, HG-phased between the light→sample propagation direction

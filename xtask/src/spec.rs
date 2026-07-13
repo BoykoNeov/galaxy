@@ -712,6 +712,10 @@ pub const PRESETS: &[(&str, &str)] = &[
     ("minor", include_str!("../scenarios/minor.toml")),
     ("dolly", include_str!("../scenarios/dolly.toml")),
     ("gasrich", include_str!("../scenarios/gasrich.toml")),
+    (
+        "gasrich-adiabatic",
+        include_str!("../scenarios/gasrich-adiabatic.toml"),
+    ),
 ];
 
 /// Look up a checked-in preset's toml text by canonical name.
@@ -2293,6 +2297,41 @@ mod tests {
                 "γ = {bad_gamma} must be rejected (adiabatic index must exceed 1)"
             );
         }
+    }
+
+    #[test]
+    fn gasrich_adiabatic_preset_is_adiabatic_with_blackbody_temperature() {
+        // The shipped showpiece: adiabatic γ = 5/3, gas u seeded in pressure
+        // equilibrium, and a blackbody [look.gas.temperature] colormap threaded.
+        let s = build_scenario(&parse_preset("gasrich-adiabatic"), true);
+        let gamma = s.gamma.expect("gasrich-adiabatic is adiabatic");
+        assert!((gamma - 5.0 / 3.0).abs() < 1e-12);
+        assert!(s.adaptive.is_some(), "adiabatic ⇒ must ship [sim.adaptive]");
+        assert_eq!(s.u_floor, 1.0e-6, "the shipped positive-u floor");
+        let c_s = s.sound_speed.expect("gas-rich");
+        let cs2 = c_s * c_s;
+        let gas_count = s
+            .state
+            .u
+            .iter()
+            .zip(&s.state.kind)
+            .filter(|(_, k)| **k == Species::Gas)
+            .inspect(|(&u, _)| {
+                assert!(
+                    ((gamma - 1.0) * u - cs2).abs() < 1e-12,
+                    "gas u must start in pressure equilibrium (γ−1)u = c_s²"
+                );
+            })
+            .count();
+        assert!(gas_count > 0, "the showpiece carries gas");
+        let t = s
+            .gas_look
+            .expect("gas-rich ⇒ [look.gas]")
+            .temperature
+            .expect("gasrich-adiabatic threads [look.gas.temperature]");
+        assert_eq!(t.cold, [0.75, 0.13, 0.05], "blackbody cold = dark red");
+        assert_eq!(t.hot, [0.75, 0.82, 1.0], "blackbody hot = blue-white");
+        assert!(t.u_lo < t.u_hi, "a non-degenerate band");
     }
 
     // --- registry + validation --------------------------------------------------

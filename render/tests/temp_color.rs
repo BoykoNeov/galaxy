@@ -9,9 +9,7 @@
 //! a uniform temperature field renders as a flat tint of the mapped color; and a
 //! temperature gradient colors hot and cold regions differently.
 
-use galaxy_render::volume::{
-    march_gas, temperature_color, GasFrame, GasLook, TempColor, TEMP_RHO_FLOOR,
-};
+use galaxy_render::volume::{march_gas, temperature_color, GasFrame, GasLook, TempColor};
 use galaxy_renderprep::GasGrid;
 use glam::Vec3;
 
@@ -79,9 +77,9 @@ fn temperature_color_ramp_endpoints_and_clamp() {
     );
     // Midpoint ū = 4 ⇒ t = 0.5 ⇒ the two-product lerp per channel.
     let mid = temperature_color(&tc, 4.0);
-    for ch in 0..3 {
+    for (ch, &got) in mid.iter().enumerate() {
         let want = 0.5 * tc.cold[ch] + 0.5 * tc.hot[ch];
-        assert_eq!(mid[ch], want, "channel {ch} midpoint");
+        assert_eq!(got, want, "channel {ch} midpoint");
     }
     // Degenerate band (u_hi ≤ u_lo) ⇒ everything maps to cold (no div-by-zero).
     let deg = TempColor {
@@ -243,6 +241,4 @@ fn empty_cells_are_guarded_against_zero_over_zero() {
     assert!(c.iter().all(|v| v.is_finite()), "NaN/Inf radiance: {c:?}");
     assert_eq!(c, [0.0, 0.0, 0.0], "zero gas emitted radiance");
     assert_eq!(t, 1.0, "zero gas attenuated light");
-    // The floor constant is the shared CPU/GPU guard, exercised above.
-    assert!(TEMP_RHO_FLOOR > 0.0);
 }

@@ -987,8 +987,19 @@ pub const TEMP_RHO_FLOOR: f32 = 1e-20;
 /// `t = 0` and `t = 1`). A degenerate band (`u_hi ≤ u_lo`) maps everything to
 /// `cold`. The CPU reference the WGSL march mirrors op-for-op.
 pub fn temperature_color(tc: &TempColor, ubar: f32) -> [f32; 3] {
-    let _ = (tc, ubar);
-    todo!("H2: cold→hot lerp over the fixed [u_lo, u_hi] band")
+    let denom = tc.u_hi - tc.u_lo;
+    let t = if denom > 0.0 {
+        ((ubar - tc.u_lo) / denom).clamp(0.0, 1.0)
+    } else {
+        0.0 // degenerate band ⇒ cold
+    };
+    // Two-product lerp per channel: bit-exact at t = 0 (cold) and t = 1 (hot).
+    let lerp = |a: f32, b: f32| (1.0 - t) * a + t * b;
+    [
+        lerp(tc.cold[0], tc.hot[0]),
+        lerp(tc.cold[1], tc.hot[1]),
+        lerp(tc.cold[2], tc.hot[2]),
+    ]
 }
 
 /// The shared nominal step: half the smallest cell edge over BOTH endpoint

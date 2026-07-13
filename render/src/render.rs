@@ -299,8 +299,14 @@ struct GasUniforms {
     // flag (1 = multiply each light by its baked transmittance, 0 = v1).
     scat: vec4<f32>,
     // Chromatic scattering albedo (tinted-octree-lanterns): xyz = per-channel
-    // multiplier on the scattered radiance, w unused. [1,1,1] is neutral.
+    // multiplier on the scattered radiance. w = temperature-color enable flag
+    // (> 0.5 ⇒ the gas emission color comes from the colormap below instead of
+    // g.ce.xyz; ≤ 0.5 ⇒ the flat tint, bit-compat).
     tint: vec4<f32>,
+    // Temperature colormap (incandescent-nebular-veil): tcold.xyz / thot.xyz are
+    // the cold / hot linear-RGB endpoints; tcold.w = u_lo, thot.w = u_hi.
+    tcold: vec4<f32>,
+    thot: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> g: GasUniforms;
 @group(1) @binding(1) var rho0: texture_3d<f32>;
@@ -389,6 +395,30 @@ const WGSL_GAS_PASS: &str = r#"
 // output, {shadow_res}^3 transmittances per light, light-major, x-fastest.
 // A 4-byte dummy when shadows are off (scat.w = 0) — never read.
 @group(2) @binding(0) var<storage, read> shadow: array<f32>;
+
+// Internal-energy MOMENT grids N = Σ mⱼ·uⱼ·W (incandescent-nebular-veil, H1),
+// co-registered with rho0/rho1 (same bounds). When temperature color is off
+// (tint.w <= 0.5) these bind the rho textures as never-read dummies.
+@group(1) @binding(4) var mom0: texture_3d<f32>;
+@group(1) @binding(5) var mom1: texture_3d<f32>;
+
+// The endpoint-mixed internal-energy moment — density_at's twin over the SAME
+// bounds (the moment grids share rho's geometry), so ū = moment_at/ρ.
+fn moment_at(p: vec3<f32>) -> f32 {
+    return (1.0 - g.kms.y) * sample_one(mom0, g.b0min.xyz, g.b0max.xyz, p)
+        + g.kms.y * sample_one(mom1, g.b1min.xyz, g.b1max.xyz, p);
+}
+
+// The cold→hot colormap, mirroring volume::temperature_color op-for-op:
+// t = clamp((ū − u_lo)/(u_hi − u_lo), 0, 1), degenerate band ⇒ cold.
+fn temp_color(ubar: f32) -> vec3<f32> {
+    let denom = g.thot.w - g.tcold.w;
+    var tt = 0.0;
+    if (denom > 0.0) {
+        tt = clamp((ubar - g.tcold.w) / denom, 0.0, 1.0);
+    }
+    return (1.0 - tt) * g.tcold.xyz + tt * g.thot.xyz;
+}
 
 // Henyey-Greenstein phase, mirroring volume::hg_phase (which evaluates in f64;
 // the GPU == CPU gates allow the f32 difference). 12.566... = 4*pi.
@@ -487,9 +517,16 @@ fn fs_gas(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let s = t0 + (f32(i) + 0.5) * ds;
         let p = origin + dir * s;
         let rho = density_at(p);
+        // Emission color: flat g.ce.xyz, or the cold→hot colormap of
+        // ū = moment_at/ρ when temperature color is on (tint.w > 0.5). The off
+        // path is g.ce.xyz verbatim — bit-identical to the pre-temperature march.
+        var emit_col = g.ce.xyz;
+        if (g.tint.w > 0.5) {
+            emit_col = temp_color(moment_at(p) / max(rho, 1e-20));
+        }
         // Emit THEN attenuate — volume::march_gas's exact operation order.
         let e = t * g.ce.w * rho * ds;
-        c += e * g.ce.xyz;
+        c += e * emit_col;
         if (scatter_on) {
             // volume::march_gas's scatter block, operation-for-operation.
             var inc = vec3<f32>(0.0);
@@ -779,8 +816,14 @@ struct GasUniforms {
     /// z = light count (0 = off, the bit-compat path), w = shadow-volume flag.
     scat: [f32; 4],
     /// Chromatic scattering albedo (tinted-octree-lanterns): xyz = per-channel
-    /// multiplier on the scattered radiance, w unused. `[1, 1, 1, _]` neutral.
+    /// multiplier on the scattered radiance. w = temperature-color enable flag
+    /// (`> 0.5` ⇒ colormap emission; `≤ 0.5` ⇒ flat `color_emissivity.xyz`).
     tint: [f32; 4],
+    /// Temperature colormap (incandescent-nebular-veil): xyz = cold linear RGB,
+    /// w = `u_lo`.
+    t_cold: [f32; 4],
+    /// xyz = hot linear RGB, w = `u_hi`.
+    t_hot: [f32; 4],
 }
 
 /// One point light as uploaded to the GPU, mirroring the WGSL `PointLight`
@@ -962,6 +1005,21 @@ impl Renderer {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                // Internal-energy moment grids (temperature color, H3): read by
+                // the gas fragment march; declared here so the shared layout
+                // carries them (the prepass/bake shaders leave them unused).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                    ty: tex3d,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                    ty: tex3d,
                     count: None,
                 },
             ],
@@ -1481,6 +1539,17 @@ impl Renderer {
                 let ext = |v: glam::Vec3| [v.x, v.y, v.z, 0.0];
                 let mmin = gf.grid0.bounds_min.min(gf.grid1.bounds_min);
                 let mmax = gf.grid0.bounds_max.max(gf.grid1.bounds_max);
+                // Temperature colormap (incandescent-nebular-veil): enable flag in
+                // tint.w, cold/hot endpoints + [u_lo, u_hi] band in t_cold/t_hot.
+                // None ⇒ flag 0 ⇒ the flat-tint march, bit-identical.
+                let (temp_on, t_cold, t_hot) = match gf.temperature {
+                    Some(tc) => (
+                        1.0_f32,
+                        [tc.cold[0], tc.cold[1], tc.cold[2], tc.u_lo],
+                        [tc.hot[0], tc.hot[1], tc.hot[2], tc.u_hi],
+                    ),
+                    None => (0.0, [0.0; 4], [0.0; 4]),
+                };
                 self.queue.write_buffer(
                     &self.gas_uniform_buf,
                     0,
@@ -1509,11 +1578,25 @@ impl Renderer {
                             n_lights as f32,
                             if shadows_on { 1.0 } else { 0.0 },
                         ],
-                        tint: [tint[0], tint[1], tint[2], 0.0],
+                        tint: [tint[0], tint[1], tint[2], temp_on],
+                        t_cold,
+                        t_hot,
                     }),
                 );
                 let v0 = self.upload_grid(gf.grid0, "gas-rho0");
                 let v1 = self.upload_grid(gf.grid1, "gas-rho1");
+                // Moment grids for temperature color: uploaded only when on;
+                // off reuses the rho views as never-read dummies (tint.w = 0).
+                let mom_views = gf.temperature.map(|tc| {
+                    (
+                        self.upload_grid(tc.moment0, "gas-mom0"),
+                        self.upload_grid(tc.moment1, "gas-mom1"),
+                    )
+                });
+                let (mv0, mv1) = match &mom_views {
+                    Some((a, b)) => (a, b),
+                    None => (&v0, &v1),
+                };
                 let gas_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("gas-bind-group"),
                     layout: &self.gas_bgl,
@@ -1533,6 +1616,14 @@ impl Renderer {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: lights_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(mv0),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(mv1),
                         },
                     ],
                 });

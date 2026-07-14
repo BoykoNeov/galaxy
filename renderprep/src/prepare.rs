@@ -170,7 +170,22 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
         }
         ColorMode::Dispersion(dc) => {
             let sigma = velocity_dispersion(&state.vel, knn.neighbours(dc.k, dc.softening));
-            dispersion_colors(&sigma, dc.cold, dc.hot)
+            let ramp = dispersion_colors(&sigma, dc.cold, dc.hot);
+            // Ramp only the luminous progenitors by σ_v; the rest (dark-matter
+            // halo) keep their palette color — the dim near-black that offsets
+            // their large mass — so the heavy halo can't swamp the frame. With
+            // `luminous == u64::MAX` every particle keeps the ramp (the pre-mask
+            // single-population map, bit-for-bit).
+            (0..n)
+                .map(|i| {
+                    let p = state.progenitor[i].0;
+                    if p < 64 && (dc.luminous >> p) & 1 == 1 {
+                        ramp[i]
+                    } else {
+                        palette_color(config, p)
+                    }
+                })
+                .collect()
         }
     };
 

@@ -107,14 +107,15 @@ const FALLOFF: f32 = 6.0;
 //     (A proxy: the sim is collisionless — see DESIGN M6e.)
 //   * Size-by-density (ON): splat radius follows the local spacing (ρ_ref/ρ)^⅓,
 //     clamped — tight cores, soft diffuse splats.
-//   * σ_v ramp (--color dispersion): dynamically cold → blue, hot → red-orange
-//     (the astro convention: cold thin disks are young/blue, hot spheroids old/red).
-//     Scoped to SINGLE-POPULATION subjects (the dm merger): the ramp replaces the
-//     palette, and with it the 20× halo/disk brightness compensation — on the
-//     disk scenarios the ~5×-heavier, ~2×-more-numerous halo particles swamp the
-//     frame white at any ramp brightness that still shows the disks (the first
-//     rendered A/B). A palette-luminance-weighted σ_v ramp is the named follow-up
-//     if the mode is ever wanted on a disk+halo scene.
+//   * σ_v ramp (--color dispersion): dynamically cold → warm, hot → blue-white
+//     (the blackbody convention, matching the temperature-colored gas: red is
+//     cold, blue is hot across the whole frame). The ramp is masked to the
+//     scenario's luminous progenitors (`sf_progenitors`); the dark-matter halo
+//     keeps its dim palette color — otherwise the ~5×-heavier halo particles,
+//     which are dynamically HOT, take the bright hot end with no compensation
+//     and swamp the frame center (the first disk-scene A/B blew out white). So
+//     on a disk+halo scene the halo renders exactly as in progenitor mode and
+//     only the disk stars carry the temperature ramp.
 const SF_YOUNG: [f32; 3] = [0.7, 0.8, 1.0];
 const SF_STRENGTH: f32 = 0.8;
 const DISPERSION_COLD: [f32; 3] = [0.25, 0.4, 1.0];

@@ -417,6 +417,87 @@ fn dispersion_mask_keeps_non_luminous_progenitors_on_the_palette() {
     }
 }
 
+/// Two far-apart clumps: a MODERATE-σ luminous disk (progenitor 1) and a HOT,
+/// high-σ non-luminous halo (progenitor 0). Identical geometry; the halo's
+/// velocity spread is 3× the disk's, so the halo is dynamically hotter.
+fn disk_cool_halo_hot_state() -> State {
+    let clump = |c: DVec3| {
+        vec![
+            c + DVec3::new(0.5, 0.0, 0.0),
+            c + DVec3::new(-0.5, 0.0, 0.0),
+            c + DVec3::new(0.0, 0.5, 0.0),
+        ]
+    };
+    let pos = [clump(DVec3::ZERO), clump(DVec3::new(100.0, 0.0, 0.0))].concat();
+    let vel = |s: f64| {
+        vec![
+            DVec3::new(s, 0.0, 0.0),
+            DVec3::new(-s, 0.0, 0.0),
+            DVec3::new(0.0, s, 0.0),
+        ]
+    };
+    State {
+        mass: vec![1.0; 6],
+        id: (0..6).map(ParticleId).collect(),
+        progenitor: vec![
+            Progenitor(1), // luminous disk, moderate σ
+            Progenitor(1),
+            Progenitor(1),
+            Progenitor(0), // non-luminous halo, hot σ (3×)
+            Progenitor(0),
+            Progenitor(0),
+        ],
+        kind: vec![Species::Collisionless; 6],
+        u: vec![0.0; 6],
+        time: 0.0,
+        a: 1.0,
+        pos,
+        vel: [vel(1.0), vel(3.0)].concat(),
+    }
+}
+
+#[test]
+fn dispersion_reference_excludes_non_luminous_progenitors() {
+    // The σ_v temperature SCALE (σ_ref inside dispersion_colors) must be set by
+    // the luminous population alone. A hot dark-matter halo left in the reference
+    // inflates σ_ref and crushes the colder luminous disk toward cold — the
+    // "too much red" the user saw. Excluding the halo (the luminous mask applied
+    // to the reference too) lowers σ_ref and lets the disk read hotter/bluer.
+    //
+    // Same state, two masks: disk-only vs disk+halo. Because each disk particle's
+    // own σ is identical across the two runs, the ONLY difference is σ_ref, so
+    // every disk particle must come out strictly hotter when the hot halo is out
+    // of the reference. On the pre-fix code σ_ref ignores the mask (always the
+    // full population) ⇒ the two runs are identical ⇒ this fails.
+    let cold = [0.1, 0.2, 0.9];
+    let hot = [0.9, 0.8, 0.1];
+    let state = disk_cool_halo_hot_state();
+    let make = |lum: u64| PrepConfig {
+        color: ColorMode::Dispersion(DispersionColoring {
+            k: 2,
+            softening: 1e-9,
+            cold,
+            hot,
+            luminous: lum,
+        }),
+        ..sample_config()
+    };
+    let excluded = prepare(&state, &make(1u64 << 1)); // disk only in σ_ref
+    let included = prepare(&state, &make((1u64 << 1) | (1u64 << 0))); // + hot halo
+    for i in 0..3 {
+        for c in 0..3 {
+            let toward_hot = (hot[c] - cold[c]).signum();
+            assert!(
+                (excluded.color[i][c] - included.color[i][c]) * toward_hot > 0.0,
+                "disk particle {i} channel {c}: excluding the hot halo from σ_ref \
+                 must make it hotter (excluded {} vs included {})",
+                excluded.color[i][c],
+                included.color[i][c]
+            );
+        }
+    }
+}
+
 #[test]
 fn size_by_density_shrinks_dense_splats_and_softens_sparse_ones() {
     // The clustered octahedron + 3 sparse escapers: dense splats must come out

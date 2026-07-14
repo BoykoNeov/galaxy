@@ -313,6 +313,7 @@ fn dispersion_mode_colors_cold_clump_cold_and_hot_clump_hotter() {
             softening: 1e-9,
             cold,
             hot,
+            luminous: u64::MAX, // single progenitor, all luminous — pre-mask behavior
         }),
         ..sample_config()
     };
@@ -330,6 +331,88 @@ fn dispersion_mode_colors_cold_clump_cold_and_hot_clump_hotter() {
             );
             let (lo, hi) = (cold[c].min(hot[c]), cold[c].max(hot[c]));
             assert!(data.color[i][c] >= lo && data.color[i][c] <= hi);
+        }
+    }
+}
+
+/// Two far-apart clumps with *identical* internal geometry and velocities — so
+/// their σ_v is identical — but different progenitors: clump A = progenitor 1
+/// (the luminous disk), clump B = progenitor 0 (the dark-matter halo). Any color
+/// difference between them can only come from the luminous mask, not from σ.
+fn mixed_progenitor_state() -> State {
+    let clump = |c: DVec3| {
+        vec![
+            c + DVec3::new(0.5, 0.0, 0.0),
+            c + DVec3::new(-0.5, 0.0, 0.0),
+            c + DVec3::new(0.0, 0.5, 0.0),
+        ]
+    };
+    let pos = [clump(DVec3::ZERO), clump(DVec3::new(100.0, 0.0, 0.0))].concat();
+    // The same non-degenerate velocity spread in both clumps ⇒ both are "hot".
+    let hot_vel = || {
+        vec![
+            DVec3::new(1.0, 0.0, 0.0),
+            DVec3::new(-1.0, 0.0, 0.0),
+            DVec3::new(0.0, 1.0, 0.0),
+        ]
+    };
+    State {
+        mass: vec![1.0; 6],
+        id: (0..6).map(ParticleId).collect(),
+        progenitor: vec![
+            Progenitor(1),
+            Progenitor(1),
+            Progenitor(1),
+            Progenitor(0),
+            Progenitor(0),
+            Progenitor(0),
+        ],
+        kind: vec![Species::Collisionless; 6],
+        u: vec![0.0; 6],
+        time: 0.0,
+        a: 1.0,
+        pos,
+        vel: [hot_vel(), hot_vel()].concat(),
+    }
+}
+
+#[test]
+fn dispersion_mask_keeps_non_luminous_progenitors_on_the_palette() {
+    // The luminous mask must OVERRIDE σ: the halo clump is dynamically hot, but
+    // because progenitor 0 is not luminous it keeps its dim palette color exactly,
+    // while the equally-hot luminous disk clump ramps toward hot.
+    let cold = [0.1, 0.2, 0.9];
+    let hot = [0.9, 0.8, 0.1];
+    let halo = [0.05, 0.04, 0.03]; // palette[0] — the dim halo compensation color
+    let cfg = PrepConfig {
+        palette: vec![halo, [1.0, 0.5, 0.25]],
+        color: ColorMode::Dispersion(DispersionColoring {
+            k: 2,
+            softening: 1e-9,
+            cold,
+            hot,
+            luminous: 1u64 << 1, // only progenitor 1 (the disk) gets the ramp
+        }),
+        ..Default::default()
+    };
+    let data = prepare(&mixed_progenitor_state(), &cfg);
+    // Halo (progenitor 0, non-luminous): exactly palette[0] despite its hot σ.
+    for i in 3..6 {
+        assert_eq!(
+            data.color[i], halo,
+            "masked halo particle {i} must keep palette[0], not the σ_v ramp"
+        );
+    }
+    // Disk (progenitor 1, luminous): σ_v ramp applied — off cold, toward hot.
+    for i in 0..3 {
+        assert_ne!(data.color[i], halo, "luminous particle {i} must not be halo");
+        assert_ne!(data.color[i], cold, "luminous hot particle {i} must leave cold");
+        for c in 0..3 {
+            let toward_hot = (hot[c] - cold[c]).signum();
+            assert!(
+                (data.color[i][c] - cold[c]) * toward_hot > 0.0,
+                "luminous particle {i} channel {c} must move toward hot"
+            );
         }
     }
 }
@@ -443,6 +526,7 @@ fn full_featured_prepare_is_deterministic() {
             softening: 1e-9,
             cold: [0.1, 0.2, 0.9],
             hot: [0.9, 0.8, 0.1],
+            luminous: u64::MAX,
         }),
         density: Some(DensityColoring {
             k: 2,

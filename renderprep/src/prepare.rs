@@ -52,6 +52,15 @@ pub struct DispersionColoring {
     pub cold: [f32; 3],
     /// Color σ_v ramps toward (σ ≫ σ_ref).
     pub hot: [f32; 3],
+    /// Bitmask of the **luminous** progenitors: bit `i` set ⇒ progenitor `i`'s
+    /// particles get the σ_v ramp. Non-luminous progenitors (a dark-matter halo)
+    /// keep their palette color instead — the dim near-black that compensates
+    /// their large per-particle mass — so the temperature ramp lights only the
+    /// star disks and the heavy halo can't swamp the frame (the follow-up the
+    /// mode's doc named for disk+halo scenes). `u64::MAX` colors *every*
+    /// progenitor by σ_v — the single-population subject the mode shipped for.
+    /// Progenitor ids ≥ 64 are treated as non-luminous.
+    pub luminous: u64,
 }
 
 /// The star-formation proxy (M6e): hue shift toward `young` keyed on density

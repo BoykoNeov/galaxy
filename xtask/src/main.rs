@@ -2304,6 +2304,14 @@ fn effective_prep(s: &Scenario, color: ColorModeArg, snap0: &State) -> PrepConfi
             softening: s.eps,
             cold: DISPERSION_COLD,
             hot: DISPERSION_HOT,
+            // Ramp only the luminous disks by σ_v; the dark-matter halo keeps its
+            // dim palette color (its large mass would otherwise swamp the frame —
+            // the same set the SF proxy treats as luminous).
+            luminous: s
+                .sf_progenitors
+                .iter()
+                .filter(|&&p| p < 64)
+                .fold(0u64, |m, &p| m | (1u64 << p)),
         }),
     };
     // Star-formation proxy, masked to the scenario's luminous progenitors: a 0.0

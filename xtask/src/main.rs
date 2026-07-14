@@ -118,8 +118,12 @@ const FALLOFF: f32 = 6.0;
 //     only the disk stars carry the temperature ramp.
 const SF_YOUNG: [f32; 3] = [0.7, 0.8, 1.0];
 const SF_STRENGTH: f32 = 0.8;
-const DISPERSION_COLD: [f32; 3] = [0.25, 0.4, 1.0];
-const DISPERSION_HOT: [f32; 3] = [1.0, 0.5, 0.2];
+// Blackbody direction, matching the temperature-colored gas so stars and gas
+// share ONE scale (red = dynamically cold, blue-white = hot). Same endpoints as
+// the gasrich-adiabatic `[look.gas.temperature]` ramp. The mask keeps this off
+// the dark halo, so the dim cold red never has to fight a heavy-halo blob.
+const DISPERSION_COLD: [f32; 3] = [0.75, 0.13, 0.05];
+const DISPERSION_HOT: [f32; 3] = [0.75, 0.82, 1.0];
 const EXPOSURE: f32 = 1.0;
 const TONEMAP: ToneMap = ToneMap::AcesApprox;
 // Bloom (M6b), ON by default in all three scenarios. Strength tuned by A/B regrades

@@ -170,16 +170,33 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
         }
         ColorMode::Dispersion(dc) => {
             let sigma = velocity_dispersion(&state.vel, knn.neighbours(dc.k, dc.softening));
-            let ramp = dispersion_colors(&sigma, dc.cold, dc.hot);
+            let is_luminous = |p: u16| p < 64 && (dc.luminous >> p) & 1 == 1;
+            // The temperature SCALE (σ_ref inside dispersion_colors) must be set by
+            // the luminous population alone. Left in the reference, the dynamically
+            // hot dark-matter halos inflate σ_ref and crush the colder disks toward
+            // cold — the "too much red". Zero the non-luminous σ (the degenerate
+            // sentinel dispersion_colors already excludes from its reference and
+            // maps to cold); those particles take their palette color below
+            // regardless, so this only recenters σ_ref on the disks. With
+            // `luminous == u64::MAX` nothing is zeroed ⇒ σ_ref, hence the ramp, is
+            // bit-for-bit the pre-mask single-population map.
+            let lum_sigma: Vec<f64> = (0..n)
+                .map(|i| {
+                    if is_luminous(state.progenitor[i].0) {
+                        sigma[i]
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let ramp = dispersion_colors(&lum_sigma, dc.cold, dc.hot);
             // Ramp only the luminous progenitors by σ_v; the rest (dark-matter
             // halo) keep their palette color — the dim near-black that offsets
-            // their large mass — so the heavy halo can't swamp the frame. With
-            // `luminous == u64::MAX` every particle keeps the ramp (the pre-mask
-            // single-population map, bit-for-bit).
+            // their large mass — so the heavy halo can't swamp the frame.
             (0..n)
                 .map(|i| {
                     let p = state.progenitor[i].0;
-                    if p < 64 && (dc.luminous >> p) & 1 == 1 {
+                    if is_luminous(p) {
                         ramp[i]
                     } else {
                         palette_color(config, p)

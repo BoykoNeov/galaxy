@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use crate::simulate::Backend;
 use galaxy_core::{DVec3, ForceSolver, Species, State};
 use galaxy_grade::{BloomConfig, GradeConfig, LocalToneConfig, ToneMap};
-use galaxy_renderprep::FrameData;
+use galaxy_renderprep::{FrameData, SigmaReference};
 use galaxy_solvers::{BarnesHut, DirectSum};
 use glam::Vec3;
 
@@ -80,6 +80,22 @@ pub enum ColorModeArg {
     Dispersion,
 }
 
+/// Which σ_v → color endpoints the `--color dispersion` ramp uses
+/// (`--dispersion-palette`). Independent of [`SigmaReference`] (the scale
+/// population) — one dial picks the hues, the other picks the scale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DispersionPalette {
+    /// Blue tidal-tail arms (the default): dynamically COLD stars (low σ_v — the
+    /// coherent streams and outer disk) read young→blue, HOT stars (the bulge)
+    /// read old→red. The REVERSE of the gas blackbody scale, so stars and gas no
+    /// longer share one convention. Aesthetic (loosely the age–σ relation).
+    #[default]
+    BlueArms,
+    /// Blackbody direction, matching the temperature-colored gas so stars and gas
+    /// share ONE scale: cold → red, hot → blue-white.
+    Blackbody,
+}
+
 /// Which scenario a movie invocation selected: a checked-in preset by canonical
 /// name, or a user-supplied `scenario.toml` path (M6f front-end).
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +116,13 @@ pub struct MovieArgs {
     pub out_dir: Option<PathBuf>,
     /// The M6e coloring mode (default: progenitor palette).
     pub color: ColorModeArg,
+    /// σ_v ramp endpoints for `--color dispersion` (`--dispersion-palette`,
+    /// default [`DispersionPalette::BlueArms`]). Ignored by the other color modes.
+    pub dispersion_palette: DispersionPalette,
+    /// Which population fixes the σ_v scale for `--color dispersion`
+    /// (`--dispersion-reference`, default [`SigmaReference::Full`]). Ignored by the
+    /// other color modes.
+    pub dispersion_reference: SigmaReference,
     /// Skip the simulation and read existing `snapshots/*.snap` under the out dir
     /// (errors downstream if none exist — reuse is an explicit promise).
     pub reuse_snapshots: bool,
@@ -121,6 +144,10 @@ pub struct MovieArgs {
 pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut color = ColorModeArg::default();
+    // NOTE (red): the two dispersion dials are not parsed yet — they take their
+    // defaults, so `movie_parses_dispersion_dials` is red until the flags are wired.
+    let dispersion_palette = DispersionPalette::default();
+    let dispersion_reference = SigmaReference::default();
     let mut reuse_snapshots = false;
     let mut backend = Backend::default();
 
@@ -178,6 +205,8 @@ pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
         scenario,
         out_dir: out_dir.map(PathBuf::from),
         color,
+        dispersion_palette,
+        dispersion_reference,
         reuse_snapshots,
         backend,
     })
@@ -1359,6 +1388,8 @@ mod tests {
                 scenario: preset_arg("disk"),
                 out_dir: None,
                 color: ColorModeArg::Progenitor,
+                dispersion_palette: DispersionPalette::BlueArms,
+                dispersion_reference: SigmaReference::Full,
                 reuse_snapshots: false,
                 backend: Backend::Cpu,
             }
@@ -1451,6 +1482,30 @@ mod tests {
     }
 
     #[test]
+    fn movie_parses_dispersion_dials() {
+        // Both dials are independent and default to the "keep them" look (blue
+        // tidal arms + full-population σ_ref); each is overridable on its own.
+        let def = parse_movie_args(&args(&["cuspy", "--color", "dispersion"])).unwrap();
+        assert_eq!(def.dispersion_palette, DispersionPalette::BlueArms);
+        assert_eq!(def.dispersion_reference, SigmaReference::Full);
+
+        for (name, pal) in [
+            ("blue-arms", DispersionPalette::BlueArms),
+            ("blackbody", DispersionPalette::Blackbody),
+        ] {
+            let m = parse_movie_args(&args(&["cuspy", "--dispersion-palette", name])).unwrap();
+            assert_eq!(m.dispersion_palette, pal, "{name}");
+        }
+        for (name, refr) in [
+            ("full", SigmaReference::Full),
+            ("luminous", SigmaReference::Luminous),
+        ] {
+            let m = parse_movie_args(&args(&["cuspy", "--dispersion-reference", name])).unwrap();
+            assert_eq!(m.dispersion_reference, refr, "{name}");
+        }
+    }
+
+    #[test]
     fn movie_flags_are_order_independent_and_compose() {
         let a = parse_movie_args(&args(&[
             "--reuse-snapshots",
@@ -1482,6 +1537,10 @@ mod tests {
             (&["--color", "rainbow"][..], "unknown color mode"),
             (&["--colour", "progenitor"][..], "unknown flag"),
             (&["--reuse"][..], "unknown flag (not the full name)"),
+            (&["--dispersion-palette"][..], "palette flag missing its value"),
+            (&["--dispersion-palette", "amber"][..], "unknown palette"),
+            (&["--dispersion-reference"][..], "reference flag missing its value"),
+            (&["--dispersion-reference", "halo"][..], "unknown reference"),
         ] {
             assert!(
                 parse_movie_args(&args(bad)).is_err(),

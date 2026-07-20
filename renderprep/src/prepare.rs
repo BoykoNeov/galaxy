@@ -39,6 +39,29 @@ pub enum ColorMode {
     Dispersion(DispersionColoring),
 }
 
+/// Which population sets the σ_v temperature SCALE (`σ_ref` inside
+/// [`crate::coloring::dispersion_colors`]) for [`ColorMode::Dispersion`].
+///
+/// `σ_ref` is the mean over the reference set; a larger reference (a hot
+/// dark-matter halo left in) inflates it and crushes the colder disks toward
+/// cold. Which particles get *ramped* is a separate axis — the [`luminous`]
+/// mask — so `Full` and `Luminous` differ only in the scale, not in who takes
+/// the ramp.
+///
+/// [`luminous`]: DispersionColoring::luminous
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SigmaReference {
+    /// σ_ref over the *whole* population, halos included. The hot halos inflate
+    /// σ_ref, pushing the disks warmer. The pre-recentering "masked" mapping and
+    /// the default look.
+    #[default]
+    Full,
+    /// σ_ref over the [`luminous`](DispersionColoring::luminous) progenitors
+    /// alone — the halo is excluded from the scale, so the disks read
+    /// hotter/bluer. The recentered variant.
+    Luminous,
+}
+
 /// Parameters for [`ColorMode::Dispersion`]: σ_v over the k-NN neighbourhood set,
 /// mapped through a `cold → hot` ramp (see [`crate::coloring::dispersion_colors`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,6 +84,9 @@ pub struct DispersionColoring {
     /// progenitor by σ_v — the single-population subject the mode shipped for.
     /// Progenitor ids ≥ 64 are treated as non-luminous.
     pub luminous: u64,
+    /// Which population sets the σ_v temperature scale (`σ_ref`). Orthogonal to
+    /// [`luminous`](Self::luminous) (who takes the ramp); see [`SigmaReference`].
+    pub reference: SigmaReference,
 }
 
 /// The star-formation proxy (M6e): hue shift toward `young` keyed on density
@@ -171,25 +197,10 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
         ColorMode::Dispersion(dc) => {
             let sigma = velocity_dispersion(&state.vel, knn.neighbours(dc.k, dc.softening));
             let is_luminous = |p: u16| p < 64 && (dc.luminous >> p) & 1 == 1;
-            // The temperature SCALE (σ_ref inside dispersion_colors) must be set by
-            // the luminous population alone. Left in the reference, the dynamically
-            // hot dark-matter halos inflate σ_ref and crush the colder disks toward
-            // cold — the "too much red". Zero the non-luminous σ (the degenerate
-            // sentinel dispersion_colors already excludes from its reference and
-            // maps to cold); those particles take their palette color below
-            // regardless, so this only recenters σ_ref on the disks. With
-            // `luminous == u64::MAX` nothing is zeroed ⇒ σ_ref, hence the ramp, is
-            // bit-for-bit the pre-mask single-population map.
-            let lum_sigma: Vec<f64> = (0..n)
-                .map(|i| {
-                    if is_luminous(state.progenitor[i].0) {
-                        sigma[i]
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
-            let ramp = dispersion_colors(&lum_sigma, dc.cold, dc.hot);
+            // NOTE: `dc.reference` is not yet consulted here — the σ_ref scale is
+            // always the full population. The `SigmaReference` branch is wired in
+            // the follow-up commit; until then the `Luminous` reference test is red.
+            let ramp = dispersion_colors(&sigma, dc.cold, dc.hot);
             // Ramp only the luminous progenitors by σ_v; the rest (dark-matter
             // halo) keep their palette color — the dim near-black that offsets
             // their large mass — so the heavy halo can't swamp the frame.

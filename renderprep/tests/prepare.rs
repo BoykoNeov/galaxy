@@ -9,7 +9,7 @@
 use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 use galaxy_renderprep::{
     knn_density, prepare, ColorMode, CompressionHue, DensityColoring, DispersionColoring,
-    PrepConfig, SizeByDensity,
+    PrepConfig, SigmaReference, SizeByDensity,
 };
 
 /// Two particles from progenitor 0, one from progenitor 1, with distinct masses.
@@ -314,6 +314,7 @@ fn dispersion_mode_colors_cold_clump_cold_and_hot_clump_hotter() {
             cold,
             hot,
             luminous: u64::MAX, // single progenitor, all luminous — pre-mask behavior
+            reference: SigmaReference::Full,
         }),
         ..sample_config()
     };
@@ -392,6 +393,7 @@ fn dispersion_mask_keeps_non_luminous_progenitors_on_the_palette() {
             cold,
             hot,
             luminous: 1u64 << 1, // only progenitor 1 (the disk) gets the ramp
+            reference: SigmaReference::Full,
         }),
         ..Default::default()
     };
@@ -479,6 +481,7 @@ fn dispersion_reference_excludes_non_luminous_progenitors() {
             cold,
             hot,
             luminous: lum,
+            reference: SigmaReference::Luminous, // scale from the luminous set alone
         }),
         ..sample_config()
     };
@@ -495,6 +498,39 @@ fn dispersion_reference_excludes_non_luminous_progenitors() {
                 included.color[i][c]
             );
         }
+    }
+}
+
+#[test]
+fn dispersion_reference_full_ignores_the_luminous_mask() {
+    // The FULL reference toggle sets σ_ref over the WHOLE population regardless of
+    // the luminous mask — the pre-recentering "masked" mapping the user wants back.
+    // Same disk particles, two luminous masks: disk-only vs disk+halo. Under
+    // `Luminous` these differ (the recenter test above); under `Full` σ_ref is the
+    // full-population mean in BOTH runs, so the ramped disk particles must come out
+    // bit-for-bit IDENTICAL — the mask changes only who is ramped, never the scale.
+    let cold = [0.1, 0.2, 0.9];
+    let hot = [0.9, 0.8, 0.1];
+    let state = disk_cool_halo_hot_state();
+    let make = |lum: u64| PrepConfig {
+        color: ColorMode::Dispersion(DispersionColoring {
+            k: 2,
+            softening: 1e-9,
+            cold,
+            hot,
+            luminous: lum,
+            reference: SigmaReference::Full, // scale from the whole population
+        }),
+        ..sample_config()
+    };
+    let disk_only = prepare(&state, &make(1u64 << 1)); // halo not ramped, but in σ_ref
+    let disk_and_halo = prepare(&state, &make((1u64 << 1) | (1u64 << 0)));
+    for i in 0..3 {
+        assert_eq!(
+            disk_only.color[i], disk_and_halo.color[i],
+            "disk particle {i}: with Full reference σ_ref is the full-population mean \
+             either way, so the luminous mask must not shift the ramped disk color"
+        );
     }
 }
 
@@ -608,6 +644,7 @@ fn full_featured_prepare_is_deterministic() {
             cold: [0.1, 0.2, 0.9],
             hot: [0.9, 0.8, 0.1],
             luminous: u64::MAX,
+            reference: SigmaReference::Full,
         }),
         density: Some(DensityColoring {
             k: 2,

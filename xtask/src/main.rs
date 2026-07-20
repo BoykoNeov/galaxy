@@ -76,7 +76,7 @@ use galaxy_render::camera::DEFAULT_MARGIN;
 use galaxy_render::{smooth_envelope, write_exr, Camera, CameraPath, RenderConfig, Renderer};
 use galaxy_renderprep::{
     initial_radius_colors, knn_density, prepare, subframe, ColorMode, CompressionHue,
-    DispersionColoring, FrameData, HermiteSpan, PrepConfig, RadialRamp,
+    DispersionColoring, FrameData, HermiteSpan, PrepConfig, RadialRamp, SigmaReference,
 };
 use galaxy_solvers::sph::{
     density_adaptive, density_fixed, max_stable_dt, reference_density, DensityConfig, Eos,
@@ -2317,6 +2317,7 @@ fn effective_prep(s: &Scenario, color: ColorModeArg, snap0: &State) -> PrepConfi
                 .iter()
                 .filter(|&&p| p < 64)
                 .fold(0u64, |m, &p| m | (1u64 << p)),
+            reference: SigmaReference::Full,
         }),
     };
     // Star-formation proxy, masked to the scenario's luminous progenitors: a 0.0

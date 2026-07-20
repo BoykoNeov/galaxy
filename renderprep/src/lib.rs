@@ -32,4 +32,6 @@ pub use gasgrid::{
     deposit_moment_fixed, deposit_moment_fixed_serial, sample_mix, GasGrid, GasGridConfig,
 };
 pub use interp::{subframe, HermiteSpan, InterpError};
-pub use prepare::{prepare, ColorMode, CompressionHue, DispersionColoring, PrepConfig};
+pub use prepare::{
+    prepare, ColorMode, CompressionHue, DispersionColoring, PrepConfig, SigmaReference,
+};

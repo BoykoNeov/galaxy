@@ -6,8 +6,11 @@
 //! `bullseye`, `minor`) — or any user toml on the same schema (see `spec`).
 //!
 //! Usage: `cargo run -p galaxy-xtask --release [<preset>|<scenario.toml>] [out_dir]
-//! [--color progenitor|initial-radius|dispersion] [--reuse-snapshots] [--gpu]`
-//! (`--gpu` runs the gas-rich sim on the GPU-resident SPH stepper, G6.)
+//! [--color progenitor|initial-radius|dispersion]
+//! [--dispersion-palette blue-arms|blackbody] [--dispersion-reference full|luminous]
+//! [--reuse-snapshots] [--gpu]`
+//! (`--gpu` runs the gas-rich sim on the GPU-resident SPH stepper, G6. The two
+//! `--dispersion-*` dials apply only to `--color dispersion`.)
 //!   * A bare first arg that is no preset name (and not a `.toml` path) is taken as
 //!     `out_dir` with the `disk` scenario (back-compat with the original CLI).
 //!   * `regrade <exr_dir> <png_dir> [--exposure E] [--tonemap aces|reinhard|asinh]
@@ -88,8 +91,9 @@ use galaxy_xtask::spec::{
 };
 use galaxy_xtask::{
     accel_max_rel_vs_direct, framing_radius, parse_movie_args, parse_regrade_args, per_frame_radii,
-    per_particle_grav_dt, rung_spread, ColorModeArg, ScenarioArg, AMDAHL_GASRICH_PERICENTER,
-    DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K, THETA, W_HYDRO_DROP_FINEST,
+    per_particle_grav_dt, rung_spread, ColorModeArg, DispersionPalette, ScenarioArg,
+    AMDAHL_GASRICH_PERICENTER, DEFAULT_BLOOM_LEVELS, DEFAULT_BLOOM_RADIUS, DENSITY_K, THETA,
+    W_HYDRO_DROP_FINEST,
 };
 use glam::Vec3;
 
@@ -107,23 +111,30 @@ const FALLOFF: f32 = 6.0;
 //     (A proxy: the sim is collisionless — see DESIGN M6e.)
 //   * Size-by-density (ON): splat radius follows the local spacing (ρ_ref/ρ)^⅓,
 //     clamped — tight cores, soft diffuse splats.
-//   * σ_v ramp (--color dispersion): dynamically cold → warm, hot → blue-white
-//     (the blackbody convention, matching the temperature-colored gas: red is
-//     cold, blue is hot across the whole frame). The ramp is masked to the
-//     scenario's luminous progenitors (`sf_progenitors`); the dark-matter halo
-//     keeps its dim palette color — otherwise the ~5×-heavier halo particles,
-//     which are dynamically HOT, take the bright hot end with no compensation
-//     and swamp the frame center (the first disk-scene A/B blew out white). So
-//     on a disk+halo scene the halo renders exactly as in progenitor mode and
-//     only the disk stars carry the temperature ramp.
+//   * σ_v ramp (--color dispersion): two independent dials pick the look.
+//     `--dispersion-palette` chooses the hues (blue-arms, the default, vs the
+//     blackbody scale — see the palette consts below) and `--dispersion-reference`
+//     chooses the σ_ref scale population (full vs luminous — see `SigmaReference`).
+//     Either way the ramp is masked to the scenario's luminous progenitors
+//     (`sf_progenitors`); the dark-matter halo keeps its dim palette color —
+//     otherwise the ~5×-heavier halo particles, which are dynamically HOT, take
+//     the bright hot end with no compensation and swamp the frame center (the
+//     first disk-scene A/B blew out white). So on a disk+halo scene the halo
+//     renders exactly as in progenitor mode and only the disk stars carry the ramp.
 const SF_YOUNG: [f32; 3] = [0.7, 0.8, 1.0];
 const SF_STRENGTH: f32 = 0.8;
-// Blackbody direction, matching the temperature-colored gas so stars and gas
-// share ONE scale (red = dynamically cold, blue-white = hot). Same endpoints as
-// the gasrich-adiabatic `[look.gas.temperature]` ramp. The mask keeps this off
-// the dark halo, so the dim cold red never has to fight a heavy-halo blob.
-const DISPERSION_COLD: [f32; 3] = [0.75, 0.13, 0.05];
-const DISPERSION_HOT: [f32; 3] = [0.75, 0.82, 1.0];
+// σ_v → color endpoints for `--color dispersion`, selected by `--dispersion-palette`.
+// The two share the same tuned hues, swapped across the σ_v axis:
+//   * BLUE_ARMS (default): dynamically COLD stars (low σ_v — coherent tidal streams
+//     and outer disk) read young→blue, HOT stars (the bulge) read old→red. The
+//     REVERSE of the gas blackbody convention, so stars and gas no longer share a
+//     scale. Aesthetic (loosely the age–σ relation), not more physically faithful.
+//   * BLACKBODY: cold → red, hot → blue-white, matching the temperature-colored gas
+//     (`[look.gas.temperature]`) so stars and gas share ONE scale.
+const BLUE_ARMS_COLD: [f32; 3] = [0.4, 0.65, 1.0];
+const BLUE_ARMS_HOT: [f32; 3] = [0.72, 0.32, 0.06];
+const BLACKBODY_COLD: [f32; 3] = [0.75, 0.13, 0.05];
+const BLACKBODY_HOT: [f32; 3] = [0.75, 0.82, 1.0];
 const EXPOSURE: f32 = 1.0;
 const TONEMAP: ToneMap = ToneMap::AcesApprox;
 // Bloom (M6b), ON by default in all three scenarios. Strength tuned by A/B regrades
@@ -189,7 +200,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let movie = parse_movie_args(&args).map_err(|e| {
         format!(
             "{e}\nusage: [<preset>|<scenario.toml>] [out_dir] \
-             [--color progenitor|initial-radius|dispersion] [--reuse-snapshots] [--gpu]"
+             [--color progenitor|initial-radius|dispersion] \
+             [--dispersion-palette blue-arms|blackbody] \
+             [--dispersion-reference full|luminous] [--reuse-snapshots] [--gpu]"
         )
     })?;
     let spec: ScenarioSpec = match &movie.scenario {
@@ -228,6 +241,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &scenario,
         &out,
         movie.color,
+        movie.dispersion_palette,
+        movie.dispersion_reference,
         movie.reuse_snapshots,
         movie.backend,
     )
@@ -1905,10 +1920,13 @@ fn fractional_ranks(v: &[f64]) -> Vec<f64> {
 /// coloring mode, build the scenario's camera path (static framing or the M6d
 /// orbit/tilt rig), then render + grade each frame and (optionally) ffmpeg them
 /// into a movie.
+#[allow(clippy::too_many_arguments)]
 fn run_movie(
     s: &Scenario,
     out: &Path,
     color: ColorModeArg,
+    dispersion_palette: DispersionPalette,
+    dispersion_reference: SigmaReference,
     reuse_snapshots: bool,
     backend: galaxy_xtask::simulate::Backend,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1979,7 +1997,13 @@ fn run_movie(
     // coloring mode + the star-formation compression proxy, both anchored to THIS
     // run's snapshot 0 (frozen ramp colors; reference densities ρ0).
     let t_prep = std::time::Instant::now();
-    let prep = effective_prep(s, color, &states[0]);
+    let prep = effective_prep(
+        s,
+        color,
+        dispersion_palette,
+        dispersion_reference,
+        &states[0],
+    );
     let frames: Vec<_> = states.iter().map(|st| prepare(st, &prep)).collect();
     println!(
         "prepared {} endpoint frames in {:.1} s",
@@ -2294,7 +2318,13 @@ fn run_movie(
 /// initial-radius colors; reference densities ρ0). Everything reuses
 /// `(DENSITY_K, s.eps)`, so `prepare`'s shared cache runs ONE O(N²) pass per
 /// snapshot however many features are on.
-fn effective_prep(s: &Scenario, color: ColorModeArg, snap0: &State) -> PrepConfig {
+fn effective_prep(
+    s: &Scenario,
+    color: ColorModeArg,
+    palette: DispersionPalette,
+    reference: SigmaReference,
+    snap0: &State,
+) -> PrepConfig {
     let mut prep = s.prep.clone();
     prep.color = match color {
         ColorModeArg::Progenitor => ColorMode::Progenitor,
@@ -2304,21 +2334,27 @@ fn effective_prep(s: &Scenario, color: ColorModeArg, snap0: &State) -> PrepConfi
                 ramps: s.ramp.clone(),
             },
         )),
-        ColorModeArg::Dispersion => ColorMode::Dispersion(DispersionColoring {
-            k: DENSITY_K,
-            softening: s.eps,
-            cold: DISPERSION_COLD,
-            hot: DISPERSION_HOT,
-            // Ramp only the luminous disks by σ_v; the dark-matter halo keeps its
-            // dim palette color (its large mass would otherwise swamp the frame —
-            // the same set the SF proxy treats as luminous).
-            luminous: s
-                .sf_progenitors
-                .iter()
-                .filter(|&&p| p < 64)
-                .fold(0u64, |m, &p| m | (1u64 << p)),
-            reference: SigmaReference::Full,
-        }),
+        ColorModeArg::Dispersion => {
+            let (cold, hot) = match palette {
+                DispersionPalette::BlueArms => (BLUE_ARMS_COLD, BLUE_ARMS_HOT),
+                DispersionPalette::Blackbody => (BLACKBODY_COLD, BLACKBODY_HOT),
+            };
+            ColorMode::Dispersion(DispersionColoring {
+                k: DENSITY_K,
+                softening: s.eps,
+                cold,
+                hot,
+                // Ramp only the luminous disks by σ_v; the dark-matter halo keeps its
+                // dim palette color (its large mass would otherwise swamp the frame —
+                // the same set the SF proxy treats as luminous).
+                luminous: s
+                    .sf_progenitors
+                    .iter()
+                    .filter(|&&p| p < 64)
+                    .fold(0u64, |m, &p| m | (1u64 << p)),
+                reference,
+            })
+        }
     };
     // Star-formation proxy, masked to the scenario's luminous progenitors: a 0.0
     // reference density is the gated "no estimate" sentinel, so masked particles

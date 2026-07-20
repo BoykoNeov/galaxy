@@ -133,21 +133,23 @@ pub struct MovieArgs {
 
 /// Map movie CLI arguments (everything except a leading `regrade`) to a
 /// [`MovieArgs`]: `[<preset>|<path/to/scenario.toml>] [out_dir]
-/// [--color progenitor|initial-radius|dispersion] [--reuse-snapshots]`,
-/// where `<preset>` is any [`spec::PRESETS`] name.
+/// [--color progenitor|initial-radius|dispersion]
+/// [--dispersion-palette blue-arms|blackbody]
+/// [--dispersion-reference full|luminous] [--reuse-snapshots]`,
+/// where `<preset>` is any [`spec::PRESETS`] name. The two `--dispersion-*` dials
+/// are independent and apply only to `--color dispersion`.
 ///
 /// Back-compat rules preserved from the original positional CLI: `nfw` and
 /// `disk-nfw` are aliases for `dm` / `cuspy`; a bare first positional that is no
 /// scenario name (and not a `.toml` path) is taken as the out dir with the `disk`
 /// scenario. Flags may come in any order. Errors (human-readable) on a third
-/// positional, unknown flags, unknown color names, or `--color` without a value.
+/// positional, unknown flags, unknown color/palette/reference names, or a flag
+/// without its value.
 pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut color = ColorModeArg::default();
-    // NOTE (red): the two dispersion dials are not parsed yet — they take their
-    // defaults, so `movie_parses_dispersion_dials` is red until the flags are wired.
-    let dispersion_palette = DispersionPalette::default();
-    let dispersion_reference = SigmaReference::default();
+    let mut dispersion_palette = DispersionPalette::default();
+    let mut dispersion_reference = SigmaReference::default();
     let mut reuse_snapshots = false;
     let mut backend = Backend::default();
 
@@ -169,11 +171,40 @@ pub fn parse_movie_args(args: &[String]) -> Result<MovieArgs, String> {
                     }
                 };
             }
+            "--dispersion-palette" => {
+                let name = it
+                    .next()
+                    .ok_or("--dispersion-palette needs a value: blue-arms|blackbody")?;
+                dispersion_palette = match name.as_str() {
+                    "blue-arms" => DispersionPalette::BlueArms,
+                    "blackbody" => DispersionPalette::Blackbody,
+                    other => {
+                        return Err(format!(
+                            "unknown dispersion palette `{other}` (blue-arms|blackbody)"
+                        ))
+                    }
+                };
+            }
+            "--dispersion-reference" => {
+                let name = it
+                    .next()
+                    .ok_or("--dispersion-reference needs a value: full|luminous")?;
+                dispersion_reference = match name.as_str() {
+                    "full" => SigmaReference::Full,
+                    "luminous" => SigmaReference::Luminous,
+                    other => {
+                        return Err(format!(
+                            "unknown dispersion reference `{other}` (full|luminous)"
+                        ))
+                    }
+                };
+            }
             "--reuse-snapshots" => reuse_snapshots = true,
             "--gpu" => backend = Backend::Gpu,
             flag if flag.starts_with("--") => {
                 return Err(format!(
-                    "unknown flag `{flag}` (expected --color, --reuse-snapshots, --gpu)"
+                    "unknown flag `{flag}` (expected --color, --dispersion-palette, \
+                     --dispersion-reference, --reuse-snapshots, --gpu)"
                 ));
             }
             positional => positionals.push(positional),
@@ -1537,9 +1568,15 @@ mod tests {
             (&["--color", "rainbow"][..], "unknown color mode"),
             (&["--colour", "progenitor"][..], "unknown flag"),
             (&["--reuse"][..], "unknown flag (not the full name)"),
-            (&["--dispersion-palette"][..], "palette flag missing its value"),
+            (
+                &["--dispersion-palette"][..],
+                "palette flag missing its value",
+            ),
             (&["--dispersion-palette", "amber"][..], "unknown palette"),
-            (&["--dispersion-reference"][..], "reference flag missing its value"),
+            (
+                &["--dispersion-reference"][..],
+                "reference flag missing its value",
+            ),
             (&["--dispersion-reference", "halo"][..], "unknown reference"),
         ] {
             assert!(

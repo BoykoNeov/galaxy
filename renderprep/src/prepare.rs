@@ -197,10 +197,30 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
         ColorMode::Dispersion(dc) => {
             let sigma = velocity_dispersion(&state.vel, knn.neighbours(dc.k, dc.softening));
             let is_luminous = |p: u16| p < 64 && (dc.luminous >> p) & 1 == 1;
-            // NOTE: `dc.reference` is not yet consulted here — the σ_ref scale is
-            // always the full population. The `SigmaReference` branch is wired in
-            // the follow-up commit; until then the `Luminous` reference test is red.
-            let ramp = dispersion_colors(&sigma, dc.cold, dc.hot);
+            // `dc.reference` sets which population fixes σ_ref (the temperature
+            // scale) inside `dispersion_colors` — orthogonal to who takes the ramp
+            // below. `Full` feeds every σ (halos in), inflating σ_ref and pushing
+            // the disks warmer. `Luminous` zeros the non-luminous σ first: since
+            // `dispersion_colors` builds σ_ref from the *positive* dispersions
+            // only, the zeroed halo drops out of the scale (but not the ramp — it
+            // is masked to its palette color below regardless), recentering σ_ref
+            // on the disks so they read hotter/bluer. With `luminous == u64::MAX`
+            // nothing is zeroed ⇒ the two references coincide bit-for-bit.
+            let ramp = match dc.reference {
+                SigmaReference::Full => dispersion_colors(&sigma, dc.cold, dc.hot),
+                SigmaReference::Luminous => {
+                    let lum_sigma: Vec<f64> = (0..n)
+                        .map(|i| {
+                            if is_luminous(state.progenitor[i].0) {
+                                sigma[i]
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    dispersion_colors(&lum_sigma, dc.cold, dc.hot)
+                }
+            };
             // Ramp only the luminous progenitors by σ_v; the rest (dark-matter
             // halo) keep their palette color — the dim near-black that offsets
             // their large mass — so the heavy halo can't swamp the frame.

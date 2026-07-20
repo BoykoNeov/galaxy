@@ -407,8 +407,14 @@ fn dispersion_mask_keeps_non_luminous_progenitors_on_the_palette() {
     }
     // Disk (progenitor 1, luminous): σ_v ramp applied — off cold, toward hot.
     for i in 0..3 {
-        assert_ne!(data.color[i], halo, "luminous particle {i} must not be halo");
-        assert_ne!(data.color[i], cold, "luminous hot particle {i} must leave cold");
+        assert_ne!(
+            data.color[i], halo,
+            "luminous particle {i} must not be halo"
+        );
+        assert_ne!(
+            data.color[i], cold,
+            "luminous hot particle {i} must leave cold"
+        );
         for c in 0..3 {
             let toward_hot = (hot[c] - cold[c]).signum();
             assert!(

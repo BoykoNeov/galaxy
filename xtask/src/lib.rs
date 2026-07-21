@@ -519,20 +519,18 @@ pub fn per_frame_radii(frames: &[FrameData], percentile: f32) -> Vec<f32> {
 
 /// Movie frame count — the number of PNG frames the render loop emits.
 ///
-/// A non-SF run Hermite-upsamples (M6c): `(n − 1)·subframes + 1` frames from the
-/// snapshot pairing. **A star-formation run renders at snapshot cadence** (`n`
-/// frames, one per snapshot; `subframes` ignored): SF flips a gas particle to
-/// collisionless *in place*, which GROWS the species-routed splat set between
-/// consecutive snapshots, and the Hermite subframe interp (`renderprep::subframe`)
-/// requires a FIXED splat set per span (it pairs endpoint splat rows by index and
-/// asserts equal length). Snapshot-cadence rendering side-steps the interp. Smooth
-/// SF upsampling (full-N frames + a gas-skipping splat pass — the particle stays at
-/// its index, so no id-matching is needed) is a tracked follow-up. `n ≤ 1` emits
-/// `n` (a single-frame / empty movie has nothing to upsample).
-pub fn movie_frame_count(n_snapshots: usize, subframes: u32, sf_active: bool) -> usize {
+/// Every run Hermite-upsamples (M6c): `(n − 1)·subframes + 1` frames from the
+/// snapshot pairing. A star-formation run upsamples too (natal-ember-forge
+/// smooth-interp follow-up): SF flips a gas particle to collisionless *in place*,
+/// which would grow the *species-routed* splat set between snapshots, but the
+/// render path preps SF frames as `GasSplats::Hidden` — full-N, gas kept at zero
+/// brightness — so the splat set stays a FIXED length N per span and the Hermite
+/// subframe interp (`renderprep::subframe`, which pairs endpoint splat rows by
+/// index) applies unchanged. `n ≤ 1` emits `n` (a single-frame / empty movie has
+/// nothing to upsample).
+pub fn movie_frame_count(n_snapshots: usize, subframes: u32) -> usize {
     match n_snapshots {
         0 | 1 => n_snapshots,
-        n if sf_active => n,
         n => (n - 1) * subframes as usize + 1,
     }
 }
@@ -872,28 +870,22 @@ mod tests {
 
     // --- movie frame count / render cadence (S6, natal-ember-forge) ------------
 
-    /// A non-SF run Hermite-upsamples: `(n − 1)·subframes + 1` frames.
+    /// Every run Hermite-upsamples: `(n − 1)·subframes + 1` frames. A
+    /// star-formation run is no exception now (natal-ember-forge smooth-interp
+    /// follow-up): `GasSplats::Hidden` keeps the splat set at a fixed length N
+    /// across snapshots, so the subframe interp applies and SF upsamples like any
+    /// other run — it no longer forces snapshot cadence.
     #[test]
-    fn frame_count_hermite_upsamples_without_sf() {
-        assert_eq!(movie_frame_count(61, 8, false), 60 * 8 + 1);
-        assert_eq!(movie_frame_count(2, 8, false), 9);
+    fn frame_count_hermite_upsamples() {
+        assert_eq!(movie_frame_count(61, 8), 60 * 8 + 1);
+        assert_eq!(movie_frame_count(2, 8), 9);
     }
 
-    /// A star-formation run renders at snapshot cadence — one frame per snapshot,
-    /// `subframes` ignored (the growing splat set breaks the Hermite subframe interp).
-    #[test]
-    fn frame_count_sf_renders_at_snapshot_cadence() {
-        assert_eq!(movie_frame_count(61, 8, true), 61);
-        assert_eq!(movie_frame_count(2, 8, true), 2);
-    }
-
-    /// A single-frame / empty movie has nothing to upsample, either way.
+    /// A single-frame / empty movie has nothing to upsample.
     #[test]
     fn frame_count_degenerate_is_the_snapshot_count() {
-        for sf in [false, true] {
-            assert_eq!(movie_frame_count(0, 8, sf), 0);
-            assert_eq!(movie_frame_count(1, 8, sf), 1);
-        }
+        assert_eq!(movie_frame_count(0, 8), 0);
+        assert_eq!(movie_frame_count(1, 8), 1);
     }
 
     // --- per-frame 3-D framing radii (M6d) -------------------------------------

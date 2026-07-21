@@ -56,6 +56,7 @@ fn config(n_steps: u64, snapshot_every: u64) -> SimConfig {
         rng_seed: 0x0BAD_C0DE,
         config_hash: 0x1234,
         units: "nbody-G1".to_string(),
+        sf: None,
     }
 }
 

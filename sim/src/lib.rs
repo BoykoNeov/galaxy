@@ -19,6 +19,8 @@ use galaxy_io::Header;
 pub mod individual;
 pub mod star_formation;
 
+pub use star_formation::{form_stars, FormationSummary, StarFormationConfig};
+
 /// Errors from a simulation run.
 #[derive(thiserror::Error, Debug)]
 pub enum SimError {
@@ -49,6 +51,10 @@ pub struct SimConfig {
     pub config_hash: u64,
     /// Units tag, recorded in headers.
     pub units: String,
+    /// Star formation (S4/F4): `Some(cfg)` applies the [`form_stars`] recipe once
+    /// per snapshot interval at the output-cadence sync site; `None` ⇒ the operator
+    /// is never called and every existing byte-path is untouched (the SF-off gate).
+    pub sf: Option<StarFormationConfig>,
 }
 
 /// Summary returned by [`run`].
@@ -121,14 +127,20 @@ pub fn run(
 
     let mut emitted = 0u64;
 
-    // Step 0: the initial conditions.
+    // Step 0: the initial conditions (no SF fires at the IC).
     emit_snapshot(state, 0, config, sink)?;
     emitted += 1;
     let mut last_emitted_step = 0u64;
 
+    // Star-formation bookkeeping (S4): a per-run SF-call ordinal and the sim-time of
+    // the previous SF call. Owned by `apply_star_formation`; inert when `sf` is None.
+    let mut sf_epoch = 0u64;
+    let mut last_sf_time = 0.0_f64;
+
     for step in 1..=config.n_steps {
         integ.step(state, solver, bg, config.dt);
         if step % config.snapshot_every == 0 {
+            apply_star_formation(state, solver, config.sf.as_ref(), &mut sf_epoch, &mut last_sf_time);
             emit_snapshot(state, step, config, sink)?;
             emitted += 1;
             last_emitted_step = step;
@@ -137,6 +149,7 @@ pub fn run(
 
     // Always capture the final step, unless it already landed on the cadence.
     if last_emitted_step != config.n_steps {
+        apply_star_formation(state, solver, config.sf.as_ref(), &mut sf_epoch, &mut last_sf_time);
         emit_snapshot(state, config.n_steps, config, sink)?;
         emitted += 1;
     }
@@ -146,6 +159,46 @@ pub fn run(
         final_time: state.time,
         snapshots_emitted: emitted,
     })
+}
+
+/// Apply the star-formation operator at an output-cadence synchronization point
+/// (S4/F4). Called right before each NON-IC snapshot emit on ALL THREE stepping
+/// loops (`run` / `run_adaptive` / `run_individual`); factoring it here makes
+/// "identical semantics on every path" structural rather than three copied blocks
+/// that must be eyeball-verified to agree.
+///
+/// `None` ⇒ an early return that touches nothing, so every existing byte-path is
+/// bit-identical (the SF-off gate). `Some(cfg)` runs the recipe: pull the D2-clean
+/// SPH fields (`ρ`, `∇·v`) transiently from the solver, then convert in place.
+///
+/// The helper OWNS the two pieces of per-run bookkeeping so they cannot drift
+/// between loops:
+/// - `epoch` is a pure SF-call ordinal (starts at 0, pre-incremented to 1 on the
+///   first call) — identical across loops by construction, so the deterministic
+///   `(id, epoch, seed)` draw makes the SAME conversions on every path given the
+///   same synced candidates (F3/F4). It equals the output index `k` on the
+///   adaptive/individual paths (aligned grids ⇒ it equals `step / snapshot_every`
+///   on the fixed-dt path too).
+/// - `dt_elapsed = state.time − last_sf_time` is the sim-time since the previous
+///   SF call; `last_sf_time` starts at `0.0` (the IC time). Exact even for `run`'s
+///   short final-interval emit (a partial interval).
+///
+/// NOTE (all three loops): the integrator / internal stepper caches accelerations
+/// across the sync boundary, so a just-converted star carries its gas-era hydro
+/// acceleration for one opening half-kick. This is a conscious scope line — no gate
+/// tests the post-conversion trajectory, `&mut dyn Integrator` cannot be re-primed,
+/// and the error is O(one half-kick) at the coarse snapshot cadence.
+fn apply_star_formation(
+    state: &mut State,
+    solver: &mut dyn ForceSolver,
+    sf: Option<&StarFormationConfig>,
+    epoch: &mut u64,
+    last_sf_time: &mut f64,
+) {
+    let Some(_cfg) = sf else {
+        return; // SF off ⇒ byte-identical to the pre-SF pipeline.
+    };
+    todo!("S4 green: pull sf_fields + form_stars at the sync site")
 }
 
 /// Stamp a header for the current state and hand it to the sink.
@@ -211,6 +264,10 @@ pub struct AdaptiveConfig {
     pub config_hash: u64,
     /// Units tag, recorded in headers.
     pub units: String,
+    /// Star formation (S4/F4): `Some(cfg)` applies the [`form_stars`] recipe once
+    /// per output interval at the sync site (right before each `k · output_dt`
+    /// emit); `None` ⇒ byte-identical to the pre-SF adaptive path.
+    pub sf: Option<StarFormationConfig>,
 }
 
 /// One block's decision from [`plan_block`]: run `n_steps` at uniform `dt`.
@@ -331,6 +388,10 @@ pub fn run_adaptive(
     let mut prev_target = config.courant * limit0;
     let mut total_steps = 0u64;
     let mut t = 0.0_f64;
+    // Star-formation bookkeeping (S4): the SF-call ordinal equals `k` here (one call
+    // per output interval); inert when `sf` is None. Same helper as `run`.
+    let mut sf_epoch = 0u64;
+    let mut last_sf_time = 0.0_f64;
 
     for k in 1..=config.n_outputs {
         let t_target = k as f64 * config.output_dt;
@@ -356,6 +417,9 @@ pub fn run_adaptive(
         // Land exactly on the output time (kill accumulated FP wander before emit).
         t = t_target;
         state.time = t_target;
+        // SF fires once, at the synced output time (state.time == t_target is set), so
+        // any formed star stamps `formation_time = t_target`.
+        apply_star_formation(state, solver, config.sf.as_ref(), &mut sf_epoch, &mut last_sf_time);
         emit_adaptive(state, k, config, sink)?;
         emitted += 1;
     }
@@ -512,6 +576,10 @@ pub struct IndividualConfig {
     pub config_hash: u64,
     /// Units tag, recorded in headers.
     pub units: String,
+    /// Star formation (S4/F4): `Some(cfg)` applies the [`form_stars`] recipe once
+    /// per output interval at the sync site (the only place all rungs are
+    /// synchronized); `None` ⇒ byte-identical to the pre-SF individual path.
+    pub sf: Option<StarFormationConfig>,
 }
 
 /// Summary returned by [`run_individual`]: the shared [`RunSummary`] plus the rung
@@ -632,6 +700,11 @@ pub fn run_individual(
     let mut seen_rungs: u64 = 0;
     let mut total_blocks = 0u64;
     let mut t = 0.0_f64;
+    // Star-formation bookkeeping (S4): the SF-call ordinal equals `k` here (one call
+    // per output interval — the only place all rungs are synchronized); inert when
+    // `sf` is None. Same helper as `run` / `run_adaptive`.
+    let mut sf_epoch = 0u64;
+    let mut last_sf_time = 0.0_f64;
 
     for k in 1..=config.n_outputs {
         let t_target = k as f64 * config.output_dt;
@@ -703,6 +776,9 @@ pub fn run_individual(
         // Land exactly on the output time (kill accumulated FP wander before emit).
         t = t_target;
         state.time = t_target;
+        // SF fires once, at the synced output time (all rungs consistent, state.time ==
+        // t_target set), so any formed star stamps `formation_time = t_target`.
+        apply_star_formation(state, solver, config.sf.as_ref(), &mut sf_epoch, &mut last_sf_time);
         emit_individual(state, k, config, sink)?;
         emitted += 1;
     }

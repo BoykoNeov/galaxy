@@ -71,6 +71,9 @@ pub fn simulate_snapshots(
         rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        // Star formation is wired through the scenario in S6; the simulate step does
+        // not enable it yet, so every current byte-path is untouched (SF-off gate).
+        sf: None,
     };
 
     match s.sound_speed {
@@ -273,6 +276,8 @@ fn build_adaptive_config(
         rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        // SF is wired through the scenario in S6 (not yet); None ⇒ byte-identical.
+        sf: None,
     })
 }
 
@@ -329,6 +334,8 @@ fn build_individual_config(
         rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        // SF is wired through the scenario in S6 (not yet); None ⇒ byte-identical.
+        sf: None,
     })
 }
 

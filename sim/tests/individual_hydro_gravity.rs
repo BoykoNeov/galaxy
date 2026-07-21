@@ -120,6 +120,7 @@ fn cfg(courant: f64, subcycle: bool, output_dt: f64, n_outputs: u64) -> Individu
         rng_seed: 0x91A7,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        sf: None,
     }
 }
 

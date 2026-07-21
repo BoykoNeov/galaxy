@@ -131,6 +131,7 @@ fn cfg(courant: f64, cache: bool, output_dt: f64, n_outputs: u64) -> IndividualC
         rng_seed: 0x91A7,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        sf: None,
     }
 }
 

@@ -130,6 +130,7 @@ fn cfg(courant: f64, n_limit: u32) -> IndividualConfig {
         rng_seed: 0,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        sf: None,
     }
 }
 

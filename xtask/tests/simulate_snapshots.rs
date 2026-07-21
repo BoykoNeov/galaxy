@@ -155,6 +155,7 @@ fn gravity_only_final(s: &Scenario) -> State {
         rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        sf: None,
     };
     let last = Rc::new(RefCell::new(None));
     let mut sink = CaptureLast { last: last.clone() };
@@ -274,6 +275,7 @@ fn gas_free_path_matches_the_bare_barnes_hut_pipeline() {
             rng_seed: s.seed,
             config_hash: 0,
             units: "nbody-G1".to_string(),
+            sf: None,
         };
         let mut sink = DirectorySink::new(&dir_b).unwrap();
         run(&mut state, &mut solver, &mut integ, &bg, &cfg, &mut sink).unwrap();

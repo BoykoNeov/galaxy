@@ -133,6 +133,7 @@ fn main() {
         rng_seed: SEED,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        sf: None,
     };
     let mut sink = ExportSink {
         solver: DirectSum::new(G, EPS),

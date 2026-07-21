@@ -109,6 +109,7 @@ fn cfg(courant: f64, block_steps: u64, output_dt: f64, n_outputs: u64) -> Adapti
         rng_seed: 0xADA9_7175,
         config_hash: 0xC0FFEE,
         units: "nbody-G1".to_string(),
+        sf: None,
     }
 }
 

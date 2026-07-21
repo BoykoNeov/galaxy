@@ -108,6 +108,7 @@ fn cfg(eos: ThermalArm, output_dt: f64, n_outputs: u64) -> IndividualConfig {
         rng_seed: 0x0E05,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        sf: None,
     }
 }
 

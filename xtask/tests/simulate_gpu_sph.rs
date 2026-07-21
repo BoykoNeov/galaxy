@@ -195,6 +195,7 @@ fn gravity_only_final(s: &Scenario) -> State {
         rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
+        sf: None,
     };
     let last = std::rc::Rc::new(std::cell::RefCell::new(None));
     let mut sink = CaptureLast { last: last.clone() };

@@ -249,6 +249,61 @@ fn degenerates() {
     );
 }
 
+/// The load-bearing invariant for the star-formation smooth-interp path
+/// (natal-ember-forge): a `GasSplats::Hidden` frame carries the gas in its splat
+/// columns at ZERO brightness (fixed length N for the Hermite subframe interp).
+/// The scatter pass clusters that same frame, so the light set MUST be unchanged
+/// from the routed star-only frame — otherwise the ~5000 dark gas rows would
+/// shift or dilute the star-light distribution the gas scattering reads. Here a
+/// star population is extended with dark gas rows interleaved at wide positions
+/// (the SF full-N frame shape); the clustered lights are byte-identical.
+#[test]
+fn zero_brightness_rows_do_not_change_the_light_set() {
+    let mut rng = Lcg(0xC0FFEE_u64);
+    // A luminous star population in a compact-ish cloud.
+    let mut spos = Vec::new();
+    let mut scol = Vec::new();
+    let mut sbri = Vec::new();
+    for _ in 0..80 {
+        spos.push(Vec3::new(
+            rng.next() * 4.0 - 2.0,
+            rng.next() * 4.0 - 2.0,
+            rng.next() * 4.0 - 2.0,
+        ));
+        scol.push([rng.next() + 0.1, rng.next() + 0.1, rng.next() + 0.1]);
+        sbri.push(rng.next() * 3.0 + 0.5);
+    }
+    let stars = frame(spos.clone(), scol.clone(), sbri.clone());
+
+    // The full-N frame: the SAME stars with dark gas rows spliced in between
+    // them (index order changes, positions sprawl far past the star cloud). A
+    // brightness-0 row must be invisible to the clusterer regardless of where it
+    // sits or how far out it flings.
+    let (mut fpos, mut fcol, mut fbri) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..spos.len() {
+        // Two dark gas rows before each star, at extreme scattered positions.
+        for _ in 0..2 {
+            fpos.push(Vec3::new(
+                rng.next() * 200.0 - 100.0,
+                rng.next() * 200.0 - 100.0,
+                rng.next() * 200.0 - 100.0,
+            ));
+            fcol.push([rng.next(), rng.next(), rng.next()]);
+            fbri.push(0.0); // gas: zero brightness
+        }
+        fpos.push(spos[i]);
+        fcol.push(scol[i]);
+        fbri.push(sbri[i]);
+    }
+    let full_n = frame(fpos, fcol, fbri);
+
+    assert_eq!(
+        cluster_lights(&stars),
+        cluster_lights(&full_n),
+        "dark gas rows must not perturb the star-light set"
+    );
+}
+
 // ---------- gate 4: adaptivity (the point of the change) ----------
 
 /// A bright compact cluster (64 stars in a 0.1-side cube at (2,2,2)) plus a

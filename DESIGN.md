@@ -1667,13 +1667,24 @@ late-time positions — N-body is chaotic).
     errors. The grid carries ρ ONLY: gas color/emissivity/κ are renderer
     uniforms, so the look iterates at re-render cost, not re-prep.
   - **Species routing:** `prepare` drops `Species::Gas` from the splat list by
-    default (`gas_as_splats: bool` keeps it, the debug mode). The filter runs
-    AFTER all attribute math — k-NN passes see all particles (gas is mass) —
-    so stellar rows are bit-identical either way, and gas-free states never
-    take the filter (pre-M7d map bit-compatible, all M6 goldens untouched).
+    default (`gas_splats: GasSplats`, three modes: `Routed` = the default filter;
+    `Visible` = the M7d debug "see gas as splats"; `Hidden` = keep gas full-N at
+    zero brightness for the star-formation smooth interp — below). Routing runs
+    AFTER all attribute math — k-NN passes see all particles (gas is mass) — so
+    stellar rows are bit-identical under every mode, and gas-free states never
+    take the branch (pre-M7d map bit-compatible, all M6 goldens untouched).
     `interp::subframe` pairs filtered frames with the span's collisionless
-    indices. Frozen colors / rho0 stay indexed by STATE row (computed before
-    routing), gated.
+    indices, and full-N frames row-for-row. Frozen colors / rho0 stay indexed by
+    STATE row (computed before routing), gated.
+  - **Star-formation smooth interp (natal-ember-forge follow-up):** SF flips gas
+    → collisionless *in place*, growing the routed splat set between snapshots,
+    which the fixed-length Hermite subframe interp cannot pair. The movie preps
+    SF frames as `GasSplats::Hidden` — full length N, gas at zero brightness — so
+    the splat set is fixed across snapshots and `subframe` pairs rows by index
+    unchanged; a converting particle's splat fades in (brightness 0 → real) as its
+    gas glow fades out of the mixed grid. `cluster_lights` ignores the dark gas
+    rows, so the scatter light set matches the routed star-only frame (gated). SF
+    runs no longer force snapshot cadence; `movie_frame_count` is uniform.
   - **Trilinear `GasGrid::sample` + `sample_mix`:** the CPU reference for the
     M7e shader (clamp-to-edge, zero outside bounds, two-product lerp ⇒
     bit-exact at representable cell centers and at mix endpoints u = 0/1).

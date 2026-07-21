@@ -24,7 +24,8 @@ use galaxy_ic::{
     TruncatedNfw,
 };
 use galaxy_render::ShadowBake;
-use galaxy_renderprep::{ColorMode, DensityColoring, PrepConfig, SizeByDensity};
+use galaxy_renderprep::{AgeColoring, ColorMode, DensityColoring, PrepConfig, SizeByDensity};
+use galaxy_sim::StarFormationConfig;
 
 use crate::{
     DEFAULT_LOCAL_FLOOR, DEFAULT_LOCAL_RADIUS, DENSITY_K, DENSITY_STRENGTH, FRAME_H, FRAME_W, G,
@@ -51,6 +52,44 @@ pub struct ScenarioSpec {
     pub look: LookSpec,
     /// Camera choreography (M6d rig).
     pub rig: RigSpec,
+    /// Gated physics knobs (`[physics]`) — opt-in, not aesthetic data. Currently
+    /// just star formation (`[physics.star_formation]`, natal-ember-forge F7).
+    /// Absent ⇒ no SF ⇒ every existing byte-path is untouched (the SF-off gate).
+    #[serde(default)]
+    pub physics: Option<PhysicsSpec>,
+}
+
+/// Gated physics knobs (`[physics]`, natal-ember-forge F7). Opt-in — absent ⇒ the
+/// pre-SF pipeline, byte-for-byte. A container for the (currently single) gated
+/// physics feature so more can be added under `[physics.*]` without touching the
+/// top-level schema.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicsSpec {
+    /// Star formation (`[physics.star_formation]`): dense converging SPH gas
+    /// converts in place to collisionless star particles carrying a formation
+    /// time. Absent ⇒ no SF. Meaningful only on a gas-rich scenario.
+    #[serde(default)]
+    pub star_formation: Option<StarFormationSpec>,
+}
+
+/// The star-formation recipe (`[physics.star_formation]`, natal-ember-forge F7):
+/// the TOML spelling of [`galaxy_sim::StarFormationConfig`]. All three knobs are
+/// required — load-bearing physics, no aesthetic default. Meaningful only on a
+/// gas-rich scenario; declared on a gas-free model it is a dead knob and rejected
+/// loud.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StarFormationSpec {
+    /// Density threshold `ρ_thresh`: gas below this never forms stars (the "dense"
+    /// half of the two-part criterion). Must be finite and `> 0`.
+    pub rho_thresh: f64,
+    /// Dimensionless efficiency `ε` per free-fall time. Must be finite and `> 0`
+    /// (absence already means "off" — a declared `0` is a no-op, rejected loud).
+    pub efficiency: f64,
+    /// Global seed for the deterministic conversion draw. Same seed ⇒ same
+    /// conversion set, independent of particle ordering or thread scheduling.
+    pub seed: u64,
 }
 
 /// Which collision IC the scenario builds. The variants mirror the three IC
@@ -406,6 +445,33 @@ pub struct LookSpec {
     /// pre-tonemap grade.
     #[serde(default)]
     pub local_tone: Option<LocalToneSpec>,
+    /// Age-based star coloring (`[look.age]`, natal-ember-forge F6/F7): tints stars
+    /// formed via `[physics.star_formation]` toward `young`, fading back to base
+    /// over `tau` sim-time (`t = strength · exp(−age/tau)`). A `[look]` coloring
+    /// knob (like the SF compression proxy), NOT gas-gated — inert when no star
+    /// carries a formation time (every primordial row ⇒ base color, bit-exact), so
+    /// it is meaningful with SF in this run *or* on reused SF snapshots. Omitted ⇒
+    /// no age tint (bit-identical). `strength = 0` is a no-op, rejected loud.
+    #[serde(default)]
+    pub age: Option<AgeColoringSpec>,
+}
+
+/// The age-coloring look (`[look.age]`, natal-ember-forge F6): the TOML spelling of
+/// [`galaxy_renderprep::AgeColoring`]. Tints newly-formed stars toward `young`,
+/// fading over `tau`. `strength = 0` (a bit-exact no-op) and a non-positive `tau`
+/// are rejected loud (absence already means "off").
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgeColoringSpec {
+    /// The "young population" color a just-formed star tints toward (linear RGB;
+    /// components finite and `≥ 0`).
+    pub young: [f32; 3],
+    /// Saturation: a freshly-formed star shifts up to `strength` of the way to
+    /// `young` (clamped to `[0, 1]` in the map). Must be finite and `> 0`.
+    pub strength: f32,
+    /// Fade timescale in sim-time — the tint decays as `exp(−age / tau)`. Must be
+    /// finite and `> 0`.
+    pub tau: f64,
 }
 
 /// The local tone-compression look (`[look.local_tone]`): the TOML spelling of
@@ -1270,6 +1336,14 @@ pub struct Scenario {
     /// gas-free scenario ignores it. Mutually exclusive with `adaptive` (rejected at
     /// parse if both are set).
     pub individual: Option<IndividualSpec>,
+    /// Star-formation recipe (`[physics.star_formation]`, natal-ember-forge), `None`
+    /// = off (byte-identical). The runtime form of [`StarFormationSpec`]: threaded
+    /// into the CPU stepping config's `sf` field by `simulate_snapshots`, so dense
+    /// converging gas converts to collisionless stars at each snapshot sync site.
+    /// Only ever `Some` on a gas-rich scenario (rejected at parse on a gas-free
+    /// model); the GPU-resident path does not apply the SF operator and rejects it
+    /// loud rather than running silently SF-free.
+    pub sf: Option<StarFormationConfig>,
     pub info: String,
 }
 
@@ -1577,6 +1651,10 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         // verbatim; `simulate_snapshots` acts on it only when the scenario is gas-rich
         // and `mode = hydro-only`. Mutual exclusion with `adaptive` is enforced at parse.
         individual: spec.sim.individual,
+        // Star formation ([physics.star_formation], natal-ember-forge): S6 maps the
+        // parsed recipe into the runtime config here (green fills this from
+        // spec.physics); the RED stub leaves it off.
+        sf: None,
         info,
     }
 }
@@ -1823,8 +1901,10 @@ mod tests {
                 sf_progenitors: vec![1, 3],
                 gas: None,
                 local_tone: None,
+                age: None,
             },
             rig: RigSpec::Static,
+            physics: None,
         };
         assert_eq!(parse_preset("disk"), expect);
     }
@@ -1890,12 +1970,14 @@ mod tests {
                 sf_progenitors: vec![0, 1],
                 gas: None,
                 local_tone: None,
+                age: None,
             },
             rig: RigSpec::OrbitTilt {
                 azimuth_deg: [-90.0, 90.0],
                 tilt_deg: [60.0, 60.0],
                 window: 6,
             },
+            physics: None,
         };
         assert_eq!(parse_preset("dm"), expect);
     }
@@ -1978,12 +2060,14 @@ mod tests {
                 sf_progenitors: vec![1, 3],
                 gas: None,
                 local_tone: None,
+                age: None,
             },
             rig: RigSpec::OrbitTilt {
                 azimuth_deg: [-90.0, 40.0],
                 tilt_deg: [55.0, 25.0],
                 window: 8,
             },
+            physics: None,
         };
         assert_eq!(parse_preset("cuspy"), expect);
     }
@@ -2673,6 +2757,138 @@ mod tests {
             assert!(
                 parse_scenario_toml(&bad).is_err(),
                 "look.local_tone floor = {bad_val} must be rejected"
+            );
+        }
+    }
+
+    // --- [physics.star_formation] scenario wiring (S6, natal-ember-forge F7) -----
+
+    /// A declared `[physics.star_formation]` on a gas-rich scenario threads
+    /// rho_thresh/efficiency/seed 1:1 into `Scenario.sf` as the runtime
+    /// `StarFormationConfig` the CPU stepping loops consume.
+    #[test]
+    fn physics_star_formation_threads_to_scenario() {
+        let gasrich = preset("gasrich").unwrap();
+        let toml = format!(
+            "{gasrich}\n[physics.star_formation]\nrho_thresh = 0.25\nefficiency = 0.1\nseed = 42\n"
+        );
+        let s = build_scenario(&parse_scenario_toml(&toml).unwrap(), true);
+        assert_eq!(
+            s.sf,
+            Some(StarFormationConfig {
+                rho_thresh: 0.25,
+                efficiency: 0.1,
+                seed: 42,
+            }),
+            "[physics.star_formation] must thread into Scenario.sf verbatim"
+        );
+    }
+
+    /// A scenario without `[physics.star_formation]` resolves to `sf = None` — the
+    /// stepping loops never call the SF operator, so every byte-path is untouched.
+    #[test]
+    fn absent_physics_resolves_to_no_sf() {
+        let gasrich = preset("gasrich").unwrap();
+        let s = build_scenario(&parse_scenario_toml(gasrich).unwrap(), true);
+        assert_eq!(
+            s.sf, None,
+            "a scenario without [physics.star_formation] must carry no SF recipe"
+        );
+    }
+
+    /// Star formation needs SPH gas (a pure-gravity solver's `sf_fields` returns
+    /// zeros ⇒ nothing ever converts). Declared on a gas-free model it is a dead
+    /// knob and rejected loud, mirroring the `[look.gas]` gas-presence gate.
+    #[test]
+    fn star_formation_on_gas_free_is_rejected() {
+        let disk = preset("disk").unwrap();
+        let bad = format!(
+            "{disk}\n[physics.star_formation]\nrho_thresh = 0.25\nefficiency = 0.1\nseed = 1\n"
+        );
+        let err = parse_scenario_toml(&bad)
+            .expect_err("[physics.star_formation] on a gas-free model must reject");
+        assert!(
+            err.contains("gas"),
+            "reject message should name the missing gas, got: {err}"
+        );
+    }
+
+    /// `rho_thresh` must be finite and > 0; `efficiency` must be finite and > 0 (a
+    /// declared 0 is a no-op — absence already means "off").
+    #[test]
+    fn star_formation_knobs_are_validated() {
+        let gasrich = preset("gasrich").unwrap();
+        let base = |rho: &str, eff: &str| {
+            format!(
+                "{gasrich}\n[physics.star_formation]\nrho_thresh = {rho}\nefficiency = {eff}\nseed = 1\n"
+            )
+        };
+        for bad_val in ["0.0", "-1.0", "nan"] {
+            assert!(
+                parse_scenario_toml(&base(bad_val, "0.1")).is_err(),
+                "star_formation rho_thresh = {bad_val} must be rejected"
+            );
+            assert!(
+                parse_scenario_toml(&base("0.25", bad_val)).is_err(),
+                "star_formation efficiency = {bad_val} must be rejected"
+            );
+        }
+    }
+
+    // --- [look.age] age coloring wiring (S6, natal-ember-forge F6/F7) ------------
+
+    /// A declared `[look.age]` threads young/strength/tau into the prep config as
+    /// the `AgeColoring` map (a `[look]` coloring knob, not gas-gated — so a
+    /// gas-free scenario carries it too, inert until a star has a formation time).
+    #[test]
+    fn look_age_threads_to_prep() {
+        let disk = preset("disk").unwrap();
+        let toml = format!(
+            "{disk}\n[look.age]\nyoung = [0.6, 0.75, 1.0]\nstrength = 0.8\ntau = 4.0\n"
+        );
+        let s = build_scenario(&parse_scenario_toml(&toml).unwrap(), true);
+        assert_eq!(
+            s.prep.age,
+            Some(AgeColoring {
+                young: [0.6, 0.75, 1.0],
+                strength: 0.8,
+                tau: 4.0,
+            }),
+            "[look.age] must thread into PrepConfig.age verbatim"
+        );
+    }
+
+    /// A scenario without `[look.age]` resolves to `prep.age = None` — the base
+    /// color map, byte-for-byte (the neutral-off convention).
+    #[test]
+    fn absent_age_resolves_to_none() {
+        let disk = preset("disk").unwrap();
+        let s = build_scenario(&parse_scenario_toml(disk).unwrap(), true);
+        assert_eq!(
+            s.prep.age, None,
+            "a scenario without [look.age] must carry no age tint"
+        );
+    }
+
+    /// `strength` must be finite and > 0 (a declared 0 is a bit-exact no-op); `tau`
+    /// must be finite and > 0 (the fade timescale). Mirrors the `local_tone`
+    /// dead-knob discipline.
+    #[test]
+    fn age_knobs_are_validated() {
+        let disk = preset("disk").unwrap();
+        let base = |strength: &str, tau: &str| {
+            format!(
+                "{disk}\n[look.age]\nyoung = [0.6, 0.75, 1.0]\nstrength = {strength}\ntau = {tau}\n"
+            )
+        };
+        for bad_val in ["0.0", "-1.0", "nan"] {
+            assert!(
+                parse_scenario_toml(&base(bad_val, "4.0")).is_err(),
+                "look.age strength = {bad_val} must be rejected"
+            );
+            assert!(
+                parse_scenario_toml(&base("0.8", bad_val)).is_err(),
+                "look.age tau = {bad_val} must be rejected"
             );
         }
     }

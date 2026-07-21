@@ -37,5 +37,36 @@ pub fn velocity_divergence(
     rho: &[f64],
     h: &[f64],
 ) -> Vec<f64> {
-    todo!("S3 green: SPH ∇·v gather")
+    if pos.is_empty() {
+        return Vec::new();
+    }
+    let h_max = h.iter().fold(0.0_f64, |a, &b| a.max(b));
+    assert!(
+        h_max.is_finite() && h_max > 0.0,
+        "velocity_divergence needs positive finite smoothing lengths"
+    );
+    // Grid at the GLOBAL support so a per-target query at SUPPORT·h_i (≤ h_max) is
+    // always valid — the same superset-gather pattern as `density_fixed`. Each
+    // target's neighbour sum runs in ascending index (fixed order), so the rayon
+    // collect is bit-identical to a serial one.
+    let grid = HashGrid::build(pos, SUPPORT * h_max);
+    (0..pos.len())
+        .into_par_iter()
+        .map(|i| {
+            let ngb = grid.neighbours_within(pos, pos[i], SUPPORT * h[i]);
+            let mut sum = 0.0;
+            for &j in &ngb {
+                if j == i {
+                    continue;
+                }
+                // ∇_i W(r_ij, h_i), r_ij = x_i − x_j; zero past SUPPORT·h_i (so the
+                // wider grid gather only adds exact 0.0 terms — order-independent).
+                let gw = grad_w(pos[i] - pos[j], h[i]);
+                sum += mass[j] * (vel[j] - vel[i]).dot(gw);
+            }
+            // ρ_i > 0 (self-term floor), so this never divides by zero; an empty
+            // j≠i sum leaves 0/ρ_i = 0.
+            sum / rho[i]
+        })
+        .collect()
 }

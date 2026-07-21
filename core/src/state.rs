@@ -42,11 +42,31 @@ pub struct State {
     /// isothermal path, where the EOS fixes pressure from ρ alone and `u` is
     /// inert. Length `n`, like every other column.
     pub u: Vec<f64>,
+    /// Per-particle time at which this particle FORMED as a star via star
+    /// formation (gas → collisionless conversion; plan `natal-ember-forge.md`,
+    /// Chain A step 4). The render colors young stars by their age
+    /// `now − formation_time`. Every particle that did NOT form via SF in this
+    /// run — every primordial star / DM / halo / disk particle AND every
+    /// still-gas particle — carries the sentinel [`State::PRIMORDIAL`]
+    /// (`−∞`), which means exactly "no SF formation time." `0.0` is a valid
+    /// formation time (a star born at `t = 0`) so it cannot be the sentinel;
+    /// `−∞` was chosen over `NaN` because `State` derives `PartialEq` and a `NaN`
+    /// column would make `State == State` always false, poisoning every
+    /// whole-`State` round-trip / byte-identity gate. Age-coloring needs no
+    /// special case: `now − (−∞) = +∞`, whose tint ramp `exp(−age/τ)` is `0` (the
+    /// base color) — exactly right, primordial stars ARE old. Length `n`.
+    pub formation_time: Vec<f64>,
     pub time: f64,
     pub a: f64,
 }
 
 impl State {
+    /// Sentinel `formation_time` for a particle that did NOT form via star
+    /// formation in this run (every primordial star / DM / halo / disk particle,
+    /// and every still-gas particle). See [`State::formation_time`] for why `−∞`
+    /// rather than `NaN` (the derived `PartialEq` on `State`).
+    pub const PRIMORDIAL: f64 = f64::NEG_INFINITY;
+
     /// Number of particles.
     pub fn len(&self) -> usize {
         self.pos.len()
@@ -71,6 +91,7 @@ impl State {
             progenitor: vec![Progenitor(0); n],
             kind: vec![Species::Collisionless; n],
             u: vec![0.0; n],
+            formation_time: vec![State::PRIMORDIAL; n],
             time: 0.0,
             a: 1.0,
         }
@@ -85,5 +106,6 @@ impl State {
         assert_eq!(self.progenitor.len(), n, "progenitor length mismatch");
         assert_eq!(self.kind.len(), n, "kind length mismatch");
         assert_eq!(self.u.len(), n, "u length mismatch");
+        assert_eq!(self.formation_time.len(), n, "formation_time length mismatch");
     }
 }

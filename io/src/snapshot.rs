@@ -280,6 +280,7 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         progenitor,
         kind,
         u,
+        formation_time: vec![State::PRIMORDIAL; n],
         time,
         a: scale_factor,
     };

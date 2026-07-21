@@ -404,6 +404,7 @@ impl<H: SphericalHalo> ExponentialDisk<H> {
             progenitor,
             kind: vec![Species::Collisionless; n],
             u: vec![0.0; n],
+            formation_time: vec![State::PRIMORDIAL; n],
             time: 0.0,
             a: 1.0,
         }

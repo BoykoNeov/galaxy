@@ -57,6 +57,7 @@ fn gas_state_u(pos: Vec<DVec3>, u: Vec<f64>) -> State {
         progenitor: vec![Progenitor(4); n],
         kind: vec![Species::Gas; n],
         u,
+        formation_time: vec![State::PRIMORDIAL; n],
         time: 0.0,
         a: 1.0,
         pos,

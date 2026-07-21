@@ -623,6 +623,7 @@ fn synthetic_gas_disk(n: usize, seed: u64, incline: f64) -> State {
         progenitor: vec![galaxy_core::Progenitor(4); n], // gas1 tag (plan D1)
         kind: vec![galaxy_core::Species::Gas; n],
         u: vec![0.0; n],
+        formation_time: vec![galaxy_core::State::PRIMORDIAL; n],
         time: 0.0,
         a: 1.0,
         pos,

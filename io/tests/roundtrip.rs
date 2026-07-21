@@ -40,6 +40,10 @@ fn sample_state() -> State {
         // cannot pass the round-trip; the middle (gas) slot carries the value a
         // real adiabatic run would, the others exercise the column as storage.
         u: vec![2.5, 4.0 / 3.0, -0.75],
+        // Distinct formation times so a dropped/defaulted column cannot pass the
+        // round-trip: the first two are stars formed via SF (finite times), the
+        // last is the `PRIMORDIAL` sentinel (must round-trip exactly too).
+        formation_time: vec![3.5, -1.25, State::PRIMORDIAL],
         time: 12.5,
         a: 1.0,
     }
@@ -87,6 +91,24 @@ fn round_trip_recovers_particle_data() {
     assert_eq!(back.time, state.time);
     assert_eq!(back.a, state.a);
     assert_eq!(back_header.n_particles, state.len() as u64);
+}
+
+#[test]
+fn round_trip_recovers_formation_time() {
+    // The star-formation column (plan `natal-ember-forge.md`): stored full f64
+    // like `u` (it is a time, no f32-storage license), so it must round-trip
+    // BIT-EXACT, including the `PRIMORDIAL` (`−∞`) sentinel on non-formed rows.
+    let state = sample_state();
+    let header = sample_header(&state);
+
+    let mut buf = Vec::new();
+    snapshot::to_writer(&mut buf, &header, &state).unwrap();
+    let (_, back) = snapshot::from_reader(&mut Cursor::new(&buf)).unwrap();
+
+    assert_eq!(
+        back.formation_time, state.formation_time,
+        "formation_time did not round-trip exactly"
+    );
 }
 
 #[test]

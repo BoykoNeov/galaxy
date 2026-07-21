@@ -191,6 +191,7 @@ impl<H: SphericalHalo> DiskCollision<H> {
             progenitor,
             kind,
             u: vec![0.0; n],
+            formation_time: vec![State::PRIMORDIAL; n],
             time: 0.0,
             a: 1.0,
         }
@@ -292,6 +293,7 @@ impl<H: SphericalHalo> DiskCollision<H> {
             progenitor,
             kind,
             u: vec![0.0; n],
+            formation_time: vec![State::PRIMORDIAL; n],
             time: 0.0,
             a: 1.0,
         }

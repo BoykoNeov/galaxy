@@ -57,17 +57,17 @@ fn efficiency_zero_makes_no_conversions() {
     let summary = form_stars(&mut s, &rho, &div_v, 1.0, &cfg, 0);
     assert_eq!(summary.n_formed, 0, "efficiency 0 must form no stars");
     assert_eq!(summary.mass_formed, 0.0);
-    assert!(s.kind.iter().all(|&k| k == Species::Gas), "no gas converted");
+    assert!(
+        s.kind.iter().all(|&k| k == Species::Gas),
+        "no gas converted"
+    );
 }
 
 #[test]
 fn empty_gas_makes_no_conversions() {
     // All-collisionless input: nothing is a candidate regardless of ρ / ∇·v.
-    let mut s = State::from_phase_space(
-        vec![DVec3::ZERO; 50],
-        vec![DVec3::ZERO; 50],
-        vec![2.0; 50],
-    );
+    let mut s =
+        State::from_phase_space(vec![DVec3::ZERO; 50], vec![DVec3::ZERO; 50], vec![2.0; 50]);
     let rho = vec![1e6; 50];
     let div_v = vec![-1.0; 50];
     let cfg = StarFormationConfig {
@@ -96,25 +96,42 @@ fn conversion_conserves_mass_and_count() {
     let summary = form_stars(&mut s, &rho, &div_v, 0.2, &cfg, 0);
 
     // Some but not all — otherwise the "conserves" claim is vacuous.
-    assert!(summary.n_formed > 0 && summary.n_formed < n, "a proper fraction converts");
+    assert!(
+        summary.n_formed > 0 && summary.n_formed < n,
+        "a proper fraction converts"
+    );
 
     // N and total mass are conserved EXACTLY (whole-particle in-place flip).
     assert_eq!(s.len(), n, "particle count unchanged");
     let total_mass_after: f64 = s.mass.iter().sum();
-    assert_eq!(total_mass_after, total_mass_before, "total mass conserved exactly");
+    assert_eq!(
+        total_mass_after, total_mass_before,
+        "total mass conserved exactly"
+    );
 
     // Species bookkeeping: gas lost == stars gained == n_formed.
-    let stars_after = s.kind.iter().filter(|&&k| k == Species::Collisionless).count();
+    let stars_after = s
+        .kind
+        .iter()
+        .filter(|&&k| k == Species::Collisionless)
+        .count();
     assert_eq!(stars_after, summary.n_formed, "star count == n_formed");
     let gas_after = s.kind.iter().filter(|&&k| k == Species::Gas).count();
-    assert_eq!(gas_after, n - summary.n_formed, "gas count dropped by n_formed");
+    assert_eq!(
+        gas_after,
+        n - summary.n_formed,
+        "gas count dropped by n_formed"
+    );
 
     // mass_formed is the sum over the converted set.
     let expected_mass: f64 = (0..n)
         .filter(|&i| s.kind[i] == Species::Collisionless)
         .map(|i| s.mass[i])
         .sum();
-    assert_eq!(summary.mass_formed, expected_mass, "mass_formed == Σ converted mass");
+    assert_eq!(
+        summary.mass_formed, expected_mass,
+        "mass_formed == Σ converted mass"
+    );
 
     // Per-particle: conversion touches EXACTLY kind, formation_time, u.
     for i in 0..n {
@@ -123,12 +140,22 @@ fn conversion_conserves_mass_and_count() {
         assert_eq!(s.vel[i], before.vel[i], "vel untouched at {i}");
         assert_eq!(s.mass[i], before.mass[i], "mass untouched at {i}");
         assert_eq!(s.id[i], before.id[i], "id untouched at {i}");
-        assert_eq!(s.progenitor[i], before.progenitor[i], "progenitor tag survives at {i}");
+        assert_eq!(
+            s.progenitor[i], before.progenitor[i],
+            "progenitor tag survives at {i}"
+        );
         if s.kind[i] == Species::Collisionless {
-            assert_eq!(s.formation_time[i], s.time, "formed star stamped with state.time at {i}");
+            assert_eq!(
+                s.formation_time[i], s.time,
+                "formed star stamped with state.time at {i}"
+            );
             assert_eq!(s.u[i], 0.0, "converted row's u zeroed at {i}");
         } else {
-            assert_eq!(s.formation_time[i], State::PRIMORDIAL, "unconverted keeps sentinel at {i}");
+            assert_eq!(
+                s.formation_time[i],
+                State::PRIMORDIAL,
+                "unconverted keeps sentinel at {i}"
+            );
             assert_eq!(s.u[i], before.u[i], "unconverted u untouched at {i}");
         }
     }
@@ -174,8 +201,14 @@ fn determinism_same_seed_order_independent() {
     let mut ids2 = converted_ids(&b2, &s2);
     ids2.sort_unstable();
 
-    assert_eq!(ids1, ids2, "same seed ⇒ same converted id-set, order-independent");
-    assert!(!ids1.is_empty(), "the test converts a nonempty set (else vacuous)");
+    assert_eq!(
+        ids1, ids2,
+        "same seed ⇒ same converted id-set, order-independent"
+    );
+    assert!(
+        !ids1.is_empty(),
+        "the test converts a nonempty set (else vacuous)"
+    );
 }
 
 #[test]
@@ -219,15 +252,27 @@ fn one_way_monotonicity_no_star_reverts() {
     let mut prev_stars = 0usize;
     for epoch in 0..6u64 {
         // Stars already present must remain stars across the call.
-        let stars_before: Vec<bool> = s.kind.iter().map(|&k| k == Species::Collisionless).collect();
+        let stars_before: Vec<bool> = s
+            .kind
+            .iter()
+            .map(|&k| k == Species::Collisionless)
+            .collect();
         s.time = epoch as f64;
         form_stars(&mut s, &rho, &div_v, 0.2, &cfg, epoch);
-        for i in 0..n {
-            if stars_before[i] {
-                assert_eq!(s.kind[i], Species::Collisionless, "no star reverts to gas at {i}");
+        for (i, &was_star) in stars_before.iter().enumerate() {
+            if was_star {
+                assert_eq!(
+                    s.kind[i],
+                    Species::Collisionless,
+                    "no star reverts to gas at {i}"
+                );
             }
         }
-        let stars_now = s.kind.iter().filter(|&&k| k == Species::Collisionless).count();
+        let stars_now = s
+            .kind
+            .iter()
+            .filter(|&&k| k == Species::Collisionless)
+            .count();
         assert!(stars_now >= prev_stars, "star count non-decreasing");
         prev_stars = stars_now;
     }
@@ -249,7 +294,11 @@ fn below_threshold_never_converts() {
     };
     form_stars(&mut s, &rho, &div_v, 0.5, &cfg, 0);
     for i in n / 2..n {
-        assert_eq!(s.kind[i], Species::Gas, "ρ < ρ_thresh never converts at {i}");
+        assert_eq!(
+            s.kind[i],
+            Species::Gas,
+            "ρ < ρ_thresh never converts at {i}"
+        );
     }
     assert!(
         (0..n / 2).any(|i| s.kind[i] == Species::Collisionless),
@@ -262,7 +311,7 @@ fn diverging_flow_never_converts() {
     let n = 200;
     let mut s = gas_state(n, 1.0);
     let rho = vec![5.0; n]; // all dense
-    // Half converging (∇·v < 0), half diverging/at-rest (∇·v ≥ 0).
+                            // Half converging (∇·v < 0), half diverging/at-rest (∇·v ≥ 0).
     let div_v: Vec<f64> = (0..n).map(|i| if i < n / 2 { -1.0 } else { 0.0 }).collect();
     let cfg = StarFormationConfig {
         rho_thresh: 1.0,
@@ -300,7 +349,10 @@ fn statistical_calibration_matches_analytic_probability() {
     let summary = form_stars(&mut s, &rho, &div_v, dt, &cfg, 0);
 
     let p = p_convert(eff, dt, rho_val);
-    assert!((p - 0.40).abs() < 0.02, "sanity: chosen p is ≈ 0.40, got {p}");
+    assert!(
+        (p - 0.40).abs() < 0.02,
+        "sanity: chosen p is ≈ 0.40, got {p}"
+    );
     let frac = summary.n_formed as f64 / n as f64;
     let tol = 3.0 * (p * (1.0 - p) / n as f64).sqrt(); // 3σ binomial
     assert!(

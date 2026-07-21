@@ -72,6 +72,59 @@ pub fn form_stars(
     cfg: &StarFormationConfig,
     epoch: u64,
 ) -> FormationSummary {
-    let _ = (state, rho, div_v, dt_elapsed, cfg, epoch);
-    todo!("S2: implement the star-formation recipe")
+    let n = state.len();
+    debug_assert_eq!(rho.len(), n, "rho must be a per-particle array");
+    debug_assert_eq!(div_v.len(), n, "div_v must be a per-particle array");
+
+    let mut n_formed = 0usize;
+    let mut mass_formed = 0.0;
+    for i in 0..n {
+        // Two-part standard SF criterion: gas that is BOTH dense AND converging.
+        if state.kind[i] != Species::Gas || rho[i] < cfg.rho_thresh || div_v[i] >= 0.0 {
+            continue;
+        }
+        // p = 1 − exp(−ε·dt/t_ff). At ε=0 this is 0; at ρ→∞ (or dt→∞) it
+        // saturates at 1 (draws are in [0,1), so p can never be exceeded).
+        let p = 1.0 - (-cfg.efficiency * dt_elapsed / t_ff(rho[i])).exp();
+        if draw_uniform(state.id[i].0, epoch, cfg.seed) < p {
+            state.kind[i] = Species::Collisionless;
+            state.formation_time[i] = state.time;
+            state.u[i] = 0.0; // gravity-only rows carry no internal energy
+            n_formed += 1;
+            mass_formed += state.mass[i];
+        }
+    }
+    FormationSummary {
+        n_formed,
+        mass_formed,
+    }
+}
+
+/// Local free-fall time `t_ff(ρ) = √(3π / (32 G ρ))`, with `G = 1` in the
+/// project's N-body unit system ([`galaxy_xtask::G`]). Thread `G` through only
+/// if a non-unit-`G` run is ever added (there is none today, and `efficiency` —
+/// tuned empirically in the F7 A/B — absorbs any constant rescaling of `t_ff`).
+fn t_ff(rho: f64) -> f64 {
+    (3.0 * std::f64::consts::PI / (32.0 * rho)).sqrt()
+}
+
+/// Deterministic uniform in `[0, 1)` keyed on `(id, epoch, seed)` (F3). A pure
+/// function of the keys — NOT a shared RNG advanced in iteration order — so the
+/// conversion set is identical under `rayon` and under the active-subset order
+/// of `run_individual`. Two nested SplitMix64 finalizer steps (the project's
+/// tiny deterministic mixer; see `ic::disk::SplitMix64`) fully diffuse each key
+/// before it folds into the next, and the final `>>11 / 2^53` matches
+/// `SplitMix64::next_f64` exactly, giving a value in `[0, 1)`.
+fn draw_uniform(id: u64, epoch: u64, seed: u64) -> f64 {
+    let z = splitmix64_finalize(seed ^ id);
+    let z = splitmix64_finalize(z ^ epoch);
+    ((z >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+/// One SplitMix64 finalizer (the avalanche stage of the project's PRNG). Full
+/// bit diffusion of its input; identical constants to `ic::disk::SplitMix64`.
+fn splitmix64_finalize(x: u64) -> u64 {
+    let z = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }

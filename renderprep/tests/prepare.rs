@@ -727,7 +727,11 @@ fn mixed_species_state() -> State {
 fn gas_leaves_the_splat_list_by_default() {
     let state = mixed_species_state();
     let cfg = sample_config();
-    assert_eq!(cfg.gas_splats, GasSplats::Routed, "routing out is the default");
+    assert_eq!(
+        cfg.gas_splats,
+        GasSplats::Routed,
+        "routing out is the default"
+    );
     let data = prepare(&state, &cfg);
 
     // Only the three collisionless rows survive, in their original order.

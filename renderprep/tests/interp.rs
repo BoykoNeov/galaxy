@@ -552,7 +552,10 @@ fn subframe_over_a_star_formation_span_fades_the_newborn_in() {
     // Fixed length N=4 at both ends — nothing filtered, no length mismatch.
     assert_eq!(f0.len(), 4);
     assert_eq!(f1.len(), 4);
-    assert_eq!(f0.brightness[1], 0.0, "row 1 is gas at s0 → invisible splat");
+    assert_eq!(
+        f0.brightness[1], 0.0,
+        "row 1 is gas at s0 → invisible splat"
+    );
     assert!(f1.brightness[1] > 0.0, "row 1 is a star at s1 → real splat");
 
     // Endpoint reproduction, and no panic on the growing-star span.

@@ -357,9 +357,9 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
                 // subframe interp, contribute nothing to the additive splat pass
                 // (a brightness-0 splat is an exact no-op, and `cluster_lights`
                 // drops `lum == 0` rows), and still render via the gas grid.
-                for i in 0..n {
-                    if state.kind[i] == Species::Gas {
-                        brightness[i] = 0.0;
+                for (b, kind) in brightness.iter_mut().zip(&state.kind) {
+                    if *kind == Species::Gas {
+                        *b = 0.0;
                     }
                 }
             }

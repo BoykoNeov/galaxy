@@ -151,13 +151,36 @@ pub struct PrepConfig {
     /// (the default) leaves the base colors untouched. Reads the real
     /// `formation_time` column and the snapshot time — no kNN pass.
     pub age: Option<AgeColoring>,
-    /// Keep `Species::Gas` particles in the splat list (M7d debug mode). By
-    /// default gas is routed OUT of the splat columns — it renders through the
-    /// volumetric gas grid, not the additive star path. The filter runs after
-    /// all attribute math, so stellar rows are identical either way, and a
-    /// gas-free state never takes the filter at all (bit-compatible with the
-    /// pre-M7d map).
-    pub gas_as_splats: bool,
+    /// How `Species::Gas` particles are placed in the splat columns. The default
+    /// ([`GasSplats::Routed`]) drops gas from the splat list — it renders through
+    /// the volumetric gas grid, not the additive star path. Routing runs after
+    /// all attribute math, so stellar rows are identical under every mode, and a
+    /// gas-free state is a no-op under all three (bit-compatible with the pre-M7d
+    /// map).
+    pub gas_splats: GasSplats,
+}
+
+/// How `Species::Gas` particles are handled in the splat columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GasSplats {
+    /// Route gas OUT of the splat list (the production default): gas renders
+    /// through the volumetric grid, not the additive star path, so a routed
+    /// frame carries only the `n_star` collisionless rows.
+    Routed,
+    /// Keep gas in the splat list with its ordinary brightness (M7d debug mode:
+    /// SEE gas as splats). A full-N frame.
+    Visible,
+    /// Keep gas in the splat list but at ZERO brightness — a full-N frame whose
+    /// gas rows are present (a fixed splat count across snapshots) yet invisible
+    /// in the additive pass. This is the star-formation smooth-interp mode
+    /// (natal-ember-forge follow-up): SF flips gas → collisionless IN PLACE,
+    /// growing the star set between snapshots, and the Hermite subframe interp
+    /// ([`crate::subframe`]) pairs splat rows by index and needs a FIXED length.
+    /// Gas still renders volumetrically; a converting particle's splat fades in
+    /// (brightness 0 → real) across the span as its gas glow fades out — a smooth
+    /// birth, not a pop. `cluster_lights` ignores zero-brightness rows, so the
+    /// scatter light set is unchanged from the routed star-only frame.
+    Hidden,
 }
 
 impl Default for PrepConfig {
@@ -172,7 +195,7 @@ impl Default for PrepConfig {
             size_by_density: None,
             compression: None,
             age: None,
-            gas_as_splats: false,
+            gas_splats: GasSplats::Routed,
         }
     }
 }
@@ -313,17 +336,26 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
     };
 
     // Species routing (M7d): gas renders through the volumetric grid, not the
-    // additive star path, so by default it leaves the splat list here — AFTER
-    // all attribute math (the k-NN passes above see all particles; gas is
-    // mass), so stellar rows are identical with or without the filter. A
-    // gas-free state never enters this branch: bit-compatible with the
-    // pre-M7d map by construction.
-    if !config.gas_as_splats && state.kind.contains(&Species::Gas) {
-        let keep = |i: &usize| state.kind[*i] == Species::Collisionless;
-        pos = filter_by(pos, keep);
-        color = filter_by(color, keep);
-        brightness = filter_by(brightness, keep);
-        size = filter_by(size, keep);
+    // additive star path. This runs AFTER all attribute math (the k-NN passes
+    // above see all particles; gas is mass), so stellar rows are identical under
+    // every mode. `Routed` drops gas (n_star rows); `Hidden` keeps it at zero
+    // brightness (full-N, invisible splats — the SF smooth-interp fixed-length
+    // requirement); `Visible` keeps it as ordinary splats (debug). A gas-free
+    // state never enters this branch: bit-compatible with the pre-M7d map.
+    if state.kind.contains(&Species::Gas) {
+        match config.gas_splats {
+            GasSplats::Routed => {
+                let keep = |i: &usize| state.kind[*i] == Species::Collisionless;
+                pos = filter_by(pos, keep);
+                color = filter_by(color, keep);
+                brightness = filter_by(brightness, keep);
+                size = filter_by(size, keep);
+            }
+            GasSplats::Hidden => {
+                todo!("S7a: zero gas-row splat brightness for smooth SF interp")
+            }
+            GasSplats::Visible => {}
+        }
     }
 
     FrameData {

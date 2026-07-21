@@ -24,7 +24,9 @@ use galaxy_ic::{
     TruncatedNfw,
 };
 use galaxy_render::ShadowBake;
-use galaxy_renderprep::{AgeColoring, ColorMode, DensityColoring, PrepConfig, SizeByDensity};
+use galaxy_renderprep::{
+    AgeColoring, ColorMode, DensityColoring, GasSplats, PrepConfig, SizeByDensity,
+};
 use galaxy_sim::StarFormationConfig;
 
 use crate::{
@@ -1626,7 +1628,10 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                 strength: a.strength,
                 tau: a.tau,
             }),
-            gas_as_splats: false, // gas renders volumetrically (M7d), not as splats
+            // Gas renders volumetrically (M7d), not as splats. `run_movie` flips
+            // this to `GasSplats::Hidden` for a star-formation run so the splat
+            // set stays full-N across snapshots (smooth Hermite SF interp).
+            gas_splats: GasSplats::Routed,
         },
         eps,
         dt: spec.sim.dt,

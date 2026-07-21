@@ -9,7 +9,7 @@
 use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 use galaxy_renderprep::{
     knn_density, prepare, AgeColoring, ColorMode, CompressionHue, DensityColoring,
-    DispersionColoring, PrepConfig, SigmaReference, SizeByDensity,
+    DispersionColoring, GasSplats, PrepConfig, SigmaReference, SizeByDensity,
 };
 
 /// Two particles from progenitor 0, one from progenitor 1, with distinct masses.
@@ -727,7 +727,7 @@ fn mixed_species_state() -> State {
 fn gas_leaves_the_splat_list_by_default() {
     let state = mixed_species_state();
     let cfg = sample_config();
-    assert!(!cfg.gas_as_splats, "routing out is the default");
+    assert_eq!(cfg.gas_splats, GasSplats::Routed, "routing out is the default");
     let data = prepare(&state, &cfg);
 
     // Only the three collisionless rows survive, in their original order.
@@ -745,7 +745,7 @@ fn gas_leaves_the_splat_list_by_default() {
 fn gas_as_splats_keeps_the_full_list() {
     let state = mixed_species_state();
     let cfg = PrepConfig {
-        gas_as_splats: true,
+        gas_splats: GasSplats::Visible,
         ..sample_config()
     };
     let data = prepare(&state, &cfg);
@@ -778,11 +778,11 @@ fn routing_is_a_pure_filter_of_the_debug_map() {
             min_frac: 0.5,
             max_frac: 2.0,
         }),
-        gas_as_splats: true,
+        gas_splats: GasSplats::Visible,
         ..sample_config()
     };
     let routed_cfg = PrepConfig {
-        gas_as_splats: false,
+        gas_splats: GasSplats::Routed,
         ..full_cfg.clone()
     };
     let full = prepare(&state, &full_cfg);
@@ -796,6 +796,57 @@ fn routing_is_a_pure_filter_of_the_debug_map() {
         assert_eq!(routed.size[out], full.size[src]);
         assert_eq!(routed.brightness[out], full.brightness[src]);
     }
+}
+
+#[test]
+fn gas_hidden_keeps_full_length_and_zeroes_only_gas_brightness() {
+    // The star-formation smooth-interp mode: gas stays in the splat columns (so
+    // the count is a fixed N across snapshots, whatever converts) but at ZERO
+    // brightness — invisible in the additive pass, still deposited into the gas
+    // grid. Stellar rows are bit-identical to the routed/debug map; only the two
+    // gas rows (indices 1, 3) are zeroed.
+    let state = mixed_species_state();
+    let hidden = PrepConfig {
+        gas_splats: GasSplats::Hidden,
+        ..sample_config()
+    };
+    let visible = PrepConfig {
+        gas_splats: GasSplats::Visible,
+        ..sample_config()
+    };
+    let h = prepare(&state, &hidden);
+    let v = prepare(&state, &visible);
+
+    // Full length — nothing filtered out.
+    assert_eq!(h.len(), 5);
+    // Gas rows (1, 3) are zeroed in brightness; everything else is bit-identical
+    // to the debug map (positions, colors, sizes untouched — only brightness).
+    for i in 0..5 {
+        assert_eq!(h.pos[i], v.pos[i], "pos[{i}] unchanged");
+        assert_eq!(h.color[i], v.color[i], "color[{i}] unchanged");
+        assert_eq!(h.size[i], v.size[i], "size[{i}] unchanged");
+        let expect = if state.kind[i] == Species::Gas {
+            0.0
+        } else {
+            v.brightness[i]
+        };
+        assert_eq!(h.brightness[i], expect, "brightness[{i}]");
+    }
+    assert_eq!(h.brightness[1], 0.0, "gas row zeroed");
+    assert_eq!(h.brightness[3], 0.0, "gas row zeroed");
+}
+
+#[test]
+fn gas_hidden_is_a_noop_on_a_gas_free_state() {
+    // No gas ⇒ the routing branch is never taken; Hidden is bit-identical to the
+    // default Routed map (the pre-M7d guarantee holds for the new mode too).
+    let mut state = mixed_species_state();
+    state.kind = vec![Species::Collisionless; state.len()];
+    let hidden = PrepConfig {
+        gas_splats: GasSplats::Hidden,
+        ..sample_config()
+    };
+    assert_eq!(prepare(&state, &hidden), prepare(&state, &sample_config()));
 }
 
 #[test]

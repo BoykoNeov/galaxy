@@ -8,7 +8,9 @@
 //! local error — never from the function's own output.
 
 use galaxy_core::{DVec3, ParticleId, State};
-use galaxy_renderprep::{prepare, subframe, FrameData, HermiteSpan, InterpError, PrepConfig};
+use galaxy_renderprep::{
+    prepare, subframe, FrameData, GasSplats, HermiteSpan, InterpError, PrepConfig,
+};
 use glam::Vec3;
 
 /// Build a snapshot at `time` from explicit phase-space columns (unit masses,
@@ -504,7 +506,7 @@ fn full_length_frames_still_interpolate_all_rows() {
     let (s0, s1) = mixed_pair();
     let span = HermiteSpan::new(&s0, &s1).unwrap();
     let cfg = PrepConfig {
-        gas_as_splats: true,
+        gas_splats: GasSplats::Visible,
         ..PrepConfig::default()
     };
     let f0 = prepare(&s0, &cfg);
@@ -518,6 +520,54 @@ fn full_length_frames_still_interpolate_all_rows() {
     for (i, hp) in hpos.iter().enumerate() {
         assert_eq!(sub.pos[i], hp.as_vec3());
     }
+}
+
+/// A snapshot pair straddling a star-formation event: particle 1 is `Gas` at
+/// `s0` and `Collisionless` at `s1` (in-place conversion — same index, same id).
+/// The star set GROWS across the span; only the fixed-length `GasSplats::Hidden`
+/// prep keeps the two endpoint frames the same length for the subframe interp.
+fn sf_pair() -> (State, State) {
+    use galaxy_core::Species;
+    let (mut s0, mut s1) = mixed_pair(); // particle 1 is Gas in both
+    s0.kind[1] = Species::Gas;
+    s1.kind[1] = Species::Collisionless; // it formed a star between the snapshots
+    (s0, s1)
+}
+
+#[test]
+fn subframe_over_a_star_formation_span_fades_the_newborn_in() {
+    // The natal-ember-forge smooth-interp fix: SF grows the splat set between
+    // snapshots, which the routed (n_star) frames cannot pair (5001 vs 5000).
+    // `GasSplats::Hidden` prep keeps both endpoints at the full length N, so the
+    // subframe unfiltered path applies. The just-formed star (row 1) fades in:
+    // brightness 0 at s0 (still gas), real at s1 (now a star), monotone between.
+    let (s0, s1) = sf_pair();
+    let span = HermiteSpan::new(&s0, &s1).unwrap();
+    let cfg = PrepConfig {
+        gas_splats: GasSplats::Hidden,
+        ..PrepConfig::default()
+    };
+    let f0 = prepare(&s0, &cfg);
+    let f1 = prepare(&s1, &cfg);
+    // Fixed length N=4 at both ends — nothing filtered, no length mismatch.
+    assert_eq!(f0.len(), 4);
+    assert_eq!(f1.len(), 4);
+    assert_eq!(f0.brightness[1], 0.0, "row 1 is gas at s0 → invisible splat");
+    assert!(f1.brightness[1] > 0.0, "row 1 is a star at s1 → real splat");
+
+    // Endpoint reproduction, and no panic on the growing-star span.
+    assert_eq!(subframe(&span, &f0, &f1, 0.0), f0, "u=0 reproduces f0");
+    assert_eq!(subframe(&span, &f0, &f1, 1.0), f1, "u=1 reproduces f1");
+
+    // The newborn's splat brightness ramps 0 → real, monotone across the span.
+    let b = |u: f64| subframe(&span, &f0, &f1, u).brightness[1];
+    let (b0, b25, b50, b75, b1) = (b(0.0), b(0.25), b(0.5), b(0.75), b(1.0));
+    assert_eq!(b0, 0.0);
+    assert_eq!(b1, f1.brightness[1]);
+    assert!(
+        b0 < b25 && b25 < b50 && b50 < b75 && b75 < b1,
+        "monotone fade-in: {b0} {b25} {b50} {b75} {b1}"
+    );
 }
 
 #[test]

@@ -17,6 +17,7 @@ use galaxy_core::{Background, DVec3, ForceSolver, Integrator, State};
 use galaxy_io::Header;
 
 pub mod individual;
+pub mod star_formation;
 
 /// Errors from a simulation run.
 #[derive(thiserror::Error, Debug)]

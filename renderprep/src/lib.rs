@@ -21,7 +21,9 @@ pub mod gasgrid;
 pub mod interp;
 pub mod prepare;
 
-pub use coloring::{compression_colors, dispersion_colors, initial_radius_colors, RadialRamp};
+pub use coloring::{
+    age_colors, compression_colors, dispersion_colors, initial_radius_colors, RadialRamp,
+};
 pub use density::{
     density_boost, density_sizes, knn_density, knn_neighbourhood, velocity_dispersion,
     DensityColoring, SizeByDensity,
@@ -33,5 +35,6 @@ pub use gasgrid::{
 };
 pub use interp::{subframe, HermiteSpan, InterpError};
 pub use prepare::{
-    prepare, ColorMode, CompressionHue, DispersionColoring, PrepConfig, SigmaReference,
+    prepare, AgeColoring, ColorMode, CompressionHue, DispersionColoring, PrepConfig,
+    SigmaReference,
 };

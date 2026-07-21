@@ -156,6 +156,43 @@ pub fn dispersion_colors(sigma: &[f64], cold: [f32; 3], hot: [f32; 3]) -> Vec<[f
         .collect()
 }
 
+/// Age-triggered star-formation tint (natal-ember-forge, F6): shift each
+/// recently-formed star toward `young`, fading exponentially back to its base
+/// color over ~`tau` sim-time.
+///
+/// For particle `i` the age is `a_i = now − formation_time[i]` and the mix is
+/// `t = clamp(strength, 0, 1) · exp(−a_i / tau)`: a just-formed star (`a = 0`)
+/// sits at `strength` of the way to `young`; the tint decays by `1/e` every
+/// `tau` of sim-time. A **primordial** star carries
+/// `formation_time = State::PRIMORDIAL` (`−∞`), so `a = now − (−∞) = +∞`,
+/// `exp(−∞) = +0.0`, `t = strength · 0.0 = +0.0`, and the two-product [`lerp3`]
+/// returns the base color **bit-exactly** — no `is_infinite` branch, exactly
+/// what the `−∞` sentinel was chosen for (F1). `strength = 0` is likewise the
+/// bit-exact identity.
+///
+/// `tau > 0` is a caller contract (the fade timescale; the scenario layer
+/// validates it finite-and-positive at S6). `now` is the snapshot time —
+/// view-INDEPENDENT (D9-safe), passed in by [`crate::prepare`] as `state.time`.
+/// Because `formation_time ≤ now` in the pipeline (a star cannot form after the
+/// snapshot it appears in), `a ≥ 0` and `exp(−a/tau) ∈ (0, 1]`, so the
+/// strength-clamp alone bounds `t` to `[0, strength]` — the tint never
+/// overshoots the `[base, young]` segment (no separate `t`-clamp, matching
+/// [`compression_colors`]).
+///
+/// Panics if `base.len() != formation_time.len()` — a caller contract violation
+/// (they must describe the same particles), matching [`compression_colors`].
+pub fn age_colors(
+    base: &[[f32; 3]],
+    formation_time: &[f64],
+    now: f64,
+    young: [f32; 3],
+    strength: f32,
+    tau: f64,
+) -> Vec<[f32; 3]> {
+    let _ = (base, formation_time, now, young, strength, tau);
+    todo!("S5: age-triggered star-formation tint")
+}
+
 /// Star-formation-proxy hue shift (compression-triggered): lerp each base color
 /// toward `young` by `t = clamp(strength, 0, 1) · (1 − ρ0/max(ρ, ρ0))`.
 ///

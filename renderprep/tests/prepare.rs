@@ -8,8 +8,8 @@
 
 use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
 use galaxy_renderprep::{
-    knn_density, prepare, ColorMode, CompressionHue, DensityColoring, DispersionColoring,
-    PrepConfig, SigmaReference, SizeByDensity,
+    knn_density, prepare, AgeColoring, ColorMode, CompressionHue, DensityColoring,
+    DispersionColoring, PrepConfig, SigmaReference, SizeByDensity,
 };
 
 /// Two particles from progenitor 0, one from progenitor 1, with distinct masses.
@@ -825,4 +825,79 @@ fn frozen_colors_are_indexed_by_state_row_not_splat_row() {
     assert_eq!(data.color[0], frozen[0]);
     assert_eq!(data.color[1], frozen[2]);
     assert_eq!(data.color[2], frozen[4]);
+}
+
+// --------------------------------------------------------------------------
+// Age-triggered star-formation tint wired into `prepare` (natal-ember-forge).
+// --------------------------------------------------------------------------
+
+/// `young` used by the age-tint prepare tests.
+const AGE_YOUNG: [f32; 3] = [0.5, 0.7, 1.0];
+
+#[test]
+fn age_off_and_strength_zero_produce_identical_frame_data() {
+    // Even with freshly-formed stars present, `age = None` and
+    // `age = Some { strength: 0 }` must yield byte-identical color columns — the
+    // knob-off frame-data identity gate.
+    let mut state = sample_state();
+    state.formation_time = vec![State::PRIMORDIAL, 5.0, 4.0]; // two formed stars
+    let off = PrepConfig {
+        age: None,
+        ..sample_config()
+    };
+    let zero = PrepConfig {
+        age: Some(AgeColoring {
+            young: AGE_YOUNG,
+            strength: 0.0,
+            tau: 2.0,
+        }),
+        ..sample_config()
+    };
+    assert_eq!(prepare(&state, &off).color, prepare(&state, &zero).color);
+}
+
+#[test]
+fn age_all_primordial_is_byte_identical_to_off() {
+    // Every particle primordial (formation_time = −∞ ⇒ age = +∞ ⇒ t = +0.0) ⇒
+    // ON is bit-identical to OFF, even at full strength — the sentinel
+    // arithmetic, no is_infinite branch.
+    let state = sample_state(); // formation_time all PRIMORDIAL
+    let off = PrepConfig {
+        age: None,
+        ..sample_config()
+    };
+    let on = PrepConfig {
+        age: Some(AgeColoring {
+            young: AGE_YOUNG,
+            strength: 1.0,
+            tau: 3.0,
+        }),
+        ..sample_config()
+    };
+    assert_eq!(prepare(&state, &off).color, prepare(&state, &on).color);
+}
+
+#[test]
+fn age_tints_freshly_formed_stars_using_the_snapshot_time() {
+    // `now` is `state.time` (5.0). Particle 1 formed AT the snapshot (age 0) ⇒
+    // the young endpoint at strength 1; the primordial particles keep their
+    // palette color. This pins that prepare reads `formation_time` and
+    // `state.time`, view-independently (D9).
+    let mut state = sample_state();
+    state.formation_time = vec![State::PRIMORDIAL, 5.0, State::PRIMORDIAL];
+    let cfg = PrepConfig {
+        age: Some(AgeColoring {
+            young: AGE_YOUNG,
+            strength: 1.0,
+            tau: 2.0,
+        }),
+        ..sample_config()
+    };
+    let data = prepare(&state, &cfg);
+    // Palette: progenitor 0 → [1.0, 0.4, 0.2], progenitor 1 → [0.2, 0.5, 1.0].
+    // Particles 0, 2 are progenitor 0 (primordial); particle 1 is progenitor 1
+    // and freshly formed.
+    assert_eq!(data.color[1], AGE_YOUNG, "freshly-formed star → young endpoint");
+    assert_eq!(data.color[0], [1.0, 0.4, 0.2], "primordial keeps its palette color");
+    assert_eq!(data.color[2], [1.0, 0.4, 0.2], "primordial keeps its palette color");
 }

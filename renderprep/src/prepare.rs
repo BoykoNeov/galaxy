@@ -19,7 +19,7 @@
 
 use galaxy_core::{Species, State};
 
-use crate::coloring::{compression_colors, dispersion_colors};
+use crate::coloring::{age_colors, compression_colors, dispersion_colors};
 use crate::density::{density_boost, density_sizes, knn_neighbourhood, velocity_dispersion};
 use crate::frame::FrameData;
 
@@ -107,6 +107,23 @@ pub struct CompressionHue {
     pub strength: f32,
 }
 
+/// Age-triggered star-formation tint (natal-ember-forge, F6): shift
+/// recently-formed stars toward `young`, fading back to base over `tau`
+/// sim-time (see [`crate::coloring::age_colors`]). Unlike [`CompressionHue`]
+/// (a density *proxy*) this reads the real per-particle `formation_time`, so it
+/// needs **no** kNN neighbourhood pass and never joins [`KnnCache`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgeColoring {
+    /// The "young population" color a just-formed star tints toward.
+    pub young: [f32; 3],
+    /// Saturation: a freshly-formed star shifts up to `strength` of the way to
+    /// `young` (clamped to `[0, 1]`); `0.0` is the identity.
+    pub strength: f32,
+    /// Fade timescale in sim-time: the tint decays as `exp(−age / tau)`. Must be
+    /// `> 0` (validated by the scenario layer at S6).
+    pub tau: f64,
+}
+
 /// Configuration for the snapshot → frame-data map.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrepConfig {
@@ -130,6 +147,10 @@ pub struct PrepConfig {
     /// Optional star-formation-proxy hue shift (M6e). `None` (the default) leaves
     /// the base colors untouched.
     pub compression: Option<CompressionHue>,
+    /// Optional age-triggered star-formation tint (natal-ember-forge). `None`
+    /// (the default) leaves the base colors untouched. Reads the real
+    /// `formation_time` column and the snapshot time — no kNN pass.
+    pub age: Option<AgeColoring>,
     /// Keep `Species::Gas` particles in the splat list (M7d debug mode). By
     /// default gas is routed OUT of the splat columns — it renders through the
     /// volumetric gas grid, not the additive star path. The filter runs after
@@ -150,6 +171,7 @@ impl Default for PrepConfig {
             color: ColorMode::Progenitor,
             size_by_density: None,
             compression: None,
+            age: None,
             gas_as_splats: false,
         }
     }
@@ -250,6 +272,22 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
             &ch.rho0,
             ch.young,
             ch.strength,
+        );
+    }
+
+    // Age-triggered star-formation tint (natal-ember-forge, F6): the REAL signal
+    // beside the compression proxy above — reads `formation_time` directly, no
+    // kNN pass. `now` is the snapshot time, view-independent (D9-safe). Off by
+    // default (`age == None`), so the base map is delivered bit-for-bit; a
+    // primordial-only state is a bit-exact no-op even when on (age = +∞ ⇒ t = 0).
+    if let Some(ac) = &config.age {
+        color = age_colors(
+            &color,
+            &state.formation_time,
+            state.time,
+            ac.young,
+            ac.strength,
+            ac.tau,
         );
     }
 

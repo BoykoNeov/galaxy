@@ -7,7 +7,9 @@
 //! so the mapped `t` is an exact binary fraction wherever exactness is asserted.
 
 use galaxy_core::{DVec3, ParticleId, Progenitor, Species, State};
-use galaxy_renderprep::{compression_colors, dispersion_colors, initial_radius_colors, RadialRamp};
+use galaxy_renderprep::{
+    age_colors, compression_colors, dispersion_colors, initial_radius_colors, RadialRamp,
+};
 
 /// Build a state from positions + progenitors with the given masses (vel zero —
 /// the radius ramp is a positions-only map).
@@ -368,5 +370,106 @@ fn compression_colors_are_deterministic() {
     assert_eq!(
         compression_colors(&base, &rho, &rho0, YOUNG, 0.8),
         compression_colors(&base, &rho, &rho0, YOUNG, 0.8)
+    );
+}
+
+// --------------------------------------------------------------------------
+// Age-triggered star-formation tint (natal-ember-forge): fade toward `young`
+// for recently-formed stars, keyed on the real `formation_time`.
+// --------------------------------------------------------------------------
+
+#[test]
+fn age_strength_zero_is_the_identity() {
+    // strength 0 ⇒ t = 0 for every particle ⇒ base color bit-for-bit, whatever
+    // the ages — the same hard off-guarantee compression carries.
+    let base = [BASE, [0.1, 0.9, 0.5]];
+    let out = age_colors(&base, &[5.0, 4.5], 5.0, YOUNG, 0.0, 2.0);
+    assert_eq!(out, base.to_vec());
+}
+
+#[test]
+fn age_primordial_stars_keep_base_bit_exactly() {
+    // A primordial star carries formation_time = −∞, so age = now − (−∞) = +∞,
+    // exp(−∞) = +0.0, t = +0.0, and the two-product lerp returns base exactly —
+    // NO is_infinite branch (the property the −∞ sentinel was chosen for). The
+    // freshly-formed neighbour (age 0, strength 1) DOES shift, proving the map is
+    // live, not a no-op.
+    let base = [BASE, BASE];
+    let out = age_colors(
+        &base,
+        &[State::PRIMORDIAL, 5.0],
+        5.0,
+        YOUNG,
+        1.0,
+        2.0,
+    );
+    assert_eq!(out[0], BASE, "primordial star must stay its base color exactly");
+    assert_ne!(out[1], BASE, "a freshly-formed star must shift");
+}
+
+#[test]
+fn age_freshly_formed_at_full_strength_is_the_young_endpoint() {
+    // age = 0 (formation_time == now), strength 1: t = 1·exp(0) = 1 → the young
+    // endpoint bit-exactly (two-product lerp at t = 1).
+    let out = age_colors(&[BASE], &[5.0], 5.0, YOUNG, 1.0, 3.0);
+    assert_eq!(out[0], YOUNG);
+}
+
+#[test]
+fn age_one_efold_is_the_reference_mix() {
+    // age = tau (one fade timescale), strength 1: t = exp(−1) ≈ 0.3679 — the
+    // reference decay point, hand-derived, not read back from the function.
+    let tau = 2.0;
+    let out = age_colors(&[BASE], &[3.0], 3.0 + tau, YOUNG, 1.0, tau);
+    let want = mix(BASE, YOUNG, (-1.0f64).exp() as f32);
+    assert_rgb_close(out[0], want, 1e-6);
+}
+
+#[test]
+fn age_is_monotone_in_age_and_bounded_by_strength() {
+    // Ages 0 < 1 < 2 < 4 < 20 at strength 0.6, tau 2: the tint fades
+    // monotonically from the strength cap back toward base, never past either.
+    let strength = 0.6;
+    let tau = 2.0;
+    let now = 10.0;
+    let ages = [0.0, 1.0, 2.0, 4.0, 20.0];
+    let ft: Vec<f64> = ages.iter().map(|a| now - a).collect();
+    let base = vec![BASE; ages.len()];
+    let out = age_colors(&base, &ft, now, YOUNG, strength, tau);
+    let cap = mix(BASE, YOUNG, strength); // t at age 0
+    for c in 0..3 {
+        let toward_young = (YOUNG[c] - BASE[c]).signum();
+        // Older (later window entries) ⇒ closer to base ⇒ moves AWAY from young.
+        for w in out.windows(2) {
+            assert!(
+                (w[1][c] - w[0][c]) * toward_young <= 0.0,
+                "channel {c} not monotone in age: {out:?}"
+            );
+        }
+        let (lo, hi) = (BASE[c].min(cap[c]), BASE[c].max(cap[c]));
+        for col in &out {
+            assert!(
+                col[c] >= lo - 1e-6 && col[c] <= hi + 1e-6,
+                "channel {c} exceeds the strength cap: {col:?} vs {cap:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn age_strength_above_one_clamps_to_the_young_endpoint() {
+    // strength 5 must behave as strength 1: a freshly-formed star lands on the
+    // young endpoint, not past it.
+    let out = age_colors(&[BASE], &[7.0], 7.0, YOUNG, 5.0, 1.0);
+    assert_eq!(out[0], YOUNG);
+}
+
+#[test]
+fn age_colors_are_deterministic() {
+    let base = [BASE, YOUNG, [0.3, 0.3, 0.3]];
+    let ft = [State::PRIMORDIAL, 4.0, 4.7];
+    assert_eq!(
+        age_colors(&base, &ft, 5.0, YOUNG, 0.8, 1.5),
+        age_colors(&base, &ft, 5.0, YOUNG, 0.8, 1.5)
     );
 }

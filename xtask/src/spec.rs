@@ -1487,6 +1487,7 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                 max_frac: SIZE_MAX_FRAC,
             }),
             compression: None,    // filled by run_movie (rho0 needs snapshot 0)
+            age: None,            // filled by run_movie at S6 (age knob is [look] data)
             gas_as_splats: false, // gas renders volumetrically (M7d), not as splats
         },
         eps,

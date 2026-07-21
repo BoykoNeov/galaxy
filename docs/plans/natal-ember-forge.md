@@ -22,6 +22,25 @@ Scope decisions locked with the user (2026-07-21):
 
 Advisor-vetted (2026-07-21).
 
+**STATUS — S1–S6 COMPLETE (2026-07-21).** Sim (S1–S4), age-color renderprep (S5),
+and the `[physics.star_formation]` + `[look.age]` scenario wiring (S6) all shipped
+and gated. The showpiece is a **separate `gasrich-sf` preset** (rho_thresh 0.5,
+efficiency 0.5, chosen from a QUICK A/B — ~329 young stars over the natural merger;
+age tint young=[0.7,0.8,1.0], strength 0.7, τ=6), leaving the flagship `gasrich`
+smooth and SF-free (user call). GPU+SF is rejected loud; feedback and cooling stay
+deferred.
+
+**Open follow-up — smooth SF subframes.** S6 surfaced that SF is incompatible with
+M6c Hermite subframe interpolation: in-place gas→star conversion GROWS the
+species-routed splat set between snapshots, and `renderprep::subframe` requires a
+fixed splat set per span (it pairs endpoint splat rows by index). The shipped fix
+renders SF runs at **snapshot cadence** (`movie_frame_count` → one frame per
+snapshot, direct endpoint emit — choppy, ~1 s at 60 fps for 61 frames). The proper
+smooth fix is NOT id-matching (the particle keeps its index under in-place
+conversion) but **full-N frames + a gas-skipping splat pass in the renderer** so the
+subframe `!filtered` path runs on a constant-length frame — a real renderprep
+milestone, unscheduled.
+
 ---
 
 ## The load-bearing choice: whole-particle IN-PLACE conversion

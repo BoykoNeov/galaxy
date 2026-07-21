@@ -1,0 +1,263 @@
+# STAR-FORMATION showpiece (natal-ember-forge S6): the `gasrich` merger with
+# physical star formation switched on. Dense, converging SPH gas (the compressed
+# post-pericenter midplane, t >~ 20) genuinely converts in place to collisionless
+# star particles carrying a formation time; the render age-colors them blue-white,
+# fading back to base over `tau`. A separate preset so the flagship `gasrich` stays
+# a smooth 481-frame Hermite render — see below.
+#
+# rho_thresh / efficiency were chosen from a QUICK A/B (docs + the gas-rho
+# measurement, M:\claud_projects\temp\s6_sf_ab): rho_thresh = 0.5 sits between the
+# ambient gas density (p50 ~0.05) and the compressed peak (~1-3), selecting only the
+# converging, compressed knots — it forms ~329 stars over the merger (a clearly
+# visible young population without washing the cores out). rho_thresh = 1.0 was too
+# sparse (~104 stars); 0.25 fired too eagerly and everywhere. efficiency = 0.5 gives
+# a healthy conversion probability p ~= 0.37 per snapshot interval at rho = 1.
+#
+# CADENCE: SF flips a gas particle to collisionless IN PLACE, which grows the
+# species-routed splat set between snapshots. The M6c Hermite subframe interp needs
+# a FIXED splat set per span, so an SF run renders at SNAPSHOT CADENCE (one frame per
+# snapshot, ~61 frames -> ~1 s at 60 fps -- choppier than the flagship). Smooth SF
+# upsampling (full-N frames + a gas-skipping splat pass) is a tracked follow-up; the
+# flagship `gasrich` is left SF-free to keep its smooth render.
+# M7f showpiece: the `disk` parabolic prograde encounter made GAS-RICH. Each warm
+# Plummer-disk galaxy carries an isothermal SPH gas layer (f_gas = 0.3 of the disk
+# mass) that renders volumetrically — emission in the tidal bridge, absorption
+# (dust lanes) over the stellar cores.
+#
+# GAS RICHNESS (f_gas), not the sound speed, sets the dark lanes: viewed face-on
+# the column density is ∫ρ dz = Σ_gas = f·Σ, INDEPENDENT of the layer thickness c_s
+# sets. So with this near-face-on rig c_s is free, and c_s = 0.1 (min Q_gas ~= 4.0
+# / 4.7) is chosen WARM for two reasons — neither of them CFL: (1) higher Q widens
+# the margin against the artificial clumping isothermal gas (no fragmentation
+# physics) is prone to under merger compression; (2) warming is aesthetically free
+# here, since face-on lane depth is c_s-independent. It does NOT buy a bigger step:
+# at QUICK (2500-gas) resolution the running CFL bound is set by the compressed
+# midplane density of the realization, not by c_s (measured: warming c_s 0.05->0.1
+# moved the running bound only ~0.0043 -> ~0.0048), and it keeps declining through
+# the merger as the gas concentrates. That bound is realization-sensitive at this
+# resolution — some seeds grow a dense knot that drags it below 0.002. This preset's
+# SEED is one whose QUICK realization stays clean and rides dt = 0.005 for the whole
+# merger with the CflGuard never tripping (it matches the validated M7c QUICK demo).
+# FULL resolution (denser, smoother gas sampling) is the robust regime and a
+# deliberate user call — its wall-clock is the standing GPU-SPH gate. A colder
+# marginal-Q disk (the plan's Q ~= 1.5-2) is left to that better-resolved pass: at
+# QUICK resolution it under-resolves the thin sech² layer AND clumps, needing a
+# punishing dt for no gain in the face-on lanes.
+#
+# The stellar populations and orbit are the `disk` preset's; gas SPLITS the disk
+# mass (traces the same exponential), so the stellar rotation curve and tidal
+# morphology are unchanged.
+
+name = "gasrich-sf"
+seed = 0x00C0_FFEE # the validated QUICK-clean realization (see the CFL note above)
+
+[model]
+kind = "disk-plummer"
+
+# The shared gas component (one table => the SAME f_gas and c_s on both disks: the
+# isothermal solver's c_s is a single global, so two gas pops cannot differ in it).
+[model.gas]
+fraction = 0.3
+sound_speed = 0.1
+
+[model.galaxy1]
+disk_mass = 0.15
+scale_length = 0.5
+hz_frac = 0.1
+rmax_frac = 4.0
+toomre_q = 1.5
+halo = { mass = 1.0, scale = 1.0 }
+
+[model.galaxy2]
+disk_mass = 0.1
+scale_length = 0.45
+hz_frac = 0.1
+rmax_frac = 4.0
+toomre_q = 1.5
+halo = { mass = 0.7, scale = 0.9 }
+
+[model.counts.full]
+halo1 = 5000
+disk1 = 5000
+halo2 = 3500
+disk2 = 3500
+gas1 = 4000
+gas2 = 3000
+
+[model.counts.quick]
+halo1 = 1500
+disk1 = 1500
+halo2 = 1000
+disk2 = 1000
+gas1 = 1500
+gas2 = 1000
+
+[orbit]
+eccentricity = 1.0 # parabolic — the classic Toomre encounter
+pericenter = 1.5
+separation = 8.0
+
+[sim]
+# Block-adaptive dt (courant-quickening-cadence): `dt` no longer sets the integration
+# step — the substep is chosen per block from the hydro CFL bound, so the run tracks the
+# bound down and never CFL-aborts (full-res was unproducible at any fixed dt). `dt` now
+# only fixes the snapshot output cadence: output_dt = snapshot_every · dt = 0.5.
+dt = 0.005
+n_steps = 6000 # T = 30, same physical span as `disk` (1500 * 0.02)
+snapshot_every = 100 # -> 61 snapshots, matching the `disk` cadence
+eps = 0.05
+
+# Enable block-adaptive timestepping at the shipped defaults (courant 0.25, growth 1.25,
+# block 16). This is the showpiece adaptive dt was built for — it retires the fixed-dt
+# CFL abort that made full-res gasrich unproducible.
+[sim.adaptive]
+
+[look]
+splat_size = 0.12
+# Screen-space PSF cap (pinprick-starfield): the breathing orbit-tilt zoom makes
+# the fixed WORLD-space splats balloon to ~12 px blobs in the compact early shots
+# (reads as defocus) and shrink to sharp points once the tails widen the framing.
+# The cap is the point-source camera model — stars stay point-like at any zoom,
+# flux-conserving (clamping down concentrates emission; bright cores saturate like
+# a real astrophoto). It ALSO helps the approach WHITE-BLOB: on approach the tight
+# framing packs disk stars to ~inter-star spacing near the cap, so their splats
+# overlap and additively saturate into a washed sheet; a tighter cap separates them
+# so more individual stars read (single-variable A/B at cap 3.0/2.0/1.5 —
+# M:\claud_projects\temp\splatcap_blob_ab — total frame flux identical, peak pixel
+# rising 3.67->5.11->6.78: flux is REDISTRIBUTED not reduced, so the core stays
+# bright but shrinks — a PARTIAL fix, not a cure; fully taming core saturation is
+# the deferred luminance/local-tonemap job). 2.0 shipped (best of the A/B: 3.0
+# washed the approach cores; 1.5 edged into a clinical pinprick field). HALF-extent
+# in pixels, resolution-LITERAL: tuned on QUICK 360p; a FULL 1080p render wants ~3x
+# this value. Remove the knob to restore the uncapped M6g behavior bit-for-bit.
+max_splat_px = 2.0
+frame_percentile = 0.92 # tighter than `disk` — keep the frame on the gassy cores
+# progenitor palette: halo1 (dim warm), disk1 (warm), halo2 (dim cool), disk2 (cool).
+# Gas is NOT a splat (it renders volumetrically) — its color lives in [look.gas].
+palette = [[0.05, 0.035, 0.025], [1.0, 0.5, 0.25], [0.025, 0.035, 0.05], [0.35, 0.6, 1.0]]
+sf_progenitors = [1, 3] # only the disks form "stars" — halos are dark matter
+
+# Volumetric gas look (M7f): cool blue emission + extinction so the gas glows in the
+# tidal bridge and dims the stellar cores. The knobs are DENSITY-REGIME dependent —
+# both scale inversely with the gas ρ the grid holds. The M7e placeholders (κ≈14,
+# j≈0.4) were tuned on a DENSE synthetic disk (ρ~1); this merger's gas is ρ~0.1–0.5,
+# so the same visual needs ~an order of magnitude more κ and j (that's why the movie
+# gas looked invisible until it was tuned here — deposition always ran, the look was
+# just far too weak for the regime). At QUICK (2500 gas / 64³) the gas is intrinsically
+# SOFT — few particles ⇒ large SPH h ⇒ a smooth blobby field, not sharp dust lanes;
+# 128³ raises peak ρ but not the visible sharpness (particle count, not grid res, is the
+# limiter). Sharp lanes are the FULL-res + more-edge-on story (the user-gated showpiece).
+# Grid resolution is NOT a look knob: it is a global quality constant (64³/128³), like
+# the frame dimensions. Tuned by eyeball on the QUICK render; re-render cost only.
+[look.gas]
+color = [0.4, 0.58, 1.0]
+emissivity = 20.0
+opacity = 100.0
+# Single-scatter starlight (scattered-starlit-veil), the OPTION under judgement
+# against the plain M7e emission+absorption look: gas near the stellar cores picks
+# up THEIR warm light (scattered radiance carries the light's own RGB — it is not
+# tinted by `color`), and the forward-peaked phase (anisotropy > 0) rim-lights
+# backlit gas. DISABLE by setting `scattering = 0` (and removing `anisotropy`) —
+# that path is gated bit-identical to the pre-scatter renderer. Like κ/j these are
+# density-regime knobs, tuned by eyeball on the QUICK render at re-render cost.
+# Scale note: the flux ~ L/(4π d²) with d in sim units (tens), so useful strengths
+# are O(10²–10³) — the QUICK A/B bracket (2 / 200 / 800) picked 800: per-disk
+# ambient glow + a lit gas bridge at approach, background stays black (no fog).
+scattering = 800.0
+anisotropy = 0.5
+# Chromatic single-scatter albedo (tinted-octree-lanterns): a per-channel multiplier
+# on the SCATTERED radiance only (emission/absorption/splats untouched). This cools
+# the scattered haze — the warm core light picks up a blue cast as it scatters off the
+# gas, so the veil reads bluer than the stars lighting it. The QUICK A/B (neutral vs
+# [0.6,0.8,1.3] vs a stronger [0.4,0.7,1.6]) picked this mild lean: enough to separate
+# the scattered layer from the warm cores by hue, not so much it goes synthetically
+# blue. Neutral [1,1,1] is bit-identical to no tint — remove the knob to restore it.
+scatter_tint = [0.6, 0.8, 1.3]
+# Per-light shadow volumes (umbral-lantern-lattice): gas deep in its own optical
+# thickness (κ = 100 makes midplanes many τ) stops glowing from inside — the QUICK
+# A/B (M:\claud_projects\temp\shadow_ab) shows ~11% less mid-frame scattered flux,
+# core haze slightly tightened, ambient glow and the lit bridge intact. σ = 800
+# kept (the change is well inside the 200/800 bracket's step). DISABLE by removing
+# this knob — that path is gated bit-identical to the unshadowed v1 scatter.
+shadows = true
+# Shadow-bake strategy (hollow-lantern-stride): "dda" strides past the empty space
+# between each light and the gas over a hierarchical occupancy pyramid instead of
+# brute-marching every step of it. It is BIT-IDENTICAL to "brute" (the reference) —
+# density is exactly 0 outside particle support, so a skipped sample adds κ·0·ds = 0,
+# a float no-op (the equivalence gate asserts assert_eq!, and the GPU-Dda ≡ GPU-brute
+# pixel gate holds exactly). Measured 2× at this QUICK scale, up to ~8× at FULL by
+# sparsity — pure speed, zero visual change. "brute" restores the reference march.
+shadow_bake = "dda"
+# `scatter_softening` is DELIBERATELY omitted (kept None = the v1 per-cluster
+# radius softening). A QUICK A/B (M:\claud_projects\temp\eps_adopt_ab, None vs a
+# fixed ε ∈ {0.5, 3, 6, 12}) confirmed the per-cluster look reads best here: None's
+# effective softening is r_k ≈ 3–6 sim units near the cores (the voxel floor ~0.24
+# is the sharp/bright extreme, not a neutral center — ε=0.5 blazed the cores, peak
+# px 68 vs 5). Adopting a fixed ε would only decouple the scatter glow from the
+# octree REFINE_TOL (refinement-invariance) — an aesthetic wash here, and it does
+# NOT touch the approach white-blob (that is star-splat piling). CONSEQUENCE: since
+# the coupling stays, the REFINE_TOL freeze ALSO pinned core brightness — and it was
+# frozen at the COARSER 1e-2 (see render/src/volume.rs), the softer, dimmer, less
+# blob-prone scattered core, not a tol-neutral choice.
+
+# Local (spatially-adaptive) tone compression (render-more-controls): the actual
+# CURE for the approach WHITE-BLOB the splat cap only softened. Where the tight
+# approach framing piles disk-star splats into one saturated sheet, a global tone
+# curve maps the whole core to a flat near-white — no exposure or levels move can
+# recover it (every pixel there is genuinely bright). This pulls exposure DOWN only
+# where the surround is bright (g = 1/(1 + strength·V), V = a large-σ Gaussian
+# low-pass of luminance), so sub-cores inside the blob drop back into the curve's
+# responsive range and read as individual colored stars again. Hue-exact (a single
+# scalar gain per pixel) and never-brightens (g ≤ 1), so dim regions pass through
+# bit-identical. Baked into the movie grade here (was regrade-only): the frame-by-
+# frame A/B viewer (M:\claud_projects\temp\render_tune_ab) settled on strength 2.0
+# ("s2") over the ship/cap-relaxed/TOL-relaxed alternatives — the cap-relaxed ones
+# DEFOCUSED the stars (wider splats, lower contrast) for no gain. `radius`/`floor`
+# left at the CLI defaults (32 px / 0.2) that s2 used. `radius` is resolution-
+# LITERAL (pixels, tuned on QUICK 360p; a FULL 1080p render wants ~3× it, like
+# `max_splat_px`). Remove this section to restore the pre-tonemap grade bit-for-bit.
+[look.local_tone]
+strength = 2.0
+
+[[look.ramps]]
+inner = [0.05, 0.035, 0.025]
+outer = [0.05, 0.035, 0.025]
+
+[[look.ramps]]
+inner = [1.0, 0.35, 0.1]
+outer = [0.55, 0.75, 1.0]
+
+[[look.ramps]]
+inner = [0.025, 0.035, 0.05]
+outer = [0.025, 0.035, 0.05]
+
+[[look.ramps]]
+inner = [1.0, 0.3, 0.45]
+outer = [0.4, 0.9, 0.9]
+
+# A moderately edge-on reveal: tilting the encounter toward edge-on lengthens the
+# line of sight through the thin gas layer, so the gas reads over the starlight
+# (the showpiece — not a back-compat exemplar).
+[rig]
+kind = "orbit-tilt"
+azimuth_deg = [-45.0, 45.0]
+tilt_deg = [35.0, 25.0]
+window = 6
+
+# Age coloring (natal-ember-forge F6): tint newly-formed stars toward this
+# blue-white `young` (matching the SF compression proxy), fading over `tau` sim-time
+# (t = strength * exp(-age/tau)). Inert for every primordial star (formation_time is
+# the -inf sentinel -> base color, bit-exact).
+[look.age]
+young = [0.7, 0.8, 1.0]
+strength = 0.7
+tau = 6.0
+
+# Star formation recipe (natal-ember-forge F2/F7). Gas with rho >= rho_thresh AND
+# div_v < 0 (dense AND converging) converts with p = 1 - exp(-efficiency*dt/t_ff).
+# Runs on the CPU stepping path (gasrich ships [sim.adaptive] -> run_adaptive); the
+# GPU-resident path rejects SF loud. `seed` fixes the deterministic conversion draw.
+[physics.star_formation]
+rho_thresh = 0.5
+efficiency = 0.5
+seed = 20260721

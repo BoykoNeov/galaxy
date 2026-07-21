@@ -782,6 +782,7 @@ pub const PRESETS: &[(&str, &str)] = &[
         "gasrich-adiabatic",
         include_str!("../scenarios/gasrich-adiabatic.toml"),
     ),
+    ("gasrich-sf", include_str!("../scenarios/gasrich-sf.toml")),
 ];
 
 /// Look up a checked-in preset's toml text by canonical name.
@@ -2488,6 +2489,35 @@ mod tests {
         assert_eq!(t.cold, [0.75, 0.13, 0.05], "blackbody cold = dark red");
         assert_eq!(t.hot, [0.75, 0.82, 1.0], "blackbody hot = blue-white");
         assert!(t.u_lo < t.u_hi, "a non-degenerate band");
+    }
+
+    #[test]
+    fn gasrich_sf_preset_ships_the_ab_star_formation_and_age_tint() {
+        // The star-formation showpiece: the A/B-chosen recipe (rho_thresh 0.5,
+        // efficiency 0.5) and the blue-white age tint, on the gas-rich merger.
+        let s = build_scenario(&parse_preset("gasrich-sf"), true);
+        assert_eq!(
+            s.sf,
+            Some(StarFormationConfig {
+                rho_thresh: 0.5,
+                efficiency: 0.5,
+                seed: 20260721,
+            }),
+            "gasrich-sf must ship the A/B star-formation recipe"
+        );
+        assert_eq!(
+            s.prep.age,
+            Some(AgeColoring {
+                young: [0.7, 0.8, 1.0],
+                strength: 0.7,
+                tau: 6.0,
+            }),
+            "gasrich-sf must ship the blue-white age tint"
+        );
+        assert!(
+            s.sound_speed.is_some() && s.adaptive.is_some(),
+            "SF runs on the gas-rich [sim.adaptive] CPU path"
+        );
     }
 
     // --- registry + validation --------------------------------------------------

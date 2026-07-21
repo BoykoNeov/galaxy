@@ -530,8 +530,11 @@ pub fn per_frame_radii(frames: &[FrameData], percentile: f32) -> Vec<f32> {
 /// its index, so no id-matching is needed) is a tracked follow-up. `n ≤ 1` emits
 /// `n` (a single-frame / empty movie has nothing to upsample).
 pub fn movie_frame_count(n_snapshots: usize, subframes: u32, sf_active: bool) -> usize {
-    let _ = (n_snapshots, subframes, sf_active);
-    todo!("S6 render-cadence: implement in green")
+    match n_snapshots {
+        0 | 1 => n_snapshots,
+        n if sf_active => n,
+        n => (n - 1) * subframes as usize + 1,
+    }
 }
 
 /// The per-instant power-of-two rung distribution of a set of gas CFL timesteps

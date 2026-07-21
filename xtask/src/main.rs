@@ -2176,10 +2176,12 @@ fn run_movie(
 
     // 4. Hermite temporal upsampling (M6c): `subframes` in-betweens per snapshot
     //    interval, plus the final snapshot itself → (n-1)·subframes + 1 frames.
-    let total = match states.len() {
-        0 | 1 => states.len(),
-        n => (n - 1) * s.subframes as usize + 1,
-    };
+    //    EXCEPT under star formation (S6): SF flips a gas particle to collisionless
+    //    in place, growing the species-routed splat set between snapshots, which the
+    //    Hermite subframe interp (fixed splat set per span) cannot interpolate — an
+    //    SF run renders at snapshot cadence instead (one frame per snapshot).
+    let sf_active = s.sf.is_some();
+    let total = galaxy_xtask::movie_frame_count(states.len(), s.subframes, sf_active);
     let emit = |i: usize,
                 frame: &FrameData,
                 gas: Option<galaxy_render::GasFrame>|
@@ -2210,68 +2212,23 @@ fn run_movie(
     // (both O(K)); the A/B freezes REFINE_TOL against this distribution + the
     // wall-clock below. Empty on the no-scatter path.
     let mut light_counts: Vec<usize> = Vec::new();
-    for w in 0..states.len().saturating_sub(1) {
-        // The span validates the id/time gates once per snapshot pair (a silent
-        // id mismatch would scramble the movie — fail loudly instead).
-        let span = HermiteSpan::new(&states[w], &states[w + 1])?;
-        for j in 0..s.subframes {
-            let u = f64::from(j) / f64::from(s.subframes);
-            let fd = subframe(&span, &frames[w], &frames[w + 1], u);
-            // Scatter lights are per-frame data clustered from the SAME
-            // interpolated splats the frame draws (camera-independent, so
-            // prep-time camera decoupling — D9 — is untouched).
+    if sf_active {
+        // Snapshot cadence (S6): render each prepared endpoint frame directly — no
+        // Hermite subframe interp, since SF grows the splat set between snapshots.
+        // Each frame binds its single gas grid to itself (grid0 = grid1, mix 0), the
+        // same one-grid construction the non-SF final frame uses below.
+        for w in 0..states.len() {
             let lights = match (gas_look.scatter, &gas_grids[w]) {
-                (Some(_), Some(_)) => galaxy_render::cluster_lights(&fd),
+                (Some(_), Some(_)) => galaxy_render::cluster_lights(&frames[w]),
                 _ => Vec::new(),
             };
             if gas_look.scatter.is_some() {
                 light_counts.push(lights.len());
             }
-            // Gas rides as the two endpoint grids + the subframe mix u.
-            let gas = match (&gas_grids[w], &gas_grids[w + 1]) {
-                (Some(g0), Some(g1)) => Some(galaxy_render::GasFrame {
-                    grid0: g0,
-                    grid1: g1,
-                    // Temperature colormap: the co-registered moment endpoints
-                    // (present iff the scenario asked for it and both endpoints
-                    // carry gas), else the flat-tint march.
-                    temperature: match (temp_params, &gas_moments[w], &gas_moments[w + 1]) {
-                        (Some(t), Some(m0), Some(m1)) => Some(galaxy_render::TempColor {
-                            moment0: m0,
-                            moment1: m1,
-                            cold: t.cold,
-                            hot: t.hot,
-                            u_lo: t.u_lo,
-                            u_hi: t.u_hi,
-                        }),
-                        _ => None,
-                    },
-                    mix: u as f32,
-                    lights: &lights,
-                    look: gas_look,
-                }),
-                _ => None,
-            };
-            emit(i, &fd, gas)?;
-            i += 1;
-        }
-    }
-    if let Some(last) = frames.last() {
-        let lights = match (gas_look.scatter, gas_grids.last()) {
-            (Some(_), Some(Some(_))) => galaxy_render::cluster_lights(last),
-            _ => Vec::new(),
-        };
-        if gas_look.scatter.is_some() {
-            light_counts.push(lights.len());
-        }
-        let gas = gas_grids
-            .last()
-            .and_then(Option::as_ref)
-            .map(|g| galaxy_render::GasFrame {
+            let gas = gas_grids[w].as_ref().map(|g| galaxy_render::GasFrame {
                 grid0: g,
                 grid1: g,
-                // Static last frame: one moment grid, mixed with itself (mix 0).
-                temperature: match (temp_params, gas_moments.last().and_then(Option::as_ref)) {
+                temperature: match (temp_params, &gas_moments[w]) {
                     (Some(t), Some(m)) => Some(galaxy_render::TempColor {
                         moment0: m,
                         moment1: m,
@@ -2286,8 +2243,89 @@ fn run_movie(
                 lights: &lights,
                 look: gas_look,
             });
-        emit(i, last, gas)?;
-        i += 1;
+            emit(i, &frames[w], gas)?;
+            i += 1;
+        }
+    } else {
+        for w in 0..states.len().saturating_sub(1) {
+            // The span validates the id/time gates once per snapshot pair (a silent
+            // id mismatch would scramble the movie — fail loudly instead).
+            let span = HermiteSpan::new(&states[w], &states[w + 1])?;
+            for j in 0..s.subframes {
+                let u = f64::from(j) / f64::from(s.subframes);
+                let fd = subframe(&span, &frames[w], &frames[w + 1], u);
+                // Scatter lights are per-frame data clustered from the SAME
+                // interpolated splats the frame draws (camera-independent, so
+                // prep-time camera decoupling — D9 — is untouched).
+                let lights = match (gas_look.scatter, &gas_grids[w]) {
+                    (Some(_), Some(_)) => galaxy_render::cluster_lights(&fd),
+                    _ => Vec::new(),
+                };
+                if gas_look.scatter.is_some() {
+                    light_counts.push(lights.len());
+                }
+                // Gas rides as the two endpoint grids + the subframe mix u.
+                let gas = match (&gas_grids[w], &gas_grids[w + 1]) {
+                    (Some(g0), Some(g1)) => Some(galaxy_render::GasFrame {
+                        grid0: g0,
+                        grid1: g1,
+                        // Temperature colormap: the co-registered moment endpoints
+                        // (present iff the scenario asked for it and both endpoints
+                        // carry gas), else the flat-tint march.
+                        temperature: match (temp_params, &gas_moments[w], &gas_moments[w + 1]) {
+                            (Some(t), Some(m0), Some(m1)) => Some(galaxy_render::TempColor {
+                                moment0: m0,
+                                moment1: m1,
+                                cold: t.cold,
+                                hot: t.hot,
+                                u_lo: t.u_lo,
+                                u_hi: t.u_hi,
+                            }),
+                            _ => None,
+                        },
+                        mix: u as f32,
+                        lights: &lights,
+                        look: gas_look,
+                    }),
+                    _ => None,
+                };
+                emit(i, &fd, gas)?;
+                i += 1;
+            }
+        }
+        if let Some(last) = frames.last() {
+            let lights = match (gas_look.scatter, gas_grids.last()) {
+                (Some(_), Some(Some(_))) => galaxy_render::cluster_lights(last),
+                _ => Vec::new(),
+            };
+            if gas_look.scatter.is_some() {
+                light_counts.push(lights.len());
+            }
+            let gas = gas_grids
+                .last()
+                .and_then(Option::as_ref)
+                .map(|g| galaxy_render::GasFrame {
+                    grid0: g,
+                    grid1: g,
+                    // Static last frame: one moment grid, mixed with itself (mix 0).
+                    temperature: match (temp_params, gas_moments.last().and_then(Option::as_ref)) {
+                        (Some(t), Some(m)) => Some(galaxy_render::TempColor {
+                            moment0: m,
+                            moment1: m,
+                            cold: t.cold,
+                            hot: t.hot,
+                            u_lo: t.u_lo,
+                            u_hi: t.u_hi,
+                        }),
+                        _ => None,
+                    },
+                    mix: 0.0,
+                    lights: &lights,
+                    look: gas_look,
+                });
+            emit(i, last, gas)?;
+            i += 1;
+        }
     }
     println!(
         "rendered + graded {i} frames → {} in {:.1} s",

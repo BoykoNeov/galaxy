@@ -1,7 +1,7 @@
 //! The Rust-native snapshot format: a versioned header followed by per-particle
 //! Structure-of-Arrays columns, all little-endian.
 //!
-//! On-disk layout (version 3):
+//! On-disk layout (version 4):
 //! ```text
 //!   magic   : 8 bytes  = b"GLXYSNAP"
 //!   version : u32       = FORMAT_VERSION
@@ -9,7 +9,8 @@
 //!             n_particles u64, rng_seed u64, config_hash u64,
 //!             units String, code_version String         (Strings: u32 len + UTF-8)
 //!   columns : pos[n] (3×f64), vel[n] (3×f64), mass[n] (f32),
-//!             id[n] (u64), progenitor[n] (u16), kind[n] (u8), u[n] (f64)
+//!             id[n] (u64), progenitor[n] (u16), kind[n] (u8), u[n] (f64),
+//!             formation_time[n] (f64)
 //! ```
 //! Columns are stored SoA (all of one field, then the next) so a consumer can
 //! read only the fields it needs. `n_particles` is authoritative on write — it is
@@ -19,12 +20,21 @@
 //! thermodynamic variable of the adiabatic path and feeds the total-energy
 //! conservation gate, so it cannot afford the f32 storage error `mass` accepts.
 //!
+//! The `formation_time` column is likewise **f64** (a simulation time): it is
+//! the star-formation timestamp the render ages stars by, and carries the
+//! sentinel `State::PRIMORDIAL` (`−∞`) on every particle that did not form via
+//! star formation in the run.
+//!
 //! Version history: v2 (M7a) appended the `kind` species column; v3 (energy
-//! equation, Chain A) appended the per-particle internal-energy `u` column. The
-//! reader accepts older streams: v1 (the retained pre-gas scenario zoo) defaults
-//! every particle to `Species::Collisionless` (v1 predates gas), and v1/v2 both
-//! default `u = 0.0` (they predate the energy equation, and `u = 0` is exactly
-//! the inert isothermal value). The writer always emits the current version.
+//! equation, Chain A) appended the per-particle internal-energy `u` column; v4
+//! (star formation, Chain A step 4 — plan `natal-ember-forge.md`) appended the
+//! per-particle `formation_time` column. The reader accepts older streams: v1
+//! (the retained pre-gas scenario zoo) defaults every particle to
+//! `Species::Collisionless` (v1 predates gas), v1/v2 default `u = 0.0` (they
+//! predate the energy equation, and `u = 0` is exactly the inert isothermal
+//! value), and v1–v3 default `formation_time = State::PRIMORDIAL` (they predate
+//! star formation, so every particle is "primordial" by construction). The
+//! writer always emits the current version.
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -39,7 +49,7 @@ const MAX_STR_LEN: usize = 1 << 16;
 pub const MAGIC: [u8; 8] = *b"GLXYSNAP";
 /// On-disk format version written by this build. Bumped when the layout
 /// changes; older versions remain readable back to v1 (see the module docs).
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Oldest on-disk format version this build can still read.
 pub const MIN_READ_VERSION: u32 = 1;
@@ -131,6 +141,7 @@ pub fn to_writer<W: Write>(
         || state.progenitor.len() != n
         || state.kind.len() != n
         || state.u.len() != n
+        || state.formation_time.len() != n
     {
         return Err(SnapshotError::Corrupt(
             "State SoA columns have mismatched lengths".to_string(),
@@ -173,6 +184,11 @@ pub fn to_writer<W: Write>(
     // cannot afford the f32 rounding `mass` accepts.
     for &u in &state.u {
         write_f64(writer, u)?;
+    }
+    // The star-formation timestamp column (v4+), full f64 (a time). `PRIMORDIAL`
+    // (`−∞`) marks a particle that did not form via SF; it round-trips exactly.
+    for &ft in &state.formation_time {
+        write_f64(writer, ft)?;
     }
     Ok(())
 }
@@ -261,6 +277,18 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         vec![0.0; n]
     };
 
+    // The formation-time column arrived in v4; v1–v3 predate star formation, so
+    // every particle is `PRIMORDIAL` (never formed via SF) by construction.
+    let formation_time = if version >= 4 {
+        let mut ft = Vec::with_capacity(cap);
+        for _ in 0..n {
+            ft.push(read_f64(reader)?);
+        }
+        ft
+    } else {
+        vec![State::PRIMORDIAL; n]
+    };
+
     let header = Header {
         time,
         step,
@@ -280,7 +308,7 @@ pub fn from_reader<R: Read>(reader: &mut R) -> Result<(Header, State), SnapshotE
         progenitor,
         kind,
         u,
-        formation_time: vec![State::PRIMORDIAL; n],
+        formation_time,
         time,
         a: scale_factor,
     };

@@ -231,17 +231,17 @@ fn round_trip_preserves_species() {
     assert_eq!(back.kind, state.kind, "species column did not round-trip");
 }
 
-/// The writer always emits the current format version (3 as of the energy eq).
+/// The writer always emits the current format version (4 as of star formation).
 #[test]
-fn writer_emits_format_version_3() {
+fn writer_emits_format_version_4() {
     let state = sample_state();
     let header = sample_header(&state);
     let mut buf = Vec::new();
     snapshot::to_writer(&mut buf, &header, &state).unwrap();
 
     assert_eq!(
-        FORMAT_VERSION, 3,
-        "the energy equation bumps the snapshot format to v3"
+        FORMAT_VERSION, 4,
+        "star formation bumps the snapshot format to v4 (formation_time column)"
     );
     let version = u32::from_le_bytes(buf[8..12].try_into().unwrap());
     assert_eq!(version, FORMAT_VERSION, "on-disk version != FORMAT_VERSION");
@@ -308,6 +308,15 @@ fn v1_stream_reads_with_collisionless_default() {
         vec![Species::Collisionless; state.len()],
         "v1 particles must default to Collisionless"
     );
+    // v1 also predates the energy equation (v3) and star formation (v4), so the
+    // reader defaults those columns: `u = 0` (inert isothermal) and
+    // `formation_time = PRIMORDIAL` (never formed via SF).
+    assert_eq!(back.u, vec![0.0; state.len()], "v1 u must default to 0.0");
+    assert_eq!(
+        back.formation_time,
+        vec![State::PRIMORDIAL; state.len()],
+        "v1 formation_time must default to PRIMORDIAL"
+    );
 }
 
 /// A truncated v2 stream (missing the kind column tail) errors, never panics.
@@ -334,9 +343,10 @@ fn invalid_species_byte_is_rejected() {
     let mut buf = Vec::new();
     snapshot::to_writer(&mut buf, &header, &state).unwrap();
 
-    // The kind column (n × u8) is followed by the v3 `u` column (n × f64), so
-    // its last byte sits 8n bytes before the end of the stream.
-    let last_kind = buf.len() - 1 - 8 * state.len();
+    // The kind column (n × u8) is followed by the v3 `u` column (n × f64) and
+    // the v4 `formation_time` column (n × f64), so its last byte sits 16n bytes
+    // before the end of the stream.
+    let last_kind = buf.len() - 1 - 16 * state.len();
     buf[last_kind] = 0xFF;
     let err = snapshot::from_reader(&mut Cursor::new(&buf)).unwrap_err();
     assert!(

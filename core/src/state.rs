@@ -106,6 +106,10 @@ impl State {
         assert_eq!(self.progenitor.len(), n, "progenitor length mismatch");
         assert_eq!(self.kind.len(), n, "kind length mismatch");
         assert_eq!(self.u.len(), n, "u length mismatch");
-        assert_eq!(self.formation_time.len(), n, "formation_time length mismatch");
+        assert_eq!(
+            self.formation_time.len(),
+            n,
+            "formation_time length mismatch"
+        );
     }
 }

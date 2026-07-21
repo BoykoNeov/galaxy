@@ -395,15 +395,11 @@ fn age_primordial_stars_keep_base_bit_exactly() {
     // freshly-formed neighbour (age 0, strength 1) DOES shift, proving the map is
     // live, not a no-op.
     let base = [BASE, BASE];
-    let out = age_colors(
-        &base,
-        &[State::PRIMORDIAL, 5.0],
-        5.0,
-        YOUNG,
-        1.0,
-        2.0,
+    let out = age_colors(&base, &[State::PRIMORDIAL, 5.0], 5.0, YOUNG, 1.0, 2.0);
+    assert_eq!(
+        out[0], BASE,
+        "primordial star must stay its base color exactly"
     );
-    assert_eq!(out[0], BASE, "primordial star must stay its base color exactly");
     assert_ne!(out[1], BASE, "a freshly-formed star must shift");
 }
 

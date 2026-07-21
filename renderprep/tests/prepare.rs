@@ -897,7 +897,18 @@ fn age_tints_freshly_formed_stars_using_the_snapshot_time() {
     // Palette: progenitor 0 → [1.0, 0.4, 0.2], progenitor 1 → [0.2, 0.5, 1.0].
     // Particles 0, 2 are progenitor 0 (primordial); particle 1 is progenitor 1
     // and freshly formed.
-    assert_eq!(data.color[1], AGE_YOUNG, "freshly-formed star → young endpoint");
-    assert_eq!(data.color[0], [1.0, 0.4, 0.2], "primordial keeps its palette color");
-    assert_eq!(data.color[2], [1.0, 0.4, 0.2], "primordial keeps its palette color");
+    assert_eq!(
+        data.color[1], AGE_YOUNG,
+        "freshly-formed star → young endpoint"
+    );
+    assert_eq!(
+        data.color[0],
+        [1.0, 0.4, 0.2],
+        "primordial keeps its palette color"
+    );
+    assert_eq!(
+        data.color[2],
+        [1.0, 0.4, 0.2],
+        "primordial keeps its palette color"
+    );
 }

@@ -189,8 +189,24 @@ pub fn age_colors(
     strength: f32,
     tau: f64,
 ) -> Vec<[f32; 3]> {
-    let _ = (base, formation_time, now, young, strength, tau);
-    todo!("S5: age-triggered star-formation tint")
+    assert_eq!(
+        base.len(),
+        formation_time.len(),
+        "formation_time is not for these particles"
+    );
+    let s = strength.clamp(0.0, 1.0);
+    base.iter()
+        .zip(formation_time)
+        .map(|(&b, &tf)| {
+            // age = now − formation_time: +∞ for a primordial star (tf = −∞), so
+            // exp(−age/tau) = +0.0 and t = +0.0 → base bit-exactly through the
+            // two-product lerp. No is_infinite branch (F1). For age ≥ 0 the
+            // exponential is in (0, 1], so the strength-clamp alone bounds t.
+            let age = now - tf;
+            let t = (s as f64 * (-age / tau).exp()) as f32;
+            lerp3(b, young, t)
+        })
+        .collect()
 }
 
 /// Star-formation-proxy hue shift (compression-triggered): lerp each base color

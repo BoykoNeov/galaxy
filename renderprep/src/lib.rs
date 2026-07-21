@@ -35,6 +35,5 @@ pub use gasgrid::{
 };
 pub use interp::{subframe, HermiteSpan, InterpError};
 pub use prepare::{
-    prepare, AgeColoring, ColorMode, CompressionHue, DispersionColoring, PrepConfig,
-    SigmaReference,
+    prepare, AgeColoring, ColorMode, CompressionHue, DispersionColoring, PrepConfig, SigmaReference,
 };

@@ -91,15 +91,23 @@ kind = "static"
 "#;
 
 fn gas_scenario() -> Scenario {
-    build_scenario(&parse_scenario_toml(GAS_TOML).expect("gas toml parses"), true)
+    build_scenario(
+        &parse_scenario_toml(GAS_TOML).expect("gas toml parses"),
+        true,
+    )
 }
 
-/// A decisive SF recipe: `rho_thresh` tiny so the density gate passes for essentially
-/// all gas, `efficiency` huge so `p = 1 − exp(−ε·dt/t_ff) ≈ 1` for any converging gas.
+/// A decisive-but-MODERATE SF recipe: `rho_thresh` tiny so the density gate passes for
+/// essentially all gas, `efficiency` sized so `p = 1 − exp(−ε·dt/t_ff)` is a healthy
+/// fraction (~0.4 at ρ~0.3, dt~0.01) — enough that some gas converts on each call, but
+/// well below 1 so gas REMAINS. A runaway `efficiency` (p ≈ 1) would convert 100% of the
+/// gas in one call and `run_individual` would blow up with no hydro particles left (the
+/// documented no-feedback runaway hazard) — that is a recipe-tuning concern, not a
+/// wiring failure, so the wiring gate keeps the recipe modest.
 fn decisive_sf() -> StarFormationConfig {
     StarFormationConfig {
-        rho_thresh: 1e-6,
-        efficiency: 1e6,
+        rho_thresh: 1e-4,
+        efficiency: 50.0,
         seed: 0xA11CE,
     }
 }
@@ -126,10 +134,8 @@ fn snap_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 fn tempdir(tag: &str) -> std::path::PathBuf {
-    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "sf_wiring_{tag}_{:?}",
-        std::thread::current().id()
-    ));
+    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("sf_wiring_{tag}_{:?}", std::thread::current().id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
     base

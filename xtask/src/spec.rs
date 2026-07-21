@@ -1167,6 +1167,61 @@ fn validate(s: &ScenarioSpec) -> Result<(), String> {
         }
     }
 
+    // Age coloring ([look.age], natal-ember-forge F6/F7): a `[look]` coloring knob
+    // (like the SF compression proxy), NOT gas-gated — it is inert when no star has a
+    // formation time and meaningful on reused SF snapshots, so it is never a dead knob
+    // to declare. Validate the values only: `young` a linear-RGB color (finite, ≥ 0),
+    // `strength` finite & > 0 (a declared 0 is a bit-exact no-op — absence means off),
+    // `tau` finite & > 0 (the fade timescale).
+    if let Some(a) = &s.look.age {
+        if !a.young.iter().all(|c| c.is_finite() && *c >= 0.0) {
+            return Err(format!(
+                "look.age young components must be finite and non-negative, got {:?}",
+                a.young
+            ));
+        }
+        if !(a.strength.is_finite() && a.strength > 0.0) {
+            return Err(format!(
+                "look.age strength must be finite and > 0 (absence means off), got {}",
+                a.strength
+            ));
+        }
+        if !(a.tau.is_finite() && a.tau > 0.0) {
+            return Err(format!(
+                "look.age tau must be finite and > 0 (the fade timescale), got {}",
+                a.tau
+            ));
+        }
+    }
+
+    // Star formation ([physics.star_formation], natal-ember-forge F7): a gated physics
+    // knob. It needs SPH gas — a pure-gravity solver's `sf_fields` returns zeros, so
+    // nothing could ever convert; declared on a gas-free model it is a dead knob and
+    // rejected loud (mirroring the [look.gas] gas-presence gate). When present, both
+    // recipe knobs must be positive (`efficiency = 0` is a no-op — absence means off).
+    if let Some(sf) = s.physics.and_then(|p| p.star_formation) {
+        if !model_has_gas {
+            return Err(
+                "physics.star_formation is set but the model has no gas — a pure-gravity \
+                 solver forms no stars (add [model.gas], or remove [physics.star_formation])"
+                    .into(),
+            );
+        }
+        if !(sf.rho_thresh.is_finite() && sf.rho_thresh > 0.0) {
+            return Err(format!(
+                "physics.star_formation rho_thresh must be finite and > 0, got {}",
+                sf.rho_thresh
+            ));
+        }
+        if !(sf.efficiency.is_finite() && sf.efficiency > 0.0) {
+            return Err(format!(
+                "physics.star_formation efficiency must be finite and > 0 (absence means \
+                 off), got {}",
+                sf.efficiency
+            ));
+        }
+    }
+
     // Rig.
     match &s.rig {
         RigSpec::Static => {}
@@ -1560,8 +1615,16 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
                 min_frac: SIZE_MIN_FRAC,
                 max_frac: SIZE_MAX_FRAC,
             }),
-            compression: None,    // filled by run_movie (rho0 needs snapshot 0)
-            age: None,            // filled by run_movie at S6 (age knob is [look] data)
+            compression: None, // filled by run_movie (rho0 needs snapshot 0)
+            // Age coloring ([look.age], natal-ember-forge F6): a `[look]` coloring
+            // knob, view-independent (reads formation_time + snapshot time, no kNN /
+            // snap0), so unlike `compression` it needs no per-run anchor — it is baked
+            // straight into the base prep here. `None` = no age tint (bit-identical).
+            age: spec.look.age.map(|a| AgeColoring {
+                young: a.young,
+                strength: a.strength,
+                tau: a.tau,
+            }),
             gas_as_splats: false, // gas renders volumetrically (M7d), not as splats
         },
         eps,
@@ -1651,10 +1714,18 @@ pub fn build_scenario(spec: &ScenarioSpec, quick: bool) -> Scenario {
         // verbatim; `simulate_snapshots` acts on it only when the scenario is gas-rich
         // and `mode = hydro-only`. Mutual exclusion with `adaptive` is enforced at parse.
         individual: spec.sim.individual,
-        // Star formation ([physics.star_formation], natal-ember-forge): S6 maps the
-        // parsed recipe into the runtime config here (green fills this from
-        // spec.physics); the RED stub leaves it off.
-        sf: None,
+        // Star formation ([physics.star_formation], natal-ember-forge F7): the runtime
+        // recipe `simulate_snapshots` threads into the CPU stepping config's `sf` field.
+        // `None` (absent, or a gas-free model — rejected at parse) ⇒ SF never runs ⇒
+        // byte-identical. Validated at parse (rho_thresh/efficiency > 0, gas present).
+        sf: spec
+            .physics
+            .and_then(|p| p.star_formation)
+            .map(|sf| StarFormationConfig {
+                rho_thresh: sf.rho_thresh,
+                efficiency: sf.efficiency,
+                seed: sf.seed,
+            }),
         info,
     }
 }
@@ -2843,9 +2914,8 @@ mod tests {
     #[test]
     fn look_age_threads_to_prep() {
         let disk = preset("disk").unwrap();
-        let toml = format!(
-            "{disk}\n[look.age]\nyoung = [0.6, 0.75, 1.0]\nstrength = 0.8\ntau = 4.0\n"
-        );
+        let toml =
+            format!("{disk}\n[look.age]\nyoung = [0.6, 0.75, 1.0]\nstrength = 0.8\ntau = 4.0\n");
         let s = build_scenario(&parse_scenario_toml(&toml).unwrap(), true);
         assert_eq!(
             s.prep.age,

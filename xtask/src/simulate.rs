@@ -71,9 +71,12 @@ pub fn simulate_snapshots(
         rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
-        // Star formation is wired through the scenario in S6; the simulate step does
-        // not enable it yet, so every current byte-path is untouched (SF-off gate).
-        sf: None,
+        // Star formation ([physics.star_formation], natal-ember-forge S6): the runtime
+        // recipe, or `None` (byte-identical). `run`/`run_adaptive`/`run_individual`
+        // apply it at their shared snapshot-sync site (S4). Only ever `Some` on a
+        // gas-rich CPU path — the parse gate ties SF to gas, and the GPU branches below
+        // reject it (they never call the SF operator).
+        sf: s.sf,
     };
 
     match s.sound_speed {
@@ -83,6 +86,21 @@ pub fn simulate_snapshots(
         // diverge. `backend` picks the CPU composite (guarded by the CFL sentinel)
         // or the GPU-resident stepper (G6).
         Some(sound_speed) => {
+            // Star formation (S6, natal-ember-forge) is CPU-only in v1: the SF operator
+            // runs at the CPU stepping loops' snapshot-sync site (S4), but the
+            // GPU-resident stepper (`simulate_gas_gpu*`) never calls it — a GPU run with
+            // an SF recipe would step the gas but silently drop every conversion (no gate
+            // red), so reject it loud. The CPU-resident readback/re-upload +
+            // `reattach_columns` Species-flip boundary is a tracked follow-up.
+            if s.sf.is_some() && backend != Backend::Cpu {
+                return Err(
+                    "star formation is CPU-only (the GPU-resident SPH path does \
+                            not apply the SF operator — it would silently drop every \
+                            conversion)"
+                        .into(),
+                );
+            }
+
             // Adiabatic gas (`[model.gas].gamma`, H5-C) is wired only on the CPU
             // block-adaptive path: the fixed-dt `CflGuard` calls
             // `HydroParams::sound_speed()` (panics on `Eos::Adiabatic`), the individual
@@ -276,8 +294,9 @@ fn build_adaptive_config(
         rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
-        // SF is wired through the scenario in S6 (not yet); None ⇒ byte-identical.
-        sf: None,
+        // Star formation (S6): the runtime recipe, applied by `run_adaptive` at its
+        // snapshot-sync site (S4). `None` ⇒ byte-identical.
+        sf: s.sf,
     })
 }
 
@@ -334,8 +353,10 @@ fn build_individual_config(
         rng_seed: s.seed,
         config_hash: 0,
         units: "nbody-G1".to_string(),
-        // SF is wired through the scenario in S6 (not yet); None ⇒ byte-identical.
-        sf: None,
+        // Star formation (S6): the runtime recipe, applied by `run_individual` at its
+        // snapshot-sync site (S4 — the individual loop's only all-rungs-synced point).
+        // `None` ⇒ byte-identical.
+        sf: s.sf,
     })
 }
 

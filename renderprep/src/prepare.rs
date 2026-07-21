@@ -352,7 +352,16 @@ pub fn prepare(state: &State, config: &PrepConfig) -> FrameData {
                 size = filter_by(size, keep);
             }
             GasSplats::Hidden => {
-                todo!("S7a: zero gas-row splat brightness for smooth SF interp")
+                // Keep every row (fixed length N across snapshots) but zero the
+                // gas rows' brightness: they stay index-aligned for the Hermite
+                // subframe interp, contribute nothing to the additive splat pass
+                // (a brightness-0 splat is an exact no-op, and `cluster_lights`
+                // drops `lum == 0` rows), and still render via the gas grid.
+                for i in 0..n {
+                    if state.kind[i] == Species::Gas {
+                        brightness[i] = 0.0;
+                    }
+                }
             }
             GasSplats::Visible => {}
         }

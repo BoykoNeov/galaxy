@@ -14,6 +14,7 @@
 
 pub mod cfl;
 pub mod density;
+pub mod divergence;
 pub mod forces;
 pub mod gravity_sph;
 pub mod grid;
@@ -27,6 +28,7 @@ pub use density::{
     density_adaptive, density_adaptive_active, density_adaptive_serial, density_fixed,
     DensityConfig, DensityResult,
 };
+pub use divergence::velocity_divergence;
 pub use forces::{
     hydro_accel_and_dudt, hydro_accel_and_dudt_active, hydro_accel_and_dudt_serial,
     hydro_accelerations, hydro_accelerations_serial, Eos, HydroParams,

@@ -14,4 +14,4 @@ pub use background::StaticBackground;
 pub use glam::{DQuat, DVec3};
 pub use integrator::{LeapfrogKdk, LeapfrogKdkThermal};
 pub use state::{ParticleId, Progenitor, Species, State};
-pub use traits::{Background, ForceSolver, Integrator};
+pub use traits::{Background, ForceSolver, Integrator, SfFields};

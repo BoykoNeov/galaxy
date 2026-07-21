@@ -1,5 +1,23 @@
 use crate::{DVec3, State};
 
+/// The SPH fields the star-formation recipe reads (plan `natal-ember-forge.md`,
+/// F5): per-particle gas density `ρ` and velocity divergence `∇·v`. Returned
+/// transiently by [`ForceSolver::sf_fields`] — computed fresh, never STORED on
+/// `State` (D2: the trait takes `&State`, so a stored ρ column could not be kept
+/// fresh). Both are length `n` (parallel to the SoA columns); collisionless rows
+/// (and every row under a pure-gravity solver) carry `ρ = 0`, `∇·v = 0`, which
+/// can never pass the recipe's `ρ >= rho_thresh` gate, so the zero-default is
+/// inert for SF.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SfFields {
+    /// Per-particle SPH gas density `ρ_i` (0 on collisionless rows).
+    pub rho: Vec<f64>,
+    /// Per-particle SPH velocity divergence `∇·v_i` (0 on collisionless rows).
+    /// Negative ⇒ locally converging (collapsing) flow — the "converging" half
+    /// of the two-part SF criterion.
+    pub div_v: Vec<f64>,
+}
+
 /// Computes gravitational accelerations. Softening is a property of the
 /// concrete solver. Implementations are swappable (direct-sum → Barnes-Hut →
 /// PM/TreePM) without touching the integrator or callers.
@@ -114,6 +132,25 @@ pub trait ForceSolver {
     /// rungs, so the limiter is a no-op there.
     fn coupled_pairs(&self, _state: &State) -> Vec<(usize, usize)> {
         Vec::new()
+    }
+
+    /// The SPH fields the star-formation recipe consumes (F5): per-particle gas
+    /// density `ρ` and velocity divergence `∇·v`, both length `state.len()`.
+    /// A transient accessor (fresh `Vec`s, nothing stored — D2-clean, exactly
+    /// like [`max_stable_dt_per_particle`](Self::max_stable_dt_per_particle) and
+    /// [`coupled_pairs`](Self::coupled_pairs)); the SF driver calls it once per
+    /// snapshot interval at the output-cadence sync site (S4).
+    ///
+    /// Default returns all-zeros: a pure-gravity solver has no gas, so it forms
+    /// no stars (a `ρ = 0` row can never clear `ρ >= rho_thresh`). `GravitySph`
+    /// overrides it, reusing the adaptive-h density solve for `ρ` and the SPH
+    /// divergence gather for `∇·v`; collisionless rows stay `(0, 0)`.
+    fn sf_fields(&self, state: &State) -> SfFields {
+        let n = state.len();
+        SfFields {
+            rho: vec![0.0; n],
+            div_v: vec![0.0; n],
+        }
     }
 }
 

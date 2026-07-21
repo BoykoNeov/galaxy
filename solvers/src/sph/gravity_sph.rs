@@ -12,9 +12,10 @@
 //! `gravity: None` is the pure-hydro mode (shock tube, gas-ball tests): the
 //! IDENTICAL hydro path runs, only the gravity add is skipped.
 
-use galaxy_core::{DVec3, ForceSolver, Species, State};
+use galaxy_core::{DVec3, ForceSolver, SfFields, Species, State};
 
 use super::density::{density_adaptive, density_adaptive_active, DensityConfig};
+use super::divergence::velocity_divergence;
 use super::forces::{
     hydro_accel_and_dudt, hydro_accel_and_dudt_active, hydro_accelerations, HydroParams,
 };
@@ -367,5 +368,35 @@ impl<G: ForceSolver> ForceSolver for GravitySph<G> {
         // The gas pairs the force law couples (r < SUPPORT·max(h_i,h_j)), for the
         // I4b timestep limiter. Same density/grid machinery as the CFL vector.
         super::cfl::coupled_pairs(state, &self.density_cfg)
+    }
+
+    fn sf_fields(&self, state: &State) -> SfFields {
+        // The SPH fields the star-formation recipe reads (F5): gas ρ (reuse the
+        // adaptive-h density solve) and ∇·v (the divergence gather). Extract the
+        // gas subset, solve over it, scatter back to global indices; non-gas rows
+        // stay (0, 0). Transient — nothing stored (D2-clean).
+        let n = state.len();
+        let mut rho = vec![0.0; n];
+        let mut div_v = vec![0.0; n];
+        let gas: Vec<usize> = (0..n).filter(|&i| state.kind[i] == Species::Gas).collect();
+        if gas.is_empty() {
+            return SfFields { rho, div_v };
+        }
+        let gpos: Vec<DVec3> = gas.iter().map(|&i| state.pos[i]).collect();
+        let gvel: Vec<DVec3> = gas.iter().map(|&i| state.vel[i]).collect();
+        let gmass: Vec<f64> = gas.iter().map(|&i| state.mass[i]).collect();
+        // COLD-START density (h_init: None) — NOT the warm-started h_hint. ρ must
+        // be a pure function of positions so it is bit-reproducible by a fresh
+        // `density_adaptive(..., None)` (gated bit-exact against reference_density);
+        // a stale-h warm start would shift the converged h within bisection
+        // tolerance and break that. sf_fields runs once per snapshot interval (cold
+        // path), so the warm-start perf win is nil.
+        let dens = density_adaptive(&gpos, &gmass, &self.density_cfg, None);
+        let dv = velocity_divergence(&gpos, &gvel, &gmass, &dens.rho, &dens.h);
+        for (k, &i) in gas.iter().enumerate() {
+            rho[i] = dens.rho[k];
+            div_v[i] = dv[k];
+        }
+        SfFields { rho, div_v }
     }
 }

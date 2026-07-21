@@ -20,15 +20,13 @@
 
 use std::collections::BTreeSet;
 
-use galaxy_core::{
-    DVec3, LeapfrogKdk, ParticleId, Progenitor, Species, State, StaticBackground,
-};
+use galaxy_core::{DVec3, LeapfrogKdk, ParticleId, Progenitor, Species, State, StaticBackground};
 use galaxy_io::Header;
-use galaxy_sim::{
-    run, run_adaptive, run_individual, AdaptiveConfig, IndividualConfig, SimConfig,
-    SnapshotSink, StarFormationConfig, ThermalArm,
-};
 use galaxy_sim::SimError;
+use galaxy_sim::{
+    run, run_adaptive, run_individual, AdaptiveConfig, IndividualConfig, SimConfig, SnapshotSink,
+    StarFormationConfig, ThermalArm,
+};
 use galaxy_solvers::sph::{DensityConfig, Eos, GravitySph, HydroParams};
 use galaxy_solvers::BarnesHut;
 
@@ -116,7 +114,12 @@ fn decisive_sf(seed: u64) -> StarFormationConfig {
     }
 }
 
-fn sim_cfg(dt: f64, n_steps: u64, snapshot_every: u64, sf: Option<StarFormationConfig>) -> SimConfig {
+fn sim_cfg(
+    dt: f64,
+    n_steps: u64,
+    snapshot_every: u64,
+    sf: Option<StarFormationConfig>,
+) -> SimConfig {
     SimConfig {
         dt,
         n_steps,
@@ -351,7 +354,10 @@ fn cross_loop_same_conversion_set() {
 
     // The converted set is exactly the gas ids — on every loop, identically.
     assert_eq!(fixed_set, gas_ids, "fixed-dt converts exactly the gas set");
-    assert_eq!(adaptive_set, gas_ids, "adaptive converts exactly the gas set");
+    assert_eq!(
+        adaptive_set, gas_ids,
+        "adaptive converts exactly the gas set"
+    );
     assert_eq!(
         individual_set, gas_ids,
         "individual converts exactly the gas set"

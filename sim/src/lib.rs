@@ -140,7 +140,13 @@ pub fn run(
     for step in 1..=config.n_steps {
         integ.step(state, solver, bg, config.dt);
         if step % config.snapshot_every == 0 {
-            apply_star_formation(state, solver, config.sf.as_ref(), &mut sf_epoch, &mut last_sf_time);
+            apply_star_formation(
+                state,
+                solver,
+                config.sf.as_ref(),
+                &mut sf_epoch,
+                &mut last_sf_time,
+            );
             emit_snapshot(state, step, config, sink)?;
             emitted += 1;
             last_emitted_step = step;
@@ -149,7 +155,13 @@ pub fn run(
 
     // Always capture the final step, unless it already landed on the cadence.
     if last_emitted_step != config.n_steps {
-        apply_star_formation(state, solver, config.sf.as_ref(), &mut sf_epoch, &mut last_sf_time);
+        apply_star_formation(
+            state,
+            solver,
+            config.sf.as_ref(),
+            &mut sf_epoch,
+            &mut last_sf_time,
+        );
         emit_snapshot(state, config.n_steps, config, sink)?;
         emitted += 1;
     }
@@ -195,10 +207,17 @@ fn apply_star_formation(
     epoch: &mut u64,
     last_sf_time: &mut f64,
 ) {
-    let Some(_cfg) = sf else {
+    let Some(cfg) = sf else {
         return; // SF off ⇒ byte-identical to the pre-SF pipeline.
     };
-    todo!("S4 green: pull sf_fields + form_stars at the sync site")
+    // Pure SF-call ordinal (1, 2, …) and the sim-time since the previous call. Both
+    // are owned here so they cannot drift between the three loops.
+    *epoch += 1;
+    let dt_elapsed = state.time - *last_sf_time;
+    *last_sf_time = state.time;
+    // Transient, D2-clean SPH fields (ρ, ∇·v) — fresh Vecs, nothing stored on State.
+    let fields = solver.sf_fields(state);
+    form_stars(state, &fields.rho, &fields.div_v, dt_elapsed, cfg, *epoch);
 }
 
 /// Stamp a header for the current state and hand it to the sink.
@@ -419,7 +438,13 @@ pub fn run_adaptive(
         state.time = t_target;
         // SF fires once, at the synced output time (state.time == t_target is set), so
         // any formed star stamps `formation_time = t_target`.
-        apply_star_formation(state, solver, config.sf.as_ref(), &mut sf_epoch, &mut last_sf_time);
+        apply_star_formation(
+            state,
+            solver,
+            config.sf.as_ref(),
+            &mut sf_epoch,
+            &mut last_sf_time,
+        );
         emit_adaptive(state, k, config, sink)?;
         emitted += 1;
     }
@@ -778,7 +803,13 @@ pub fn run_individual(
         state.time = t_target;
         // SF fires once, at the synced output time (all rungs consistent, state.time ==
         // t_target set), so any formed star stamps `formation_time = t_target`.
-        apply_star_formation(state, solver, config.sf.as_ref(), &mut sf_epoch, &mut last_sf_time);
+        apply_star_formation(
+            state,
+            solver,
+            config.sf.as_ref(),
+            &mut sf_epoch,
+            &mut last_sf_time,
+        );
         emit_individual(state, k, config, sink)?;
         emitted += 1;
     }
